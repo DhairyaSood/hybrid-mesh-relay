@@ -29,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
@@ -46,7 +47,8 @@ fun HomeScreen(
     onDevicesClick: () -> Unit,
     onDiagnosticsClick: () -> Unit,
     onNewMessage: () -> Unit,
-    onMessageClick: () -> Unit
+    onMessageClick: () -> Unit,
+    onProfileClick: () -> Unit
 ) {
     LazyColumn(
         modifier = Modifier
@@ -56,33 +58,79 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
 
+        // ----------------------------------------------------------------
+        // HEADER
+        // ----------------------------------------------------------------
         item {
-            Spacer(modifier = Modifier.height(14.dp))
-
-            Text(
-                text = "HYBRID MESH RELAY",
-                style = MaterialTheme.typography.displaySmall
+            Spacer(
+                modifier = Modifier.height(14.dp)
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
 
-            Text(
-                text = "Resilient communication network",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium
-            )
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = "HYBRID MESH RELAY",
+                        style = MaterialTheme.typography.displaySmall
+                    )
+
+                    Spacer(
+                        modifier = Modifier.height(4.dp)
+                    )
+
+                    Text(
+                        text = "Resilient communication network",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+
+                Spacer(
+                    modifier = Modifier.height(1.dp)
+                )
+
+                Text(
+                    text = "PROFILE",
+                    color = RelayAccent,
+                    style = TechnicalTextStyle,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable(
+                            onClick = onProfileClick
+                        )
+                        .padding(
+                            horizontal = 8.dp,
+                            vertical = 8.dp
+                        )
+                )
+            }
         }
 
+        // ----------------------------------------------------------------
+        // NETWORK STATUS
+        // ----------------------------------------------------------------
         item {
             NetworkStatusCard(
                 onClick = onNetworkClick
             )
         }
 
+        // ----------------------------------------------------------------
+        // LOCAL MESH PREVIEW
+        // ----------------------------------------------------------------
         item {
             MeshPreview()
         }
 
+        // ----------------------------------------------------------------
+        // RECENT MESSAGES HEADER
+        // ----------------------------------------------------------------
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -105,6 +153,9 @@ fun HomeScreen(
             }
         }
 
+        // ----------------------------------------------------------------
+        // RECENT MESSAGE 1
+        // ----------------------------------------------------------------
         item {
             RecentMessage(
                 sender = "Alex",
@@ -116,6 +167,9 @@ fun HomeScreen(
             )
         }
 
+        // ----------------------------------------------------------------
+        // RECENT MESSAGE 2
+        // ----------------------------------------------------------------
         item {
             RecentMessage(
                 sender = "Maya",
@@ -127,6 +181,9 @@ fun HomeScreen(
             )
         }
 
+        // ----------------------------------------------------------------
+        // RECENT MESSAGE 3
+        // ----------------------------------------------------------------
         item {
             RecentMessage(
                 sender = "Sam",
@@ -138,8 +195,13 @@ fun HomeScreen(
             )
         }
 
+        // ----------------------------------------------------------------
+        // NEW MESSAGE BUTTON
+        // ----------------------------------------------------------------
         item {
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(
+                modifier = Modifier.height(4.dp)
+            )
 
             Button(
                 onClick = onNewMessage,
@@ -158,7 +220,9 @@ fun HomeScreen(
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(
+                modifier = Modifier.height(12.dp)
+            )
         }
     }
 }
@@ -179,7 +243,9 @@ private fun NetworkStatusCard(
                 color = RelayBorder,
                 shape = RoundedCornerShape(18.dp)
             )
-            .clickable(onClick = onClick)
+            .clickable(
+                onClick = onClick
+            )
             .padding(18.dp)
     ) {
 
@@ -187,6 +253,7 @@ private fun NetworkStatusCard(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
+
             Column {
                 Text(
                     text = "NETWORK STATUS",
@@ -194,7 +261,9 @@ private fun NetworkStatusCard(
                     style = TechnicalTextStyle
                 )
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(
+                    modifier = Modifier.height(6.dp)
+                )
 
                 Text(
                     text = "Connected",
@@ -210,7 +279,9 @@ private fun NetworkStatusCard(
             )
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(
+            modifier = Modifier.height(16.dp)
+        )
 
         StatusRow(
             label = "Internet",
@@ -297,7 +368,9 @@ private fun MeshPreview() {
             style = TechnicalTextStyle
         )
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(
+            modifier = Modifier.height(10.dp)
+        )
 
         Box(
             modifier = Modifier
@@ -335,7 +408,9 @@ private fun MeshPreview() {
 
                 nodes.forEach { node ->
                     drawLine(
-                        color = RelayNodeInactive.copy(alpha = 0.7f),
+                        color = RelayNodeInactive.copy(
+                            alpha = 0.7f
+                        ),
                         start = center,
                         end = node,
                         strokeWidth = 2.dp.toPx(),
@@ -346,7 +421,9 @@ private fun MeshPreview() {
                 }
 
                 drawCircle(
-                    color = RelayAccent.copy(alpha = pulse),
+                    color = RelayAccent.copy(
+                        alpha = pulse
+                    ),
                     radius = 12.dp.toPx(),
                     center = center
                 )
@@ -362,7 +439,9 @@ private fun MeshPreview() {
 
             Text(
                 text = "YOU",
-                modifier = Modifier.align(Alignment.Center),
+                modifier = Modifier.align(
+                    Alignment.Center
+                ),
                 color = RelayBackground,
                 style = TechnicalTextStyle
             )
@@ -397,7 +476,9 @@ private fun RecentMessage(
                 color = RelayBorder,
                 shape = RoundedCornerShape(14.dp)
             )
-            .clickable(onClick = onClick)
+            .clickable(
+                onClick = onClick
+            )
             .padding(15.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
@@ -405,12 +486,15 @@ private fun RecentMessage(
         Column(
             modifier = Modifier.weight(1f)
         ) {
+
             Text(
                 text = sender,
                 style = MaterialTheme.typography.titleMedium
             )
 
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(
+                modifier = Modifier.height(3.dp)
+            )
 
             Text(
                 text = preview,
@@ -418,7 +502,9 @@ private fun RecentMessage(
                 style = MaterialTheme.typography.bodyMedium
             )
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(
+                modifier = Modifier.height(6.dp)
+            )
 
             Text(
                 text = "$transport • $state",

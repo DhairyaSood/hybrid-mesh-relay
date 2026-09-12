@@ -11,91 +11,118 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.model.Message
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 
 @Composable
-fun MessageDetailScreen() {
+fun MessageDetailScreen(
+    messageId: String
+) {
+    val viewModel: MessagesViewModel = viewModel()
+
+    val messages by viewModel.messages.collectAsState()
+
+    val message = messages.firstOrNull {
+        it.id == messageId
+    }
+
+    if (message == null) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(RelayBackground)
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Message unavailable",
+                style = MaterialTheme.typography.titleLarge
+            )
+
+            Text(
+                text = "This message is no longer available on the device.",
+                color = RelayTextMuted,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+
+        return
+    }
+
+    ActualMessageDetail(
+        message = message
+    )
+}
+
+@Composable
+private fun ActualMessageDetail(
+    message: Message
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(RelayBackground)
             .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
 
         Text(
-            text = "Alex",
+            text = message.recipientId,
             style = MaterialTheme.typography.titleLarge
         )
 
         Text(
-            text = "Conversation",
+            text = "Message",
             color = RelayTextMuted,
             style = MaterialTheme.typography.bodySmall
         )
 
         MessageBubble(
-            text = "Reached the campsite.",
-            mine = false,
-            transport = "BLE • DELIVERED • 10:42"
-        )
-
-        MessageBubble(
-            text = "Nice. I'll head over soon.",
-            mine = true,
-            transport = "RELAY • DELIVERED • 10:44"
+            message = message
         )
     }
 }
 
 @Composable
 private fun MessageBubble(
-    text: String,
-    mine: Boolean,
-    transport: String
+    message: Message
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (mine) {
-            Arrangement.End
-        } else {
-            Arrangement.Start
-        }
+        horizontalArrangement = Arrangement.End
     ) {
         Column(
-            horizontalAlignment = if (mine) {
-                Alignment.End
-            } else {
-                Alignment.Start
-            }
+            horizontalAlignment = Alignment.End
         ) {
+
             Column(
                 modifier = Modifier
                     .background(
-                        if (mine) RelayAccent else RelaySurface,
-                        RoundedCornerShape(16.dp)
+                        color = RelayAccent,
+                        shape = RoundedCornerShape(16.dp)
                     )
                     .padding(14.dp)
             ) {
                 Text(
-                    text = text,
-                    color = if (mine) {
-                        RelayBackground
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    }
+                    text = message.content,
+                    color = RelayBackground,
+                    style = MaterialTheme.typography.bodyLarge
                 )
             }
 
             Text(
-                text = transport,
+                text = "${message.status.name} • ${message.type.name}",
                 color = RelayTextMuted,
                 style = TechnicalTextStyle,
                 modifier = Modifier.padding(top = 5.dp)

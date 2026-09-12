@@ -11,12 +11,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.hybridmesh.relay.ui.ComposeMessageScreen
 import com.hybridmesh.relay.ui.DiagnosticsScreen
@@ -25,6 +29,7 @@ import com.hybridmesh.relay.ui.HomeScreen
 import com.hybridmesh.relay.ui.MessageDetailScreen
 import com.hybridmesh.relay.ui.MessagesScreen
 import com.hybridmesh.relay.ui.NetworkScreen
+import com.hybridmesh.relay.ui.ProfileScreen
 import com.hybridmesh.relay.ui.components.AppBottomBar
 import com.hybridmesh.relay.ui.components.AppStatusStrip
 import com.hybridmesh.relay.ui.theme.HybridMeshRelayTheme
@@ -51,7 +56,8 @@ enum class AppScreen(
     DEVICES("Devices"),
     DIAGNOSTICS("Diagnostics"),
     COMPOSE("New Message"),
-    MESSAGE_DETAIL("Conversation")
+    MESSAGE_DETAIL("Conversation"),
+    PROFILE("Device Profile")
 }
 
 private val primaryScreens = setOf(
@@ -70,6 +76,10 @@ fun HybridMeshRelayApp() {
         mutableStateListOf(AppScreen.HOME)
     }
 
+    var selectedMessageId by remember {
+        mutableStateOf<String?>(null)
+    }
+
     val currentScreen = navigationStack.last()
     val isNestedScreen = currentScreen !in primaryScreens
 
@@ -82,10 +92,23 @@ fun HybridMeshRelayApp() {
         navigationStack.add(screen)
     }
 
+    fun goBack() {
+        if (navigationStack.size > 1) {
+            navigationStack.removeAt(
+                navigationStack.lastIndex
+            )
+        }
+    }
+
+    fun openMessage(messageId: String) {
+        selectedMessageId = messageId
+        navigateTo(AppScreen.MESSAGE_DETAIL)
+    }
+
     BackHandler(
         enabled = navigationStack.size > 1
     ) {
-        navigationStack.removeAt(navigationStack.lastIndex)
+        goBack()
     }
 
     Scaffold(
@@ -97,13 +120,12 @@ fun HybridMeshRelayApp() {
                     },
                     navigationIcon = {
                         IconButton(
-                            onClick = {
-                                navigationStack.removeAt(
-                                    navigationStack.lastIndex
-                                )
-                            }
+                            onClick = ::goBack
                         ) {
-                            Text("‹")
+                            Text(
+                                text = "‹",
+                                style = MaterialTheme.typography.headlineSmall
+                            )
                         }
                     }
                 )
@@ -123,7 +145,7 @@ fun HybridMeshRelayApp() {
             modifier = Modifier
                 .fillMaxSize()
                 .background(
-                    androidx.compose.material3.MaterialTheme.colorScheme.background
+                    MaterialTheme.colorScheme.background
                 )
                 .padding(paddingValues)
         ) {
@@ -137,8 +159,12 @@ fun HybridMeshRelayApp() {
             ) {
                 AppScreenContent(
                     screen = currentScreen,
+                    selectedMessageId = selectedMessageId,
                     onNavigate = ::navigateTo,
-                    onNavigateToTab = ::navigateToTab
+                    onNavigateToTab = ::navigateToTab,
+                    onMessageSent = ::goBack,
+                    onMessageSelected = ::openMessage,
+                    onBack = ::goBack
                 )
             }
         }
@@ -148,8 +174,12 @@ fun HybridMeshRelayApp() {
 @Composable
 private fun AppScreenContent(
     screen: AppScreen,
+    selectedMessageId: String?,
     onNavigate: (AppScreen) -> Unit,
-    onNavigateToTab: (AppScreen) -> Unit
+    onNavigateToTab: (AppScreen) -> Unit,
+    onMessageSent: () -> Unit,
+    onMessageSelected: (String) -> Unit,
+    onBack: () -> Unit
 ) {
     when (screen) {
 
@@ -170,7 +200,10 @@ private fun AppScreenContent(
                 onNavigate(AppScreen.COMPOSE)
             },
             onMessageClick = {
-                onNavigate(AppScreen.MESSAGE_DETAIL)
+                onNavigateToTab(AppScreen.MESSAGES)
+            },
+            onProfileClick = {
+                onNavigate(AppScreen.PROFILE)
             }
         )
 
@@ -178,8 +211,8 @@ private fun AppScreenContent(
             onNewMessage = {
                 onNavigate(AppScreen.COMPOSE)
             },
-            onConversationClick = {
-                onNavigate(AppScreen.MESSAGE_DETAIL)
+            onConversationClick = { messageId ->
+                onMessageSelected(messageId)
             }
         )
 
@@ -189,8 +222,20 @@ private fun AppScreenContent(
 
         AppScreen.DIAGNOSTICS -> DiagnosticsScreen()
 
-        AppScreen.COMPOSE -> ComposeMessageScreen()
+        AppScreen.COMPOSE -> ComposeMessageScreen(
+            onMessageSent = onMessageSent
+        )
 
-        AppScreen.MESSAGE_DETAIL -> MessageDetailScreen()
+        AppScreen.MESSAGE_DETAIL -> {
+            if (selectedMessageId != null) {
+                MessageDetailScreen(
+                    messageId = selectedMessageId
+                )
+            }
+        }
+
+        AppScreen.PROFILE -> ProfileScreen(
+            onBack = onBack
+        )
     }
 }

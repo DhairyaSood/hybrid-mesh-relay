@@ -15,13 +15,17 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
@@ -29,6 +33,7 @@ import com.hybridmesh.relay.ui.theme.RelayEmergency
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 
 private enum class Priority {
     NORMAL,
@@ -37,9 +42,22 @@ private enum class Priority {
 }
 
 @Composable
-fun ComposeMessageScreen() {
+fun ComposeMessageScreen(
+    onMessageSent: () -> Unit
+) {
+    val viewModel: MessagesViewModel = viewModel()
 
-    var priority by mutableStateOf(Priority.NORMAL)
+    var recipient by remember {
+        mutableStateOf("")
+    }
+
+    var messageText by remember {
+        mutableStateOf("")
+    }
+
+    var priority by remember {
+        mutableStateOf(Priority.NORMAL)
+    }
 
     Column(
         modifier = Modifier
@@ -55,7 +73,7 @@ fun ComposeMessageScreen() {
         )
 
         Text(
-            text = "Choose how this message should be handled.",
+            text = "Send a message using the best available communication path.",
             color = RelayTextMuted,
             style = MaterialTheme.typography.bodyMedium
         )
@@ -66,13 +84,18 @@ fun ComposeMessageScreen() {
             style = TechnicalTextStyle
         )
 
-        OutlinedButton(
-            onClick = { },
+        OutlinedTextField(
+            value = recipient,
+            onValueChange = {
+                recipient = it
+            },
             modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            placeholder = {
+                Text("Enter node ID or contact")
+            },
             shape = RoundedCornerShape(12.dp)
-        ) {
-            Text("Select contact")
-        }
+        )
 
         Text(
             text = "MESSAGE",
@@ -80,27 +103,20 @@ fun ComposeMessageScreen() {
             style = TechnicalTextStyle
         )
 
-        Column(
+        OutlinedTextField(
+            value = messageText,
+            onValueChange = {
+                messageText = it
+            },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(140.dp)
-                .background(
-                    color = RelaySurface,
-                    shape = RoundedCornerShape(14.dp)
-                )
-                .border(
-                    width = 1.dp,
-                    color = RelayBorder,
-                    shape = RoundedCornerShape(14.dp)
-                )
-                .padding(16.dp)
-        ) {
-            Text(
-                text = "Type your message…",
-                color = RelayTextMuted,
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
+                .height(140.dp),
+            placeholder = {
+                Text("Type your message…")
+            },
+            shape = RoundedCornerShape(14.dp),
+            maxLines = 6
+        )
 
         Text(
             text = "PRIORITY",
@@ -112,6 +128,7 @@ fun ComposeMessageScreen() {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+
             PriorityButton(
                 text = "Normal",
                 selected = priority == Priority.NORMAL,
@@ -146,13 +163,30 @@ fun ComposeMessageScreen() {
         )
 
         Button(
-            onClick = { },
+            onClick = {
+
+                val type = when (priority) {
+                    Priority.NORMAL -> MessageType.NORMAL
+                    Priority.PRIORITY -> MessageType.PRIORITY
+                    Priority.EMERGENCY -> MessageType.EMERGENCY
+                }
+
+                viewModel.sendMessage(
+                    recipientId = recipient,
+                    content = messageText,
+                    type = type,
+                    onSaved = onMessageSent
+                )
+            },
+            enabled = recipient.isNotBlank() && messageText.isNotBlank(),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(54.dp),
             shape = RoundedCornerShape(14.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (priority == Priority.EMERGENCY) {
+                containerColor = if (
+                    priority == Priority.EMERGENCY
+                ) {
                     RelayEmergency
                 } else {
                     RelayAccent

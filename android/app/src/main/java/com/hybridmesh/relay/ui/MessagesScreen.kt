@@ -17,19 +17,31 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.model.Message
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
+import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun MessagesScreen(
     onNewMessage: () -> Unit,
-    onConversationClick: () -> Unit
+    onConversationClick: (String) -> Unit
 ) {
+    val viewModel: MessagesViewModel = viewModel()
+    val messages by viewModel.messages.collectAsState()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -49,33 +61,46 @@ fun MessagesScreen(
             style = MaterialTheme.typography.bodyMedium
         )
 
-        Spacer(modifier = Modifier.height(4.dp))
-
-        MessageListItem(
-            name = "Alex",
-            message = "Reached the campsite.",
-            time = "10:42",
-            state = "DELIVERED • BLE",
-            onClick = onConversationClick
+        Spacer(
+            modifier = Modifier.height(4.dp)
         )
 
-        MessageListItem(
-            name = "Maya",
-            message = "Where are you?",
-            time = "10:45",
-            state = "DELIVERED • RELAY",
-            onClick = onConversationClick
-        )
+        if (messages.isEmpty()) {
 
-        MessageListItem(
-            name = "Sam",
-            message = "I'll send the location shortly.",
-            time = "11:02",
-            state = "QUEUED • MESH",
-            onClick = onConversationClick
-        )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 48.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "No messages yet.",
+                    style = MaterialTheme.typography.titleMedium
+                )
 
-        Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = "Messages you create will be stored locally on this device.",
+                    color = RelayTextMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
+        } else {
+
+            messages.forEach { message ->
+
+                MessageListItem(
+                    message = message,
+                    onClick = {
+                        onConversationClick(message.id)
+                    }
+                )
+            }
+        }
+
+        Spacer(
+            modifier = Modifier.weight(1f)
+        )
 
         Button(
             onClick = onNewMessage,
@@ -88,29 +113,33 @@ fun MessagesScreen(
                 contentColor = RelayBackground
             )
         ) {
-            Text("New Message")
+            Text(
+                text = "New Message"
+            )
         }
     }
 }
 
 @Composable
 private fun MessageListItem(
-    name: String,
-    message: String,
-    time: String,
-    state: String,
+    message: Message,
     onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(RelaySurface, RoundedCornerShape(14.dp))
-            .border(
-                1.dp,
-                RelayBorder,
-                RoundedCornerShape(14.dp)
+            .background(
+                color = RelaySurface,
+                shape = RoundedCornerShape(14.dp)
             )
-            .clickable(onClick = onClick)
+            .border(
+                width = 1.dp,
+                color = RelayBorder,
+                shape = RoundedCornerShape(14.dp)
+            )
+            .clickable(
+                onClick = onClick
+            )
             .padding(16.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
@@ -118,32 +147,48 @@ private fun MessageListItem(
         Column(
             modifier = Modifier.weight(1f)
         ) {
+
             Text(
-                text = name,
+                text = message.recipientId,
                 style = MaterialTheme.typography.titleMedium
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(
+                modifier = Modifier.height(4.dp)
+            )
 
             Text(
-                text = message,
+                text = message.content,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium
             )
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(
+                modifier = Modifier.height(6.dp)
+            )
 
             Text(
-                text = state,
+                text = "${message.status.name} • ${message.type.name}",
                 color = RelayTextMuted,
-                style = MaterialTheme.typography.labelSmall
+                style = TechnicalTextStyle
             )
         }
 
         Text(
-            text = time,
+            text = formatMessageTime(message.timestamp),
             color = RelayTextMuted,
-            style = MaterialTheme.typography.bodySmall
+            style = MaterialTheme.typography.labelSmall
         )
     }
+}
+
+private fun formatMessageTime(
+    timestamp: Long
+): String {
+    return SimpleDateFormat(
+        "HH:mm",
+        Locale.getDefault()
+    ).format(
+        Date(timestamp)
+    )
 }
