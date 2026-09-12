@@ -31,14 +31,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.ble.BleOperationState
+import com.hybridmesh.relay.ble.BlePeer
+import com.hybridmesh.relay.data.IdentityStore
+import com.hybridmesh.relay.model.Message
+import com.hybridmesh.relay.network.BluetoothState
+import com.hybridmesh.relay.network.NetworkManager
+import com.hybridmesh.relay.network.NetworkState
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
 import com.hybridmesh.relay.ui.theme.RelayNode
-import com.hybridmesh.relay.ui.theme.RelayNodeInactive
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.sin
 
 @Composable
 fun HomeScreen(
@@ -47,62 +61,102 @@ fun HomeScreen(
     onDevicesClick: () -> Unit,
     onDiagnosticsClick: () -> Unit,
     onNewMessage: () -> Unit,
-    onMessageClick: () -> Unit,
+    onMessageClick: (String) -> Unit,
     onProfileClick: () -> Unit
 ) {
+    val context =
+        androidx.compose.ui.platform.LocalContext.current
+
+    val networkManager =
+        NetworkManager.getInstance(context)
+
+    val networkState by
+        networkManager.state
+            .collectAsStateWithLifecycle()
+
+    val messagesViewModel:
+            MessagesViewModel =
+        viewModel()
+
+    val messages by
+        messagesViewModel.messages
+            .collectAsStateWithLifecycle()
+
+    val localNodeId =
+        IdentityStore(context)
+            .getIdentity()
+            .nodeId
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .background(RelayBackground)
             .padding(horizontal = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement =
+            Arrangement.spacedBy(16.dp)
     ) {
 
-        // ----------------------------------------------------------------
-        // HEADER
-        // ----------------------------------------------------------------
         item {
+
             Spacer(
-                modifier = Modifier.height(14.dp)
+                modifier =
+                    Modifier.height(14.dp)
             )
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                modifier =
+                    Modifier.fillMaxWidth(),
+                horizontalArrangement =
+                    Arrangement.SpaceBetween,
+                verticalAlignment =
+                    Alignment.CenterVertically
             ) {
 
                 Column(
-                    modifier = Modifier.weight(1f)
+                    modifier =
+                        Modifier.weight(1f)
                 ) {
+
                     Text(
-                        text = "HYBRID MESH RELAY",
-                        style = MaterialTheme.typography.displaySmall
+                        text =
+                            "HYBRID MESH RELAY",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .displaySmall
                     )
 
                     Spacer(
-                        modifier = Modifier.height(4.dp)
+                        modifier =
+                            Modifier.height(4.dp)
                     )
 
                     Text(
-                        text = "Resilient communication network",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.bodyMedium
+                        text =
+                            "Resilient communication network",
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant,
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodyMedium
                     )
                 }
 
-                Spacer(
-                    modifier = Modifier.height(1.dp)
-                )
-
                 Text(
                     text = "PROFILE",
-                    color = RelayAccent,
-                    style = TechnicalTextStyle,
-                    fontWeight = FontWeight.Bold,
+                    color =
+                        RelayAccent,
+                    style =
+                        TechnicalTextStyle,
+                    fontWeight =
+                        FontWeight.Bold,
                     modifier = Modifier
                         .clickable(
-                            onClick = onProfileClick
+                            onClick =
+                                onProfileClick
                         )
                         .padding(
                             horizontal = 8.dp,
@@ -112,95 +166,90 @@ fun HomeScreen(
             }
         }
 
-        // ----------------------------------------------------------------
-        // NETWORK STATUS
-        // ----------------------------------------------------------------
         item {
             NetworkStatusCard(
-                onClick = onNetworkClick
+                state = networkState,
+                onClick =
+                    onNetworkClick
             )
         }
 
-        // ----------------------------------------------------------------
-        // LOCAL MESH PREVIEW
-        // ----------------------------------------------------------------
         item {
-            MeshPreview()
+            MeshPreview(
+                peers =
+                    networkState.peers
+            )
         }
 
-        // ----------------------------------------------------------------
-        // RECENT MESSAGES HEADER
-        // ----------------------------------------------------------------
         item {
+
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                modifier =
+                    Modifier.fillMaxWidth(),
+                horizontalArrangement =
+                    Arrangement.SpaceBetween,
+                verticalAlignment =
+                    Alignment.CenterVertically
             ) {
+
                 Text(
-                    text = "Recent messages",
-                    style = MaterialTheme.typography.titleMedium
+                    text =
+                        "Recent messages",
+                    style =
+                        MaterialTheme
+                            .typography
+                            .titleMedium
                 )
 
                 Text(
                     text = "VIEW ALL",
-                    color = RelayAccent,
-                    style = TechnicalTextStyle,
-                    modifier = Modifier.clickable(
-                        onClick = onMessagesClick
-                    )
+                    color =
+                        RelayAccent,
+                    style =
+                        TechnicalTextStyle,
+                    modifier =
+                        Modifier.clickable(
+                            onClick =
+                                onMessagesClick
+                        )
                 )
             }
         }
 
-        // ----------------------------------------------------------------
-        // RECENT MESSAGE 1
-        // ----------------------------------------------------------------
-        item {
-            RecentMessage(
-                sender = "Alex",
-                preview = "Reached the campsite.",
-                time = "10:42",
-                transport = "BLE",
-                state = "DELIVERED",
-                onClick = onMessageClick
-            )
+        if (messages.isEmpty()) {
+
+            item {
+                EmptyRecentMessages()
+            }
+
+        } else {
+
+            messages
+                .take(3)
+                .forEach { message ->
+
+                    item(
+                        key = message.id
+                    ) {
+                        RecentMessage(
+                            message = message,
+                            localNodeId =
+                                localNodeId,
+                            onClick = {
+                                onMessageClick(
+                                    message.id
+                                )
+                            }
+                        )
+                    }
+                }
         }
 
-        // ----------------------------------------------------------------
-        // RECENT MESSAGE 2
-        // ----------------------------------------------------------------
         item {
-            RecentMessage(
-                sender = "Maya",
-                preview = "Where are you?",
-                time = "10:45",
-                transport = "RELAY",
-                state = "DELIVERED",
-                onClick = onMessageClick
-            )
-        }
 
-        // ----------------------------------------------------------------
-        // RECENT MESSAGE 3
-        // ----------------------------------------------------------------
-        item {
-            RecentMessage(
-                sender = "Sam",
-                preview = "I'll send the location shortly.",
-                time = "11:02",
-                transport = "MESH",
-                state = "QUEUED",
-                onClick = onMessageClick
-            )
-        }
-
-        // ----------------------------------------------------------------
-        // NEW MESSAGE BUTTON
-        // ----------------------------------------------------------------
-        item {
             Spacer(
-                modifier = Modifier.height(4.dp)
+                modifier =
+                    Modifier.height(4.dp)
             )
 
             Button(
@@ -208,20 +257,29 @@ fun HomeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(56.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = RelayAccent,
-                    contentColor = RelayBackground
-                )
+                shape =
+                    RoundedCornerShape(14.dp),
+                colors =
+                    ButtonDefaults
+                        .buttonColors(
+                            containerColor =
+                                RelayAccent,
+                            contentColor =
+                                RelayBackground
+                        )
             ) {
                 Text(
                     text = "New Message",
-                    style = MaterialTheme.typography.labelLarge
+                    style =
+                        MaterialTheme
+                            .typography
+                            .labelLarge
                 )
             }
 
             Spacer(
-                modifier = Modifier.height(12.dp)
+                modifier =
+                    Modifier.height(12.dp)
             )
         }
     }
@@ -229,19 +287,20 @@ fun HomeScreen(
 
 @Composable
 private fun NetworkStatusCard(
+    state: NetworkState,
     onClick: () -> Unit
 ) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                color = RelaySurface,
-                shape = RoundedCornerShape(18.dp)
+                RelaySurface,
+                RoundedCornerShape(18.dp)
             )
             .border(
-                width = 1.dp,
-                color = RelayBorder,
-                shape = RoundedCornerShape(18.dp)
+                1.dp,
+                RelayBorder,
+                RoundedCornerShape(18.dp)
             )
             .clickable(
                 onClick = onClick
@@ -250,57 +309,515 @@ private fun NetworkStatusCard(
     ) {
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            modifier =
+                Modifier.fillMaxWidth(),
+            horizontalArrangement =
+                Arrangement.SpaceBetween
         ) {
 
             Column {
                 Text(
-                    text = "NETWORK STATUS",
-                    color = RelayTextMuted,
-                    style = TechnicalTextStyle
+                    text =
+                        "NETWORK STATUS",
+                    color =
+                        RelayTextMuted,
+                    style =
+                        TechnicalTextStyle
                 )
 
                 Spacer(
-                    modifier = Modifier.height(6.dp)
+                    modifier =
+                        Modifier.height(6.dp)
                 )
 
                 Text(
-                    text = "Connected",
-                    color = RelayAccent,
-                    style = MaterialTheme.typography.titleLarge
+                    text =
+                        networkSummary(
+                            state
+                        ),
+                    color =
+                        when (
+                            state.bluetoothState
+                        ) {
+                            BluetoothState.ON ->
+                                RelayAccent
+
+                            else ->
+                                MaterialTheme
+                                    .colorScheme
+                                    .error
+                        },
+                    style =
+                        MaterialTheme
+                            .typography
+                            .titleLarge
                 )
             }
 
             Text(
-                text = "●",
-                color = RelayAccent,
-                style = MaterialTheme.typography.titleLarge
+                text =
+                    if (
+                        state.bluetoothState ==
+                            BluetoothState.ON
+                    ) {
+                        "●"
+                    } else {
+                        "○"
+                    },
+                color =
+                    if (
+                        state.bluetoothState ==
+                            BluetoothState.ON
+                    ) {
+                        RelayAccent
+                    } else {
+                        MaterialTheme
+                            .colorScheme
+                            .error
+                    },
+                style =
+                    MaterialTheme
+                        .typography
+                        .titleLarge
             )
         }
 
         Spacer(
-            modifier = Modifier.height(16.dp)
+            modifier =
+                Modifier.height(16.dp)
         )
 
         StatusRow(
             label = "Internet",
-            value = "AVAILABLE"
+            value =
+                if (
+                    state.internetAvailable
+                ) {
+                    "ONLINE"
+                } else {
+                    "OFFLINE"
+                }
+        )
+
+        StatusRow(
+            label = "Bluetooth",
+            value =
+                when (
+                    state.bluetoothState
+                ) {
+                    BluetoothState.ON ->
+                        "ON"
+
+                    BluetoothState.OFF ->
+                        "OFF"
+
+                    BluetoothState.UNSUPPORTED ->
+                        "UNSUPPORTED"
+                }
+        )
+
+        StatusRow(
+            label = "BLE discovery",
+            value =
+                when (
+                    state.scanningState
+                ) {
+                    BleOperationState.ACTIVE ->
+                        "ACTIVE"
+
+                    BleOperationState.STARTING ->
+                        "STARTING"
+
+                    else ->
+                        "IDLE"
+                }
         )
 
         StatusRow(
             label = "Nearby devices",
-            value = "03"
+            value =
+                state.nearbyDeviceCount
+                    .toString()
         )
 
         StatusRow(
             label = "Relay nodes",
-            value = "01"
+            value =
+                state.relayNodeCount
+                    .toString()
+        )
+    }
+}
+
+@Composable
+private fun MeshPreview(
+    peers: List<BlePeer>
+) {
+
+    val transition =
+        rememberInfiniteTransition(
+            label = "meshPulse"
         )
 
-        StatusRow(
-            label = "Mesh",
-            value = "READY"
+    val pulse by
+        transition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec =
+                infiniteRepeatable(
+                    animation =
+                        tween(1600),
+                    repeatMode =
+                        RepeatMode.Reverse
+                ),
+            label = "pulse"
+        )
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                RelaySurface,
+                RoundedCornerShape(18.dp)
+            )
+            .border(
+                1.dp,
+                RelayBorder,
+                RoundedCornerShape(18.dp)
+            )
+            .padding(16.dp)
+    ) {
+
+        Text(
+            text = "LOCAL MESH",
+            color =
+                RelayTextMuted,
+            style =
+                TechnicalTextStyle
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(10.dp)
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(180.dp)
+        ) {
+
+            Canvas(
+                modifier =
+                    Modifier.fillMaxSize()
+            ) {
+
+                val center =
+                    androidx.compose.ui.geometry.Offset(
+                        size.width * 0.5f,
+                        size.height * 0.5f
+                    )
+
+                val visiblePeers =
+                    peers.take(8)
+
+                visiblePeers
+                    .forEachIndexed { index, peer ->
+
+                        val angle =
+                            (
+                                2.0 *
+                                    Math.PI *
+                                    index /
+                                    visiblePeers.size
+                            ) -
+                            Math.PI / 2.0
+
+                        val radius =
+                            minOf(
+                                size.width,
+                                size.height
+                            ) * 0.31f
+
+                        val node =
+                            androidx.compose.ui.geometry.Offset(
+                                x =
+                                    center.x +
+                                        radius *
+                                        cos(angle)
+                                            .toFloat(),
+
+                                y =
+                                    center.y +
+                                        radius *
+                                        sin(angle)
+                                            .toFloat()
+                            )
+
+                        drawLine(
+                            color =
+                                RelayTextMuted
+                                    .copy(
+                                        alpha = 0.45f
+                                    ),
+                            start =
+                                center,
+                            end =
+                                node,
+                            strokeWidth =
+                                2.dp.toPx(),
+                            pathEffect =
+                                PathEffect
+                                    .dashPathEffect(
+                                        floatArrayOf(
+                                            10f,
+                                            10f
+                                        )
+                                    )
+                        )
+
+                        drawCircle(
+                            color =
+                                RelayNode,
+                            radius =
+                                7.dp.toPx(),
+                            center =
+                                node
+                        )
+                    }
+
+                drawCircle(
+                    color =
+                        RelayAccent.copy(
+                            alpha = pulse
+                        ),
+                    radius =
+                        12.dp.toPx(),
+                    center =
+                        center
+                )
+            }
+
+            Text(
+                text = "YOU",
+                modifier =
+                    Modifier.align(
+                        Alignment.Center
+                    ),
+                color =
+                    RelayBackground,
+                style =
+                    TechnicalTextStyle
+            )
+
+            if (peers.isEmpty()) {
+                Text(
+                    text =
+                        "No nearby nodes",
+                    modifier =
+                        Modifier
+                            .align(
+                                Alignment.BottomCenter
+                            )
+                            .padding(
+                                bottom = 4.dp
+                            ),
+                    color =
+                        RelayTextMuted,
+                    style =
+                        MaterialTheme
+                            .typography
+                            .bodySmall
+                )
+            }
+        }
+
+        Spacer(
+            modifier =
+                Modifier.height(6.dp)
+        )
+
+        Text(
+            text =
+                "${peers.size} nearby node" +
+                    if (
+                        peers.size == 1
+                    ) {
+                        ""
+                    } else {
+                        "s"
+                    },
+            color =
+                RelayTextMuted,
+            style =
+                MaterialTheme
+                    .typography
+                    .bodySmall
+        )
+    }
+}
+
+@Composable
+private fun EmptyRecentMessages() {
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                RelaySurface,
+                RoundedCornerShape(14.dp)
+            )
+            .border(
+                1.dp,
+                RelayBorder,
+                RoundedCornerShape(14.dp)
+            )
+            .padding(18.dp)
+    ) {
+
+        Text(
+            text =
+                "NO RECENT MESSAGES",
+            style =
+                TechnicalTextStyle,
+            color =
+                RelayTextMuted,
+            fontWeight =
+                FontWeight.Bold
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(6.dp)
+        )
+
+        Text(
+            text =
+                "Messages you send or receive will appear here.",
+            color =
+                MaterialTheme
+                    .colorScheme
+                    .onSurfaceVariant,
+            style =
+                MaterialTheme
+                    .typography
+                    .bodyMedium
+        )
+    }
+}
+
+@Composable
+private fun RecentMessage(
+    message: Message,
+    localNodeId: String,
+    onClick: () -> Unit
+) {
+
+    val isOutgoing =
+        message.senderId ==
+            localNodeId
+
+    val sender =
+        if (isOutgoing) {
+            "To ${message.recipientId}"
+        } else {
+            message.senderId
+        }
+
+    val transport =
+        message.route?.transport
+            ?: "LOCAL"
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                RelaySurface,
+                RoundedCornerShape(14.dp)
+            )
+            .border(
+                1.dp,
+                RelayBorder,
+                RoundedCornerShape(14.dp)
+            )
+            .clickable(
+                onClick = onClick
+            )
+            .padding(15.dp),
+        horizontalArrangement =
+            Arrangement.SpaceBetween
+    ) {
+
+        Column(
+            modifier =
+                Modifier.weight(1f)
+        ) {
+
+            Text(
+                text = sender,
+                style =
+                    MaterialTheme
+                        .typography
+                        .titleMedium,
+                fontWeight =
+                    FontWeight.Bold
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.height(3.dp)
+            )
+
+            Text(
+                text = message.content,
+                color =
+                    MaterialTheme
+                        .colorScheme
+                        .onSurfaceVariant,
+                style =
+                    MaterialTheme
+                        .typography
+                        .bodyMedium,
+                maxLines = 1
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.height(6.dp)
+            )
+
+            Row {
+                Text(
+                    text =
+                        "$transport • ${message.status.name}",
+                    color =
+                        if (
+                            message.type.name ==
+                                "EMERGENCY"
+                        ) {
+                            MaterialTheme
+                                .colorScheme
+                                .error
+                        } else {
+                            RelayTextMuted
+                        },
+                    style =
+                        TechnicalTextStyle
+                )
+            }
+        }
+
+        Text(
+            text =
+                formatTime(
+                    message.timestamp
+                ),
+            color =
+                RelayTextMuted,
+            style =
+                MaterialTheme
+                    .typography
+                    .bodySmall
         )
     }
 }
@@ -311,212 +828,71 @@ private fun StatusRow(
     value: String
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 5.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(
+                    vertical = 5.dp
+                ),
+        horizontalArrangement =
+            Arrangement.SpaceBetween
     ) {
+
         Text(
             text = label,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium
+            color =
+                MaterialTheme
+                    .colorScheme
+                    .onSurfaceVariant,
+            style =
+                MaterialTheme
+                    .typography
+                    .bodyMedium
         )
 
         Text(
             text = value,
-            color = MaterialTheme.colorScheme.onSurface,
-            style = TechnicalTextStyle
+            color =
+                MaterialTheme
+                    .colorScheme
+                    .onSurface,
+            style =
+                TechnicalTextStyle
         )
     }
 }
 
-@Composable
-private fun MeshPreview() {
+private fun networkSummary(
+    state: NetworkState
+): String {
 
-    val transition = rememberInfiniteTransition(
-        label = "meshPulse"
-    )
+    return when {
 
-    val pulse by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1600),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulse"
-    )
+        state.bluetoothState !=
+            BluetoothState.ON ->
+            "Bluetooth unavailable"
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = RelaySurface,
-                shape = RoundedCornerShape(18.dp)
-            )
-            .border(
-                width = 1.dp,
-                color = RelayBorder,
-                shape = RoundedCornerShape(18.dp)
-            )
-            .padding(16.dp)
-    ) {
+        state.scanningState ==
+            BleOperationState.ACTIVE ->
+            "Discovery active"
 
-        Text(
-            text = "LOCAL MESH",
-            color = RelayTextMuted,
-            style = TechnicalTextStyle
-        )
+        state.advertisingState ==
+            BleOperationState.ACTIVE ->
+            "Mesh available"
 
-        Spacer(
-            modifier = Modifier.height(10.dp)
-        )
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(170.dp)
-        ) {
-
-            Canvas(
-                modifier = Modifier.fillMaxSize()
-            ) {
-
-                val center = androidx.compose.ui.geometry.Offset(
-                    size.width * 0.50f,
-                    size.height * 0.50f
-                )
-
-                val nodes = listOf(
-                    androidx.compose.ui.geometry.Offset(
-                        size.width * 0.18f,
-                        size.height * 0.28f
-                    ),
-                    androidx.compose.ui.geometry.Offset(
-                        size.width * 0.80f,
-                        size.height * 0.26f
-                    ),
-                    androidx.compose.ui.geometry.Offset(
-                        size.width * 0.80f,
-                        size.height * 0.74f
-                    ),
-                    androidx.compose.ui.geometry.Offset(
-                        size.width * 0.24f,
-                        size.height * 0.76f
-                    )
-                )
-
-                nodes.forEach { node ->
-                    drawLine(
-                        color = RelayNodeInactive.copy(
-                            alpha = 0.7f
-                        ),
-                        start = center,
-                        end = node,
-                        strokeWidth = 2.dp.toPx(),
-                        pathEffect = PathEffect.dashPathEffect(
-                            floatArrayOf(10f, 10f)
-                        )
-                    )
-                }
-
-                drawCircle(
-                    color = RelayAccent.copy(
-                        alpha = pulse
-                    ),
-                    radius = 12.dp.toPx(),
-                    center = center
-                )
-
-                nodes.forEach { node ->
-                    drawCircle(
-                        color = RelayNode,
-                        radius = 7.dp.toPx(),
-                        center = node
-                    )
-                }
-            }
-
-            Text(
-                text = "YOU",
-                modifier = Modifier.align(
-                    Alignment.Center
-                ),
-                color = RelayBackground,
-                style = TechnicalTextStyle
-            )
-        }
-
-        Text(
-            text = "4 reachable nodes",
-            color = RelayTextMuted,
-            style = MaterialTheme.typography.bodySmall
-        )
+        else ->
+            "BLE ready"
     }
 }
 
-@Composable
-private fun RecentMessage(
-    sender: String,
-    preview: String,
-    time: String,
-    transport: String,
-    state: String,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = RelaySurface,
-                shape = RoundedCornerShape(14.dp)
-            )
-            .border(
-                width = 1.dp,
-                color = RelayBorder,
-                shape = RoundedCornerShape(14.dp)
-            )
-            .clickable(
-                onClick = onClick
-            )
-            .padding(15.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
+private fun formatTime(
+    timestamp: Long
+): String {
 
-        Column(
-            modifier = Modifier.weight(1f)
-        ) {
-
-            Text(
-                text = sender,
-                style = MaterialTheme.typography.titleMedium
-            )
-
-            Spacer(
-                modifier = Modifier.height(3.dp)
-            )
-
-            Text(
-                text = preview,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            Spacer(
-                modifier = Modifier.height(6.dp)
-            )
-
-            Text(
-                text = "$transport • $state",
-                color = RelayTextMuted,
-                style = TechnicalTextStyle
-            )
-        }
-
-        Text(
-            text = time,
-            color = RelayTextMuted,
-            style = MaterialTheme.typography.bodySmall
-        )
-    }
+    return SimpleDateFormat(
+        "HH:mm",
+        Locale.getDefault()
+    ).format(
+        Date(timestamp)
+    )
 }

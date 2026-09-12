@@ -36,7 +36,9 @@ import com.hybridmesh.relay.ui.theme.HybridMeshRelayTheme
 
 class MainActivity : ComponentActivity() {
 
-    override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(
+        savedInstanceState: Bundle?
+    ) {
         super.onCreate(savedInstanceState)
 
         setContent {
@@ -60,71 +62,101 @@ enum class AppScreen(
     PROFILE("Device Profile")
 }
 
-private val primaryScreens = setOf(
-    AppScreen.HOME,
-    AppScreen.MESSAGES,
-    AppScreen.NETWORK,
-    AppScreen.DEVICES,
-    AppScreen.DIAGNOSTICS
-)
+private val primaryScreens =
+    setOf(
+        AppScreen.HOME,
+        AppScreen.MESSAGES,
+        AppScreen.NETWORK,
+        AppScreen.DEVICES,
+        AppScreen.DIAGNOSTICS
+    )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HybridMeshRelayApp() {
 
-    val navigationStack = remember {
-        mutableStateListOf(AppScreen.HOME)
-    }
+    val navigationStack =
+        remember {
+            mutableStateListOf(
+                AppScreen.HOME
+            )
+        }
 
-    var selectedMessageId by remember {
-        mutableStateOf<String?>(null)
-    }
+    var selectedMessageId by
+        remember {
+            mutableStateOf<String?>(null)
+        }
 
-    val currentScreen = navigationStack.last()
-    val isNestedScreen = currentScreen !in primaryScreens
+    val currentScreen =
+        navigationStack.last()
 
-    fun navigateTo(screen: AppScreen) {
+    val isNestedScreen =
+        currentScreen !in primaryScreens
+
+    fun navigateTo(
+        screen: AppScreen
+    ) {
         navigationStack.add(screen)
     }
 
-    fun navigateToTab(screen: AppScreen) {
+    fun navigateToTab(
+        screen: AppScreen
+    ) {
         navigationStack.clear()
         navigationStack.add(screen)
     }
 
     fun goBack() {
-        if (navigationStack.size > 1) {
+        if (
+            navigationStack.size > 1
+        ) {
             navigationStack.removeAt(
                 navigationStack.lastIndex
             )
         }
     }
 
-    fun openMessage(messageId: String) {
-        selectedMessageId = messageId
-        navigateTo(AppScreen.MESSAGE_DETAIL)
+    fun openMessage(
+        messageId: String
+    ) {
+        selectedMessageId =
+            messageId
+
+        navigateTo(
+            AppScreen.MESSAGE_DETAIL
+        )
     }
 
     BackHandler(
-        enabled = navigationStack.size > 1
+        enabled =
+            navigationStack.size > 1
     ) {
         goBack()
     }
 
     Scaffold(
         topBar = {
+
             if (isNestedScreen) {
+
                 TopAppBar(
                     title = {
-                        Text(currentScreen.title)
+                        Text(
+                            currentScreen.title
+                        )
                     },
                     navigationIcon = {
+
                         IconButton(
-                            onClick = ::goBack
+                            onClick =
+                                ::goBack
                         ) {
                             Text(
                                 text = "‹",
-                                style = MaterialTheme.typography.headlineSmall
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .headlineSmall
                             )
                         }
                     }
@@ -132,10 +164,14 @@ fun HybridMeshRelayApp() {
             }
         },
         bottomBar = {
+
             if (!isNestedScreen) {
+
                 AppBottomBar(
-                    currentScreen = currentScreen,
-                    onNavigate = ::navigateToTab
+                    currentScreen =
+                        currentScreen,
+                    onNavigate =
+                        ::navigateToTab
                 )
             }
         }
@@ -145,9 +181,13 @@ fun HybridMeshRelayApp() {
             modifier = Modifier
                 .fillMaxSize()
                 .background(
-                    MaterialTheme.colorScheme.background
+                    MaterialTheme
+                        .colorScheme
+                        .background
                 )
-                .padding(paddingValues)
+                .padding(
+                    paddingValues
+                )
         ) {
 
             if (!isNestedScreen) {
@@ -155,16 +195,25 @@ fun HybridMeshRelayApp() {
             }
 
             Box(
-                modifier = Modifier.fillMaxSize()
+                modifier =
+                    Modifier.fillMaxSize()
             ) {
+
                 AppScreenContent(
-                    screen = currentScreen,
-                    selectedMessageId = selectedMessageId,
-                    onNavigate = ::navigateTo,
-                    onNavigateToTab = ::navigateToTab,
-                    onMessageSent = ::goBack,
-                    onMessageSelected = ::openMessage,
-                    onBack = ::goBack
+                    screen =
+                        currentScreen,
+                    selectedMessageId =
+                        selectedMessageId,
+                    onNavigate =
+                        ::navigateTo,
+                    onNavigateToTab =
+                        ::navigateToTab,
+                    onMessageSent =
+                        ::goBack,
+                    onMessageSelected =
+                        ::openMessage,
+                    onBack =
+                        ::goBack
                 )
             }
         }
@@ -175,67 +224,118 @@ fun HybridMeshRelayApp() {
 private fun AppScreenContent(
     screen: AppScreen,
     selectedMessageId: String?,
-    onNavigate: (AppScreen) -> Unit,
-    onNavigateToTab: (AppScreen) -> Unit,
-    onMessageSent: () -> Unit,
-    onMessageSelected: (String) -> Unit,
-    onBack: () -> Unit
+    onNavigate:
+        (AppScreen) -> Unit,
+    onNavigateToTab:
+        (AppScreen) -> Unit,
+    onMessageSent:
+        () -> Unit,
+    onMessageSelected:
+        (String) -> Unit,
+    onBack:
+        () -> Unit
 ) {
+
     when (screen) {
 
-        AppScreen.HOME -> HomeScreen(
-            onMessagesClick = {
-                onNavigateToTab(AppScreen.MESSAGES)
-            },
-            onNetworkClick = {
-                onNavigateToTab(AppScreen.NETWORK)
-            },
-            onDevicesClick = {
-                onNavigateToTab(AppScreen.DEVICES)
-            },
-            onDiagnosticsClick = {
-                onNavigateToTab(AppScreen.DIAGNOSTICS)
-            },
-            onNewMessage = {
-                onNavigate(AppScreen.COMPOSE)
-            },
-            onMessageClick = {
-                onNavigateToTab(AppScreen.MESSAGES)
-            },
-            onProfileClick = {
-                onNavigate(AppScreen.PROFILE)
-            }
-        )
+        AppScreen.HOME -> {
 
-        AppScreen.MESSAGES -> MessagesScreen(
-            onNewMessage = {
-                onNavigate(AppScreen.COMPOSE)
-            },
-            onConversationClick = { messageId ->
-                onMessageSelected(messageId)
-            }
-        )
+            HomeScreen(
+                onMessagesClick = {
+                    onNavigateToTab(
+                        AppScreen.MESSAGES
+                    )
+                },
+                onNetworkClick = {
+                    onNavigateToTab(
+                        AppScreen.NETWORK
+                    )
+                },
+                onDevicesClick = {
+                    onNavigateToTab(
+                        AppScreen.DEVICES
+                    )
+                },
+                onDiagnosticsClick = {
+                    onNavigateToTab(
+                        AppScreen.DIAGNOSTICS
+                    )
+                },
+                onNewMessage = {
+                    onNavigate(
+                        AppScreen.COMPOSE
+                    )
+                },
+                onMessageClick = {
+                    messageId ->
+                    onMessageSelected(
+                        messageId
+                    )
+                },
+                onProfileClick = {
+                    onNavigate(
+                        AppScreen.PROFILE
+                    )
+                }
+            )
+        }
 
-        AppScreen.NETWORK -> NetworkScreen()
+        AppScreen.MESSAGES -> {
 
-        AppScreen.DEVICES -> DevicesScreen()
+            MessagesScreen(
+                onNewMessage = {
+                    onNavigate(
+                        AppScreen.COMPOSE
+                    )
+                },
+                onConversationClick = {
+                    messageId ->
+                    onMessageSelected(
+                        messageId
+                    )
+                }
+            )
+        }
 
-        AppScreen.DIAGNOSTICS -> DiagnosticsScreen()
+        AppScreen.NETWORK -> {
+            NetworkScreen()
+        }
 
-        AppScreen.COMPOSE -> ComposeMessageScreen(
-            onMessageSent = onMessageSent
-        )
+        AppScreen.DEVICES -> {
+            DevicesScreen()
+        }
+
+        AppScreen.DIAGNOSTICS -> {
+            DiagnosticsScreen()
+        }
+
+        AppScreen.COMPOSE -> {
+
+            ComposeMessageScreen(
+                onMessageSent =
+                    onMessageSent
+            )
+        }
 
         AppScreen.MESSAGE_DETAIL -> {
-            if (selectedMessageId != null) {
+
+            if (
+                selectedMessageId != null
+            ) {
+
                 MessageDetailScreen(
-                    messageId = selectedMessageId
+                    messageId =
+                        selectedMessageId
                 )
             }
         }
 
-        AppScreen.PROFILE -> ProfileScreen(
-            onBack = onBack
-        )
+        AppScreen.PROFILE -> {
+
+            ProfileScreen(
+                onBack =
+                    onBack
+            )
+        }
     }
 }

@@ -22,8 +22,7 @@ class BleAdvertiser(
     context: Context
 ) {
 
-    private val appContext =
-        context.applicationContext
+    private val appContext = context.applicationContext
 
     private val bluetoothManager =
         appContext.getSystemService(
@@ -35,17 +34,17 @@ class BleAdvertiser(
 
     private var advertiser: BluetoothLeAdvertiser? = null
 
-    private val _isAdvertising =
-        MutableStateFlow(false)
+    private val _state =
+        MutableStateFlow(BleOperationState.IDLE)
 
-    val isAdvertising: StateFlow<Boolean> =
-        _isAdvertising.asStateFlow()
+    val state: StateFlow<BleOperationState> =
+        _state.asStateFlow()
 
-    private val _advertisingErrorCode =
+    private val _errorCode =
         MutableStateFlow<Int?>(null)
 
-    val advertisingErrorCode: StateFlow<Int?> =
-        _advertisingErrorCode.asStateFlow()
+    val errorCode: StateFlow<Int?> =
+        _errorCode.asStateFlow()
 
     private val advertiseCallback =
         object : AdvertiseCallback() {
@@ -53,15 +52,15 @@ class BleAdvertiser(
             override fun onStartSuccess(
                 settingsInEffect: AdvertiseSettings
             ) {
-                _advertisingErrorCode.value = null
-                _isAdvertising.value = true
+                _errorCode.value = null
+                _state.value = BleOperationState.ACTIVE
             }
 
             override fun onStartFailure(
                 errorCode: Int
             ) {
-                _isAdvertising.value = false
-                _advertisingErrorCode.value = errorCode
+                _errorCode.value = errorCode
+                _state.value = BleOperationState.ERROR
             }
         }
 
@@ -69,55 +68,53 @@ class BleAdvertiser(
     fun startAdvertising(
         identity: LocalIdentity
     ) {
-        if (!hasAdvertisePermission()) {
-            _isAdvertising.value = false
-            _advertisingErrorCode.value =
-                ERROR_PERMISSION
+        if (!hasPermission()) {
+            _errorCode.value = ERROR_PERMISSION
+            _state.value = BleOperationState.ERROR
             return
         }
 
-        if (_isAdvertising.value) {
+        if (_state.value == BleOperationState.ACTIVE ||
+            _state.value == BleOperationState.STARTING
+        ) {
             return
         }
 
-        val adapter =
-            bluetoothAdapter ?: run {
-                _isAdvertising.value = false
-                _advertisingErrorCode.value =
-                    ERROR_BLUETOOTH_UNAVAILABLE
-                return
-            }
-
-        if (!adapter.isEnabled) {
-            _isAdvertising.value = false
-            _advertisingErrorCode.value =
-                ERROR_BLUETOOTH_DISABLED
+        val adapter = bluetoothAdapter ?: run {
+            _errorCode.value = ERROR_BLUETOOTH_UNAVAILABLE
+            _state.value = BleOperationState.ERROR
             return
         }
 
-        if (!adapter.isMultipleAdvertisementSupported) {
-            _isAdvertising.value = false
-            _advertisingErrorCode.value =
-                ERROR_ADVERTISING_NOT_SUPPORTED
+        if (!isBleHardwareAvailable()) {
+            _errorCode.value = ERROR_BLE_UNSUPPORTED
+            _state.value = BleOperationState.ERROR
+            return
+        }
+
+        if (!safeIsBluetoothEnabled(adapter)) {
+            _errorCode.value = ERROR_BLUETOOTH_DISABLED
+            _state.value = BleOperationState.ERROR
             return
         }
 
         val bleAdvertiser =
-            adapter.bluetoothLeAdvertiser ?: run {
-                _isAdvertising.value = false
-                _advertisingErrorCode.value =
-                    ERROR_ADVERTISER_UNAVAILABLE
-                return
+            try {
+                adapter.bluetoothLeAdvertiser
+            } catch (exception: SecurityException) {
+                null
             }
 
-        advertiser = bleAdvertiser
+        if (bleAdvertiser == null) {
+            _errorCode.value = ERROR_ADVERTISER_UNAVAILABLE
+            _state.value = BleOperationState.ERROR
+            return
+        }
 
-        /*
-         * Primary advertising packet.
-         *
-         * This contains only our service UUID so that
-         * scanners can identify Hybrid Mesh Relay nodes.
-         */
+        advertiser = bleAdvertiser
+        _state.value = BleOperationState.STARTING
+        _errorCode.value = null
+
         val advertiseData =
             AdvertiseData.Builder()
                 .addServiceUuid(
@@ -129,9 +126,6 @@ class BleAdvertiser(
                 .setIncludeTxPowerLevel(false)
                 .build()
 
-        /*
-         * Scan response contains the compact node payload.
-         */
         val scanResponse =
             AdvertiseData.Builder()
                 .addServiceData(
@@ -156,45 +150,73 @@ class BleAdvertiser(
                 .setTimeout(0)
                 .build()
 
-        _advertisingErrorCode.value = null
-
-        bleAdvertiser.startAdvertising(
-            settings,
-            advertiseData,
-            scanResponse,
-            advertiseCallback
-        )
+        try {
+            bleAdvertiser.startAdvertising(
+                settings,
+                advertiseData,
+                scanResponse,
+                advertiseCallback
+            )
+        } catch (exception: SecurityException) {
+            _errorCode.value = ERROR_PERMISSION
+            _state.value = BleOperationState.ERROR
+        } catch (exception: IllegalArgumentException) {
+            _errorCode.value = ERROR_INVALID_DATA
+            _state.value = BleOperationState.ERROR
+        }
     }
 
     @SuppressLint("MissingPermission")
     fun stopAdvertising() {
+        val currentState = _state.value
 
-        if (!hasAdvertisePermission()) {
-            _isAdvertising.value = false
+        if (currentState == BleOperationState.IDLE) {
             return
         }
 
-        advertiser?.stopAdvertising(
-            advertiseCallback
+        _state.value = BleOperationState.STOPPING
+
+        try {
+            advertiser?.stopAdvertising(
+                advertiseCallback
+            )
+        } catch (_: SecurityException) {
+            // Permission may have disappeared while Bluetooth was changing state.
+        } finally {
+            advertiser = null
+            _errorCode.value = null
+            _state.value = BleOperationState.IDLE
+        }
+    }
+
+    private fun hasPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.BLUETOOTH_ADVERTISE
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun isBleHardwareAvailable(): Boolean {
+        return appContext.packageManager.hasSystemFeature(
+            PackageManager.FEATURE_BLUETOOTH_LE
         )
+    }
 
-        advertiser = null
-
-        _isAdvertising.value = false
-        _advertisingErrorCode.value = null
+    @SuppressLint("MissingPermission")
+    private fun safeIsBluetoothEnabled(
+        adapter: BluetoothAdapter
+    ): Boolean {
+        return try {
+            adapter.isEnabled
+        } catch (_: SecurityException) {
+            false
+        }
     }
 
     private fun buildPayload(
         identity: LocalIdentity
     ): ByteArray {
 
-        /*
-         * Node ID format:
-         *
-         * HM-A1B2C3D4
-         *
-         * Only A1B2C3D4 is transmitted.
-         */
         val suffix =
             identity.nodeId
                 .removePrefix("HM-")
@@ -211,7 +233,6 @@ class BleAdvertiser(
 
         val deviceType =
             when (identity.deviceType) {
-
                 NodeType.PHONE ->
                     BleConstants.DEVICE_TYPE_PHONE
 
@@ -229,27 +250,12 @@ class BleAdvertiser(
         )
     }
 
-    private fun hasAdvertisePermission(): Boolean {
-
-        return ContextCompat.checkSelfPermission(
-            appContext,
-            Manifest.permission.BLUETOOTH_ADVERTISE
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-
     companion object {
-
-        /*
-         * App-defined diagnostic error codes.
-         */
         const val ERROR_PERMISSION = -100
-
         const val ERROR_BLUETOOTH_UNAVAILABLE = -101
-
         const val ERROR_BLUETOOTH_DISABLED = -102
-
-        const val ERROR_ADVERTISING_NOT_SUPPORTED = -104
-
+        const val ERROR_BLE_UNSUPPORTED = -103
         const val ERROR_ADVERTISER_UNAVAILABLE = -105
+        const val ERROR_INVALID_DATA = -106
     }
 }

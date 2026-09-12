@@ -19,11 +19,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class BleScanner(
-    context: Context
+    context: Context,
+    private val localNodeIdProvider: () -> String
 ) {
 
-    private val appContext =
-        context.applicationContext
+    private val appContext = context.applicationContext
 
     private val bluetoothManager =
         appContext.getSystemService(
@@ -33,6 +33,18 @@ class BleScanner(
     private val bluetoothAdapter: BluetoothAdapter?
         get() = bluetoothManager?.adapter
 
+    private val _state =
+        MutableStateFlow(BleOperationState.IDLE)
+
+    val state: StateFlow<BleOperationState> =
+        _state.asStateFlow()
+
+    private val _errorCode =
+        MutableStateFlow<Int?>(null)
+
+    val errorCode: StateFlow<Int?> =
+        _errorCode.asStateFlow()
+
     private val _peers =
         MutableStateFlow<List<BlePeer>>(
             emptyList()
@@ -41,10 +53,22 @@ class BleScanner(
     val peers: StateFlow<List<BlePeer>> =
         _peers.asStateFlow()
 
+    private val _scanResultCount =
+        MutableStateFlow(0L)
+
+    val scanResultCount: StateFlow<Long> =
+        _scanResultCount.asStateFlow()
+
+    private val _lastResultAt =
+        MutableStateFlow<Long?>(null)
+
+    val lastResultAt: StateFlow<Long?> =
+        _lastResultAt.asStateFlow()
+
     private val discoveredPeers =
         mutableMapOf<String, BlePeer>()
 
-    private var scanning = false
+    private val lock = Any()
 
     private val scanCallback =
         object : ScanCallback() {
@@ -53,12 +77,28 @@ class BleScanner(
                 callbackType: Int,
                 result: ScanResult
             ) {
+                _scanResultCount.value =
+                    _scanResultCount.value + 1
+
+                _lastResultAt.value =
+                    System.currentTimeMillis()
+
                 handleScanResult(result)
             }
 
             override fun onBatchScanResults(
                 results: MutableList<ScanResult>
             ) {
+                if (results.isEmpty()) {
+                    return
+                }
+
+                _scanResultCount.value +=
+                    results.size.toLong()
+
+                _lastResultAt.value =
+                    System.currentTimeMillis()
+
                 results.forEach { result ->
                     handleScanResult(result)
                 }
@@ -67,46 +107,79 @@ class BleScanner(
             override fun onScanFailed(
                 errorCode: Int
             ) {
-                scanning = false
+                _errorCode.value = errorCode
+                _state.value =
+                    BleOperationState.ERROR
             }
         }
 
     @SuppressLint("MissingPermission")
     fun startScanning() {
 
-        if (!hasScanPermission()) {
-            scanning = false
+        if (!hasPermission()) {
+            _errorCode.value = ERROR_PERMISSION
+            _state.value =
+                BleOperationState.ERROR
             return
         }
 
-        if (scanning) {
+        if (
+            _state.value == BleOperationState.ACTIVE ||
+            _state.value == BleOperationState.STARTING
+        ) {
             return
         }
 
         val adapter =
             bluetoothAdapter ?: run {
-                scanning = false
+                _errorCode.value =
+                    ERROR_BLUETOOTH_UNAVAILABLE
+                _state.value =
+                    BleOperationState.ERROR
                 return
             }
 
-        if (!adapter.isEnabled) {
-            scanning = false
+        if (!isBleHardwareAvailable()) {
+            _errorCode.value =
+                ERROR_BLE_UNSUPPORTED
+            _state.value =
+                BleOperationState.ERROR
             return
         }
 
-        val scanner: BluetoothLeScanner =
-            adapter.bluetoothLeScanner ?: run {
-                scanning = false
-                return
+        if (!safeIsBluetoothEnabled(adapter)) {
+            _errorCode.value =
+                ERROR_BLUETOOTH_DISABLED
+            _state.value =
+                BleOperationState.ERROR
+            return
+        }
+
+        val scanner =
+            try {
+                adapter.bluetoothLeScanner
+            } catch (exception: SecurityException) {
+                null
             }
 
-        /*
-         * Only Hybrid Mesh Relay devices are interesting
-         * to this scanner.
-         *
-         * ScanFilter supports filtering by service UUID.
-         */
-        val serviceFilter =
+        if (scanner == null) {
+            _errorCode.value =
+                ERROR_SCANNER_UNAVAILABLE
+            _state.value =
+                BleOperationState.ERROR
+            return
+        }
+
+        synchronized(lock) {
+            discoveredPeers.clear()
+            _peers.value = emptyList()
+        }
+
+        _errorCode.value = null
+        _state.value =
+            BleOperationState.STARTING
+
+        val filter =
             ScanFilter.Builder()
                 .setServiceUuid(
                     ParcelUuid(
@@ -120,53 +193,104 @@ class BleScanner(
                 .setScanMode(
                     ScanSettings.SCAN_MODE_LOW_LATENCY
                 )
+                .setReportDelay(0L)
                 .build()
 
-        discoveredPeers.clear()
-        _peers.value = emptyList()
+        try {
+            scanner.startScan(
+                listOf(filter),
+                settings,
+                scanCallback
+            )
 
-        scanner.startScan(
-            listOf(serviceFilter),
-            settings,
-            scanCallback
-        )
+            _state.value =
+                BleOperationState.ACTIVE
 
-        scanning = true
+        } catch (exception: SecurityException) {
+            _errorCode.value =
+                ERROR_PERMISSION
+            _state.value =
+                BleOperationState.ERROR
+
+        } catch (exception: IllegalArgumentException) {
+            _errorCode.value =
+                ERROR_INVALID_SETTINGS
+            _state.value =
+                BleOperationState.ERROR
+        }
     }
 
     @SuppressLint("MissingPermission")
-    fun stopScanning() {
+    fun stopScanning(
+        clearPeers: Boolean = true
+    ) {
+        val currentState = _state.value
 
-        if (!scanning) {
+        if (
+            currentState == BleOperationState.IDLE &&
+            !clearPeers
+        ) {
             return
         }
 
-        bluetoothAdapter
-            ?.bluetoothLeScanner
-            ?.stopScan(scanCallback)
+        _state.value =
+            BleOperationState.STOPPING
 
-        scanning = false
-    }
+        try {
+            bluetoothAdapter
+                ?.bluetoothLeScanner
+                ?.stopScan(scanCallback)
+        } catch (_: SecurityException) {
+            // Bluetooth permission may have changed during shutdown.
+        } finally {
+            if (clearPeers) {
+                synchronized(lock) {
+                    discoveredPeers.clear()
+                    _peers.value = emptyList()
+                }
+            }
 
-    fun isScanning(): Boolean {
-        return scanning
+            _state.value =
+                BleOperationState.IDLE
+            _errorCode.value = null
+        }
     }
 
     fun clearPeers() {
-        discoveredPeers.clear()
-        _peers.value = emptyList()
+        synchronized(lock) {
+            discoveredPeers.clear()
+            _peers.value = emptyList()
+        }
+    }
+
+    fun expireStalePeers(
+        now: Long = System.currentTimeMillis()
+    ) {
+        synchronized(lock) {
+            val changed =
+                discoveredPeers.entries.removeIf { (_, peer) ->
+                    now - peer.lastSeen >
+                        BleConstants.PEER_TIMEOUT_MS
+                }
+
+            if (changed) {
+                _peers.value =
+                    discoveredPeers
+                        .values
+                        .sortedByDescending {
+                            it.rssi
+                        }
+            }
+        }
     }
 
     private fun handleScanResult(
         result: ScanResult
     ) {
         val record =
-            result.scanRecord ?: return
+            result.scanRecord
+                ?: return
 
-        /*
-         * The actual Hybrid Mesh node data is in the
-         * scan response.
-         */
         val data =
             record.getServiceData(
                 ParcelUuid(
@@ -181,20 +305,13 @@ class BleScanner(
             return
         }
 
-        val version =
-            data[0]
-
         if (
-            version !=
+            data[0] !=
             BleConstants.DISCOVERY_VERSION
         ) {
             return
         }
 
-        /*
-         * Bytes 1-4 represent the hexadecimal suffix
-         * of our HM-XXXXXXXX Node ID.
-         */
         val nodeSuffix =
             data
                 .sliceArray(1..4)
@@ -207,9 +324,15 @@ class BleScanner(
         val nodeId =
             "HM-$nodeSuffix"
 
+        if (
+            nodeId ==
+            localNodeIdProvider()
+        ) {
+            return
+        }
+
         val deviceType =
             when (data[5]) {
-
                 BleConstants.DEVICE_TYPE_PHONE ->
                     NodeType.PHONE
 
@@ -220,31 +343,19 @@ class BleScanner(
                     return
             }
 
-        /*
-         * Android may provide a remote Bluetooth name,
-         * but it is not part of our protocol identity.
-         *
-         * If unavailable, use a stable generic label.
-         */
         val deviceName =
             try {
                 result.device.name
-                    ?.takeIf {
-                        it.isNotBlank()
-                    }
-                    ?: "Hybrid Mesh Device"
-            } catch (
-                exception: SecurityException
-            ) {
-                "Hybrid Mesh Device"
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "Hybrid Mesh Node"
+            } catch (_: SecurityException) {
+                "Hybrid Mesh Node"
             }
 
         val address =
             try {
                 result.device.address
-            } catch (
-                exception: SecurityException
-            ) {
+            } catch (_: SecurityException) {
                 "Unknown"
             }
 
@@ -259,25 +370,48 @@ class BleScanner(
                     System.currentTimeMillis()
             )
 
-        /*
-         * Node ID is the logical identity.
-         * BLE address is only the current transport endpoint.
-         */
-        discoveredPeers[nodeId] = peer
+        synchronized(lock) {
+            discoveredPeers[nodeId] = peer
 
-        _peers.value =
-            discoveredPeers
-                .values
-                .sortedByDescending {
-                    it.rssi
-                }
+            _peers.value =
+                discoveredPeers
+                    .values
+                    .sortedByDescending {
+                        it.rssi
+                    }
+        }
     }
 
-    private fun hasScanPermission(): Boolean {
-
+    private fun hasPermission(): Boolean {
         return ContextCompat.checkSelfPermission(
             appContext,
             Manifest.permission.BLUETOOTH_SCAN
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun isBleHardwareAvailable(): Boolean {
+        return appContext.packageManager.hasSystemFeature(
+            PackageManager.FEATURE_BLUETOOTH_LE
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun safeIsBluetoothEnabled(
+        adapter: BluetoothAdapter
+    ): Boolean {
+        return try {
+            adapter.isEnabled
+        } catch (_: SecurityException) {
+            false
+        }
+    }
+
+    companion object {
+        const val ERROR_PERMISSION = -200
+        const val ERROR_BLUETOOTH_UNAVAILABLE = -201
+        const val ERROR_BLUETOOTH_DISABLED = -202
+        const val ERROR_BLE_UNSUPPORTED = -203
+        const val ERROR_SCANNER_UNAVAILABLE = -204
+        const val ERROR_INVALID_SETTINGS = -205
     }
 }
