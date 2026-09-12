@@ -3,118 +3,80 @@ package com.hybridmesh.relay.data
 import android.content.Context
 import android.os.Build
 import com.hybridmesh.relay.model.LocalIdentity
-import java.util.UUID
+import com.hybridmesh.relay.model.NodeType
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
-class IdentityStore(
-    context: Context
-) {
-
-    private val preferences = context.getSharedPreferences(
-        "hybrid_mesh_identity",
+/** Application-wide identity source of truth. */
+class IdentityStore private constructor(context: Context) {
+    private val preferences = context.applicationContext.getSharedPreferences(
+        PREFERENCES_NAME,
         Context.MODE_PRIVATE
     )
 
-    fun getIdentity(): LocalIdentity {
+    private val _identity = MutableStateFlow(loadOrCreate())
+    val identity: StateFlow<LocalIdentity> = _identity.asStateFlow()
 
-        val nodeId = preferences.getString(
-            KEY_NODE_ID,
-            null
-        )
+    fun getIdentity(): LocalIdentity = _identity.value
 
-        val deviceName = preferences.getString(
-            KEY_DEVICE_NAME,
-            null
-        )
-
-        if (
-            nodeId != null &&
-            deviceName != null
-        ) {
-            return LocalIdentity(
-                nodeId = nodeId,
-                deviceName = deviceName
-            )
-        }
-
-        val identity = LocalIdentity(
-            nodeId = generateNodeId(),
-            deviceName = defaultDeviceName()
-        )
-
-        saveIdentity(identity)
-
-        return identity
-    }
-
-    fun updateDeviceName(
-        deviceName: String
-    ): LocalIdentity {
-
-        val currentIdentity = getIdentity()
-
-        val cleanedName = deviceName
+    fun updateDeviceName(name: String): LocalIdentity {
+        val cleaned = name
             .trim()
-            .ifBlank {
-                currentIdentity.deviceName
-            }
+            .take(MAX_DISPLAY_NAME_CHARS)
+            .ifBlank { defaultDeviceName() }
 
-        val updatedIdentity = currentIdentity.copy(
-            deviceName = cleanedName
-        )
+        val current = _identity.value
+        if (current.deviceName == cleaned) return current
 
-        saveIdentity(updatedIdentity)
-
-        return updatedIdentity
-    }
-
-    private fun saveIdentity(
-        identity: LocalIdentity
-    ) {
         preferences.edit()
-            .putString(
-                KEY_NODE_ID,
-                identity.nodeId
-            )
-            .putString(
-                KEY_DEVICE_NAME,
-                identity.deviceName
-            )
+            .putString(KEY_DEVICE_NAME, cleaned)
             .apply()
+
+        return current.copy(deviceName = cleaned).also { _identity.value = it }
     }
 
-    private fun generateNodeId(): String {
-        val shortId = UUID.randomUUID()
-            .toString()
-            .replace("-", "")
-            .take(8)
-            .uppercase()
-
-        return "HM-$shortId"
-    }
-
-    private fun defaultDeviceName(): String {
-
-        val manufacturer = Build.MANUFACTURER
-            .replaceFirstChar {
-                it.uppercase()
+    private fun loadOrCreate(): LocalIdentity {
+        val storedNodeId = preferences.getString(KEY_NODE_ID, null)
+        val nodeId = storedNodeId
+            ?.takeIf(NodeIdGenerator::isValid)
+            ?: NodeIdGenerator.generate().also {
+                preferences.edit().putString(KEY_NODE_ID, it).apply()
             }
 
-        val model = Build.MODEL
+        val storedName = preferences.getString(KEY_DEVICE_NAME, null)
+        val name = storedName
+            ?.trim()
+            ?.take(MAX_DISPLAY_NAME_CHARS)
+            ?.ifBlank { null }
+            ?: defaultDeviceName()
 
-        return if (
-            model.startsWith(
-                manufacturer,
-                ignoreCase = true
-            )
-        ) {
-            model
-        } else {
-            "$manufacturer $model"
+        if (storedName != name) {
+            preferences.edit().putString(KEY_DEVICE_NAME, name).apply()
         }
+
+        return LocalIdentity(
+            nodeId = nodeId,
+            deviceName = name,
+            deviceType = NodeType.PHONE
+        )
     }
+
+    private fun defaultDeviceName(): String =
+        Build.MODEL?.trim()?.takeIf { it.isNotBlank() } ?: "Hybrid Mesh Device"
 
     companion object {
+        private const val PREFERENCES_NAME = "hybrid_mesh_identity"
         private const val KEY_NODE_ID = "node_id"
         private const val KEY_DEVICE_NAME = "device_name"
+        const val MAX_DISPLAY_NAME_CHARS = 32
+
+        @Volatile
+        private var INSTANCE: IdentityStore? = null
+
+        fun getInstance(context: Context): IdentityStore =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: IdentityStore(context.applicationContext).also { INSTANCE = it }
+            }
     }
 }

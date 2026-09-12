@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.model.LocalIdentity
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 class ProfileViewModel(
@@ -12,18 +11,13 @@ class ProfileViewModel(
 ) : AndroidViewModel(application) {
 
     private val identityStore =
-        IdentityStore(application)
-
-    private val _identity =
-        MutableStateFlow(
-            identityStore.getIdentity()
-        )
+        IdentityStore.getInstance(application)
 
     val identity: StateFlow<LocalIdentity> =
-        _identity
+        identityStore.identity
 
     val appVersion: String by lazy {
-        try {
+        runCatching {
             application.packageManager
                 .getPackageInfo(
                     application.packageName,
@@ -31,17 +25,12 @@ class ProfileViewModel(
                 )
                 .versionName
                 ?: "Unknown"
-        } catch (e: Exception) {
-            "Unknown"
-        }
+        }.getOrDefault("Unknown")
     }
 
     fun updateDeviceName(
         deviceName: String
     ) {
-        _identity.value =
-            identityStore.updateDeviceName(
-                deviceName
-            )
+        identityStore.updateDeviceName(deviceName)
     }
 }

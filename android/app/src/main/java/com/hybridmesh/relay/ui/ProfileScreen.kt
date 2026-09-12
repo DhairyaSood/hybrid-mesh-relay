@@ -3,9 +3,8 @@ package com.hybridmesh.relay.ui
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,338 +12,97 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.ui.theme.RelayAccent
+import com.hybridmesh.relay.ui.theme.RelayBackground
+import com.hybridmesh.relay.ui.theme.RelayBorder
+import com.hybridmesh.relay.ui.theme.RelaySurface
+import com.hybridmesh.relay.ui.theme.RelayTextMuted
+import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.viewmodel.ProfileViewModel
 
 @Composable
-fun ProfileScreen(
-    onBack: () -> Unit
-) {
-    val viewModel: ProfileViewModel = viewModel()
-
-    val identity by viewModel.identity.collectAsState()
-
-    var deviceName by rememberSaveable(
-        identity.deviceName
-    ) {
-        mutableStateOf(
-            identity.deviceName
-        )
-    }
-
+fun ProfileScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    val clipboardManager =
-        LocalClipboardManager.current
+    val viewModel: ProfileViewModel = viewModel()
+    val identity by viewModel.identity.collectAsStateWithLifecycle()
+    var deviceName by rememberSaveable(identity.deviceName) { mutableStateOf(identity.deviceName) }
+    val clipboard = LocalClipboardManager.current
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().background(RelayBackground),
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(
-                    horizontal = 20.dp,
-                    vertical = 16.dp
-                ),
-            verticalArrangement =
-                Arrangement.spacedBy(18.dp)
-        ) {
-
-            Text(
-                text = "DEVICE PROFILE",
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold
-            )
-
-            Text(
-                text = "Identity used by this device on the mesh.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            IdentityHeader(
-                deviceName = identity.deviceName,
-                nodeId = identity.nodeId
-            )
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(
-                        RoundedCornerShape(16.dp)
-                    )
-                    .background(
-                        MaterialTheme.colorScheme.surface
-                    )
-                    .border(
-                        width = 1.dp,
-                        color =
-                            MaterialTheme.colorScheme.outlineVariant,
-                        shape =
-                            RoundedCornerShape(16.dp)
-                    )
-                    .padding(18.dp),
-                verticalArrangement =
-                    Arrangement.spacedBy(18.dp)
-            ) {
-
-                Text(
-                    text = "LOCAL IDENTITY",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color =
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
+        item {
+            Text("DEVICE PROFILE", style = MaterialTheme.typography.headlineSmall, maxLines = 1)
+            Text("Your human-readable name is not unique. The Node ID is the persistent network identity.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            Column(Modifier.fillMaxWidth().background(RelaySurface, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).border(1.dp, RelayBorder, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("LOCAL IDENTITY", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
                 OutlinedTextField(
                     value = deviceName,
-                    onValueChange = {
-                        deviceName = it
-                    },
+                    onValueChange = { deviceName = it.take(32) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = {
-                        Text("Device name")
-                    },
-                    supportingText = {
-                        Text(
-                            "This is how your device can appear to nearby peers."
-                        )
-                    }
+                    label = { Text("Nickname") },
+                    supportingText = { Text("Non-unique. This is how you can appear to other nodes.") }
                 )
-
                 Button(
                     onClick = {
-                        viewModel.updateDeviceName(
-                            deviceName
-                        )
-
-                        Toast.makeText(
-                            context,
-                            "Device name updated",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        viewModel.updateDeviceName(deviceName)
+                        Toast.makeText(context, "Nickname updated", Toast.LENGTH_SHORT).show()
                     },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor =
-                            MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text("SAVE CHANGES")
-                }
-
-                HorizontalDivider()
-
-                ProfileInfoRow(
-                    label = "Node ID",
-                    value = identity.nodeId,
-                    actionText = "COPY",
-                    onAction = {
-
-                        clipboardManager.setText(
-                            AnnotatedString(
-                                identity.nodeId
-                            )
-                        )
-
-                        Toast.makeText(
-                            context,
-                            "Node ID copied",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                )
-
-                ProfileInfoRow(
-                    label = "Device type",
-                    value = identity.deviceType.name
-                )
-
-                ProfileInfoRow(
-                    label = "Connection",
-                    value = "LOCAL DEVICE"
-                )
-
-                ProfileInfoRow(
-                    label = "App version",
-                    value = viewModel.appVersion
-                )
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("SAVE CHANGES") }
             }
-
-            Spacer(
-                modifier = Modifier.weight(1f)
-            )
-
-            Text(
-                text =
-                    "Your Node ID is generated locally and stored on this device.",
-                style = MaterialTheme.typography.bodySmall,
-                color =
-                    MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Button(
-                onClick = onBack,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("DONE")
+        }
+        item {
+            InfoRow("Node ID", identity.nodeId) {
+                clipboard.setText(AnnotatedString(identity.nodeId))
+                Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
             }
+        }
+        item { InfoRow("Device type", identity.deviceType.name) }
+        item { InfoRow("App version", viewModel.appVersion) }
+        item { Spacer(Modifier.height(4.dp)) }
+        item {
+            Text("Node ID is generated locally and persisted on this installation. It is used for addressing; changing the nickname does not change it.", color = RelayTextMuted, style = MaterialTheme.typography.bodySmall)
+        }
+        item {
+            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("DONE") }
         }
     }
 }
 
 @Composable
-private fun IdentityHeader(
-    deviceName: String,
-    nodeId: String
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(
-                RoundedCornerShape(20.dp)
-            )
-            .background(
-                MaterialTheme.colorScheme.surfaceContainerHigh
-            )
-            .padding(20.dp),
-        verticalAlignment =
-            Alignment.CenterVertically
-    ) {
-
-        Box(
-            modifier = Modifier
-                .width(56.dp)
-                .height(56.dp)
-                .clip(
-                    RoundedCornerShape(16.dp)
-                )
-                .background(
-                    MaterialTheme.colorScheme.primary
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "HM",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color =
-                    MaterialTheme.colorScheme.onPrimary
-            )
+private fun InfoRow(label: String, value: String, onAction: (() -> Unit)? = null) {
+    Row(Modifier.fillMaxWidth().background(RelaySurface, androidx.compose.foundation.shape.RoundedCornerShape(14.dp)).border(1.dp, RelayBorder, androidx.compose.foundation.shape.RoundedCornerShape(14.dp)).padding(15.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Column(Modifier.weight(1f)) {
+            Text(label, color = RelayTextMuted)
+            Spacer(Modifier.height(3.dp))
+            Text(value, style = TechnicalTextStyle, color = RelayAccent, maxLines = 3)
         }
-
-        Spacer(
-            modifier = Modifier.width(16.dp)
-        )
-
-        Column(
-            modifier = Modifier.weight(1f)
-        ) {
-
-            Text(
-                text = deviceName,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
-
-            Spacer(
-                modifier = Modifier.height(4.dp)
-            )
-
-            Text(
-                text = nodeId,
-                style = MaterialTheme.typography.bodyMedium,
-                color =
-                    MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun ProfileInfoRow(
-    label: String,
-    value: String,
-    actionText: String? = null,
-    onAction: (() -> Unit)? = null
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment =
-            Alignment.CenterVertically
-    ) {
-
-        Column(
-            modifier = Modifier.weight(1f)
-        ) {
-
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color =
-                    MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(
-                modifier = Modifier.height(3.dp)
-            )
-
-            Text(
-                text = value,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
-            )
-        }
-
-        if (
-            actionText != null &&
-            onAction != null
-        ) {
-            Text(
-                text = actionText,
-                modifier = Modifier
-                    .clip(
-                        RoundedCornerShape(8.dp)
-                    )
-                    .clickable(
-                        onClick = onAction
-                    )
-                    .padding(
-                        horizontal = 10.dp,
-                        vertical = 8.dp
-                    ),
-                style =
-                    MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.Bold,
-                color =
-                    MaterialTheme.colorScheme.primary
-            )
+        if (onAction != null) {
+            Button(onClick = onAction) { Text("COPY") }
         }
     }
 }

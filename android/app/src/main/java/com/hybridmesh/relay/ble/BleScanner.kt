@@ -11,190 +11,111 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.model.NodeType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.UUID
 
 class BleScanner(
     context: Context,
     private val localNodeIdProvider: () -> String
 ) {
-
     private val appContext = context.applicationContext
-
     private val bluetoothManager =
-        appContext.getSystemService(
-            BluetoothManager::class.java
-        )
-
+        appContext.getSystemService(BluetoothManager::class.java)
     private val bluetoothAdapter: BluetoothAdapter?
         get() = bluetoothManager?.adapter
 
-    private val _state =
-        MutableStateFlow(BleOperationState.IDLE)
+    private val _state = MutableStateFlow(BleOperationState.IDLE)
+    val state: StateFlow<BleOperationState> = _state.asStateFlow()
 
-    val state: StateFlow<BleOperationState> =
-        _state.asStateFlow()
+    private val _errorCode = MutableStateFlow<Int?>(null)
+    val errorCode: StateFlow<Int?> = _errorCode.asStateFlow()
 
-    private val _errorCode =
-        MutableStateFlow<Int?>(null)
+    private val _peers = MutableStateFlow<List<BlePeer>>(emptyList())
+    val peers: StateFlow<List<BlePeer>> = _peers.asStateFlow()
 
-    val errorCode: StateFlow<Int?> =
-        _errorCode.asStateFlow()
+    private val _scanResultCount = MutableStateFlow(0L)
+    val scanResultCount: StateFlow<Long> = _scanResultCount.asStateFlow()
 
-    private val _peers =
-        MutableStateFlow<List<BlePeer>>(
-            emptyList()
-        )
+    private val _lastResultAt = MutableStateFlow<Long?>(null)
+    val lastResultAt: StateFlow<Long?> = _lastResultAt.asStateFlow()
 
-    val peers: StateFlow<List<BlePeer>> =
-        _peers.asStateFlow()
+    private val discoveredPeers = mutableMapOf<String, BlePeer>()
+    @Volatile private var scanning = false
 
-    private val _scanResultCount =
-        MutableStateFlow(0L)
-
-    val scanResultCount: StateFlow<Long> =
-        _scanResultCount.asStateFlow()
-
-    private val _lastResultAt =
-        MutableStateFlow<Long?>(null)
-
-    val lastResultAt: StateFlow<Long?> =
-        _lastResultAt.asStateFlow()
-
-    private val discoveredPeers =
-        mutableMapOf<String, BlePeer>()
-
-    private val lock = Any()
-
-    private val scanCallback =
-        object : ScanCallback() {
-
-            override fun onScanResult(
-                callbackType: Int,
-                result: ScanResult
-            ) {
-                _scanResultCount.value =
-                    _scanResultCount.value + 1
-
-                _lastResultAt.value =
-                    System.currentTimeMillis()
-
-                handleScanResult(result)
-            }
-
-            override fun onBatchScanResults(
-                results: MutableList<ScanResult>
-            ) {
-                if (results.isEmpty()) {
-                    return
-                }
-
-                _scanResultCount.value +=
-                    results.size.toLong()
-
-                _lastResultAt.value =
-                    System.currentTimeMillis()
-
-                results.forEach { result ->
-                    handleScanResult(result)
-                }
-            }
-
-            override fun onScanFailed(
-                errorCode: Int
-            ) {
-                _errorCode.value = errorCode
-                _state.value =
-                    BleOperationState.ERROR
-            }
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            if (!scanning) return
+            handleScanResult(result)
         }
+
+        override fun onBatchScanResults(results: MutableList<ScanResult>) {
+            if (!scanning) return
+            results.forEach(::handleScanResult)
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            scanning = false
+            _state.value = BleOperationState.ERROR
+            _errorCode.value = errorCode
+            clearPeers()
+        }
+    }
 
     @SuppressLint("MissingPermission")
     fun startScanning() {
-
-        if (!hasPermission()) {
-            _errorCode.value = ERROR_PERMISSION
-            _state.value =
-                BleOperationState.ERROR
+        if (!hasScanPermission()) {
+            setError(ERROR_PERMISSION)
             return
         }
 
-        if (
-            _state.value == BleOperationState.ACTIVE ||
-            _state.value == BleOperationState.STARTING
-        ) {
-            return
-        }
+        if (scanning) return
 
-        val adapter =
-            bluetoothAdapter ?: run {
-                _errorCode.value =
-                    ERROR_BLUETOOTH_UNAVAILABLE
-                _state.value =
-                    BleOperationState.ERROR
-                return
-            }
-
-        if (!isBleHardwareAvailable()) {
-            _errorCode.value =
-                ERROR_BLE_UNSUPPORTED
-            _state.value =
-                BleOperationState.ERROR
+        val adapter = bluetoothAdapter
+        if (adapter == null) {
+            setError(ERROR_BLUETOOTH_UNAVAILABLE)
             return
         }
 
         if (!safeIsBluetoothEnabled(adapter)) {
-            _errorCode.value =
-                ERROR_BLUETOOTH_DISABLED
-            _state.value =
-                BleOperationState.ERROR
+            clearPeers()
+            setError(ERROR_BLUETOOTH_DISABLED)
             return
         }
 
-        val scanner =
-            try {
-                adapter.bluetoothLeScanner
-            } catch (exception: SecurityException) {
-                null
-            }
+        val scanner = try {
+            adapter.bluetoothLeScanner
+        } catch (_: SecurityException) {
+            null
+        }
 
         if (scanner == null) {
-            _errorCode.value =
-                ERROR_SCANNER_UNAVAILABLE
-            _state.value =
-                BleOperationState.ERROR
+            setError(ERROR_SCANNER_UNAVAILABLE)
             return
         }
 
-        synchronized(lock) {
-            discoveredPeers.clear()
-            _peers.value = emptyList()
-        }
-
+        clearPeers()
+        _scanResultCount.value = 0L
+        _lastResultAt.value = null
         _errorCode.value = null
-        _state.value =
-            BleOperationState.STARTING
+        _state.value = BleOperationState.STARTING
+        scanning = true
 
-        val filter =
-            ScanFilter.Builder()
-                .setServiceUuid(
-                    ParcelUuid(
-                        BleConstants.SERVICE_UUID
-                    )
-                )
-                .build()
+        val filter = ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(BleConstants.SERVICE_UUID))
+            .build()
 
-        val settings =
-            ScanSettings.Builder()
-                .setScanMode(
-                    ScanSettings.SCAN_MODE_LOW_LATENCY
-                )
-                .setReportDelay(0L)
-                .build()
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setReportDelay(0L)
+            .build()
 
         try {
             scanner.startScan(
@@ -202,216 +123,170 @@ class BleScanner(
                 settings,
                 scanCallback
             )
-
-            _state.value =
-                BleOperationState.ACTIVE
-
-        } catch (exception: SecurityException) {
-            _errorCode.value =
-                ERROR_PERMISSION
-            _state.value =
-                BleOperationState.ERROR
-
-        } catch (exception: IllegalArgumentException) {
-            _errorCode.value =
-                ERROR_INVALID_SETTINGS
-            _state.value =
-                BleOperationState.ERROR
+            _state.value = BleOperationState.ACTIVE
+        } catch (_: SecurityException) {
+            scanning = false
+            setError(ERROR_PERMISSION)
+        } catch (_: IllegalArgumentException) {
+            scanning = false
+            setError(ERROR_INVALID_CONFIGURATION)
         }
     }
 
     @SuppressLint("MissingPermission")
-    fun stopScanning(
-        clearPeers: Boolean = true
-    ) {
-        val currentState = _state.value
-
-        if (
-            currentState == BleOperationState.IDLE &&
-            !clearPeers
-        ) {
+    fun stopScanning(clearPeers: Boolean = true) {
+        if (!scanning) {
+            if (clearPeers) clearPeers()
+            _state.value = BleOperationState.IDLE
+            _errorCode.value = null
             return
         }
 
-        _state.value =
-            BleOperationState.STOPPING
-
-        try {
-            bluetoothAdapter
-                ?.bluetoothLeScanner
-                ?.stopScan(scanCallback)
-        } catch (_: SecurityException) {
-            // Bluetooth permission may have changed during shutdown.
-        } finally {
-            if (clearPeers) {
-                synchronized(lock) {
-                    discoveredPeers.clear()
-                    _peers.value = emptyList()
-                }
-            }
-
-            _state.value =
-                BleOperationState.IDLE
-            _errorCode.value = null
+        scanning = false
+        _state.value = BleOperationState.STOPPING
+        runCatching {
+            bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
         }
+
+        if (clearPeers) clearPeers()
+
+        _state.value = BleOperationState.IDLE
+        _errorCode.value = null
     }
 
     fun clearPeers() {
-        synchronized(lock) {
+        synchronized(discoveredPeers) {
             discoveredPeers.clear()
-            _peers.value = emptyList()
         }
+        _peers.value = emptyList()
     }
 
-    fun expireStalePeers(
-        now: Long = System.currentTimeMillis()
-    ) {
-        synchronized(lock) {
-            val changed =
-                discoveredPeers.entries.removeIf { (_, peer) ->
-                    now - peer.lastSeen >
-                        BleConstants.PEER_TIMEOUT_MS
-                }
+    fun expireStalePeers(now: Long = System.currentTimeMillis()) {
+        if (!scanning) return
 
-            if (changed) {
-                _peers.value =
-                    discoveredPeers
-                        .values
-                        .sortedByDescending {
-                            it.rssi
-                        }
+        val changed = synchronized(discoveredPeers) {
+            val before = discoveredPeers.size
+            discoveredPeers.entries.removeIf {
+                now - it.value.lastSeen >
+                    BleConstants.PEER_STALE_AFTER_MS
             }
+            before != discoveredPeers.size
         }
+
+        if (changed) publishPeers()
     }
 
-    private fun handleScanResult(
-        result: ScanResult
-    ) {
-        val record =
-            result.scanRecord
-                ?: return
+    private fun handleScanResult(result: ScanResult) {
+        val record = result.scanRecord ?: return
+        val data = record.getManufacturerSpecificData(
+            BleConstants.MANUFACTURER_ID
+        ) ?: return
 
-        val data =
-            record.getServiceData(
-                ParcelUuid(
-                    BleConstants.SERVICE_DATA_UUID
-                )
-            ) ?: return
+        if (data.size < BleConstants.DISCOVERY_BASE_BYTES) return
 
-        if (
-            data.size <
-            BleConstants.PAYLOAD_SIZE
-        ) {
-            return
-        }
+        try {
+            val buffer = ByteBuffer
+                .wrap(data)
+                .order(ByteOrder.BIG_ENDIAN)
 
-        if (
-            data[0] !=
-            BleConstants.DISCOVERY_VERSION
-        ) {
-            return
-        }
+            if (buffer.get() != BleConstants.DISCOVERY_VERSION) return
 
-        val nodeSuffix =
-            data
-                .sliceArray(1..4)
-                .joinToString("") { byte ->
-                    "%02X".format(
-                        byte.toInt() and 0xFF
-                    )
-                }
+            val nodeUuid = UUID(
+                buffer.long,
+                buffer.long
+            )
 
-        val nodeId =
-            "HM-$nodeSuffix"
+            val nodeId = "HMR-$nodeUuid"
+            if (nodeId.equals(localNodeIdProvider(), true)) return
 
-        if (
-            nodeId ==
-            localNodeIdProvider()
-        ) {
-            return
-        }
-
-        val deviceType =
-            when (data[5]) {
-                BleConstants.DEVICE_TYPE_PHONE ->
-                    NodeType.PHONE
-
-                BleConstants.DEVICE_TYPE_RELAY ->
-                    NodeType.RELAY
-
-                else ->
-                    return
+            val deviceType = when (buffer.get()) {
+                BleConstants.DEVICE_TYPE_PHONE -> NodeType.PHONE
+                BleConstants.DEVICE_TYPE_RELAY -> NodeType.RELAY
+                else -> return
             }
 
-        val deviceName =
-            try {
-                result.device.name
-                    ?.takeIf { it.isNotBlank() }
-                    ?: "Hybrid Mesh Node"
-            } catch (_: SecurityException) {
-                "Hybrid Mesh Node"
-            }
+            val nameLength = buffer.get().toInt() and 0xFF
+            if (
+                nameLength > BleConstants.DISCOVERY_NAME_MAX_BYTES ||
+                buffer.remaining() < nameLength
+            ) return
 
-        val address =
-            try {
+            val nameBytes = ByteArray(nameLength)
+            buffer.get(nameBytes)
+
+            val deviceName = nameBytes
+                .toString(Charsets.UTF_8)
+                .trim()
+                .ifBlank { "Hybrid Mesh Device" }
+
+            val address = runCatching {
                 result.device.address
-            } catch (_: SecurityException) {
-                "Unknown"
-            }
+            }.getOrDefault("Unknown")
 
-        val peer =
-            BlePeer(
+            val peer = BlePeer(
                 nodeId = nodeId,
                 deviceName = deviceName,
                 deviceType = deviceType,
                 address = address,
                 rssi = result.rssi,
-                lastSeen =
-                    System.currentTimeMillis()
+                lastSeen = System.currentTimeMillis()
             )
 
-        synchronized(lock) {
-            discoveredPeers[nodeId] = peer
+            synchronized(discoveredPeers) {
+                discoveredPeers[nodeId] = peer
+            }
 
-            _peers.value =
-                discoveredPeers
-                    .values
-                    .sortedByDescending {
-                        it.rssi
-                    }
+            _scanResultCount.value += 1L
+            _lastResultAt.value = peer.lastSeen
+            publishPeers()
+        } catch (_: Exception) {
+            // Ignore malformed advertisements.
         }
     }
 
-    private fun hasPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            appContext,
-            Manifest.permission.BLUETOOTH_SCAN
-        ) == PackageManager.PERMISSION_GRANTED
+    private fun publishPeers() {
+        _peers.value = synchronized(discoveredPeers) {
+            discoveredPeers.values
+                .sortedByDescending(BlePeer::rssi)
+        }
     }
 
-    private fun isBleHardwareAvailable(): Boolean {
-        return appContext.packageManager.hasSystemFeature(
-            PackageManager.FEATURE_BLUETOOTH_LE
-        )
+    private fun hasScanPermission(): Boolean {
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN)
+        } else {
+            arrayOf(
+                Manifest.permission.BLUETOOTH,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        }
+
+        return permissions.all {
+            ContextCompat.checkSelfPermission(
+                appContext,
+                it
+            ) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
     @SuppressLint("MissingPermission")
     private fun safeIsBluetoothEnabled(
         adapter: BluetoothAdapter
-    ): Boolean {
-        return try {
-            adapter.isEnabled
-        } catch (_: SecurityException) {
-            false
-        }
+    ): Boolean = runCatching {
+        adapter.isEnabled
+    }.getOrDefault(false)
+
+    private fun setError(code: Int) {
+        scanning = false
+        _errorCode.value = code
+        _state.value = BleOperationState.ERROR
     }
 
     companion object {
         const val ERROR_PERMISSION = -200
         const val ERROR_BLUETOOTH_UNAVAILABLE = -201
         const val ERROR_BLUETOOTH_DISABLED = -202
-        const val ERROR_BLE_UNSUPPORTED = -203
-        const val ERROR_SCANNER_UNAVAILABLE = -204
-        const val ERROR_INVALID_SETTINGS = -205
+        const val ERROR_SCANNER_UNAVAILABLE = -203
+        const val ERROR_INVALID_CONFIGURATION = -204
     }
 }

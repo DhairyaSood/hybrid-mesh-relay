@@ -11,53 +11,20 @@ class DevicesViewModel(
     application: Application
 ) : AndroidViewModel(application) {
 
-    private val networkManager =
-        NetworkManager.getInstance(application)
+    private val networkManager = NetworkManager.getInstance(application)
+    private val identityStore = IdentityStore.getInstance(application)
 
-    private val identityStore =
-        IdentityStore(application)
-
-    val identity =
-        identityStore.getIdentity()
+    val identity: StateFlow<com.hybridmesh.relay.model.LocalIdentity> =
+        identityStore.identity
 
     val state: StateFlow<NetworkState> =
         networkManager.state
 
-    fun refresh() {
-        networkManager.refresh()
-    }
+    fun refresh() = networkManager.refresh()
 
-    fun enableNetwork() {
-        networkManager.enableNetwork()
-    }
 
-    fun startDiscovery() {
-        networkManager.startDiscovery()
-    }
+    fun clearPeers() = networkManager.clearPeers()
 
-    fun stopDiscovery() {
-        networkManager.stopDiscovery()
-    }
-
-    fun disableNetwork() {
-        networkManager.disableNetwork()
-    }
-
-    fun clearPeers() {
-        networkManager.clearPeers()
-    }
-
-    fun hasRequiredBlePermissions():
-        Boolean {
-        return networkManager
-            .hasRequiredBlePermissions()
-    }
-
-    override fun onCleared() {
-        /*
-         * The NetworkManager is application-scoped.
-         * Leaving Devices must not shut down BLE networking.
-         */
-        super.onCleared()
-    }
+    fun hasRequiredBlePermissions(): Boolean =
+        networkManager.hasRequiredBlePermissions()
 }

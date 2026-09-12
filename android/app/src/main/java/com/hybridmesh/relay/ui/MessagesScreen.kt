@@ -4,25 +4,45 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.hybridmesh.relay.model.Message
+import com.hybridmesh.relay.ble.BleOperationState
+import com.hybridmesh.relay.messaging.data.PeerEntity
+import com.hybridmesh.relay.messaging.model.ChatSummary
+import com.hybridmesh.relay.messaging.model.DeliveryStatus
+import com.hybridmesh.relay.network.NetworkState
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
@@ -30,165 +50,127 @@ import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 @Composable
-fun MessagesScreen(
-    onNewMessage: () -> Unit,
-    onConversationClick: (String) -> Unit
-) {
+fun MessagesScreen(onConversationClick: (String) -> Unit, onOpenDevices: () -> Unit = {}) {
     val viewModel: MessagesViewModel = viewModel()
-    val messages by viewModel.messages.collectAsState()
+    val chats by viewModel.chats.collectAsStateWithLifecycle()
+    val networkState by viewModel.networkState.collectAsStateWithLifecycle()
+    val knownPeers by viewModel.knownPeers.collectAsStateWithLifecycle()
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var showAddDialog by rememberSaveable { mutableStateOf(false) }
+    var nodeIdInput by rememberSaveable { mutableStateOf("") }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(RelayBackground)
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-
-        Text(
-            text = "Messages",
-            style = MaterialTheme.typography.headlineSmall
-        )
-
-        Text(
-            text = "Communication across available paths.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium
-        )
-
-        Spacer(
-            modifier = Modifier.height(4.dp)
-        )
-
-        if (messages.isEmpty()) {
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 48.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "No messages yet.",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                Text(
-                    text = "Messages you create will be stored locally on this device.",
-                    color = RelayTextMuted,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+    Box(Modifier.fillMaxSize().background(RelayBackground)) {
+        Column(Modifier.fillMaxSize()) {
+            Text("MESSAGES", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp))
+            PrimaryTabRow(selectedTabIndex = selectedTab) {
+                Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("CHATS", maxLines = 1) })
+                Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("NEARBY", maxLines = 1) })
             }
-
-        } else {
-
-            messages.forEach { message ->
-
-                MessageListItem(
-                    message = message,
-                    onClick = {
-                        onConversationClick(message.id)
-                    }
-                )
+            if (selectedTab == 0) ChatList(chats, onConversationClick) else NearbyList(networkState, knownPeers, onConversationClick, onOpenDevices)
+        }
+        if (selectedTab == 0) {
+            FloatingActionButton(onClick = { nodeIdInput = ""; error = null; showAddDialog = true }, containerColor = RelayAccent, contentColor = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)) {
+                Text("+", style = MaterialTheme.typography.headlineSmall)
             }
         }
+    }
 
-        Spacer(
-            modifier = Modifier.weight(1f)
+    if (showAddDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("ADD NODE") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter the other device's Node ID. The nickname can be learned later through BLE discovery.", style = MaterialTheme.typography.bodyMedium)
+                    TextField(value = nodeIdInput, onValueChange = { nodeIdInput = it.uppercase() }, singleLine = true, label = { Text("Node ID") }, placeholder = { Text("HMR-xxxxxxxx-....") }, supportingText = { Text(error ?: "") }, isError = error != null, modifier = Modifier.fillMaxWidth())
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    viewModel.addNode(nodeIdInput) { ok, value ->
+                        if (ok) { showAddDialog = false; onConversationClick(value) } else error = value
+                    }
+                }) { Text("ADD") }
+            },
+            dismissButton = { TextButton(onClick = { showAddDialog = false }) { Text("CANCEL") } }
         )
+    }
+}
 
-        Button(
-            onClick = onNewMessage,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp),
-            shape = RoundedCornerShape(14.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = RelayAccent,
-                contentColor = RelayBackground
-            )
-        ) {
-            Text(
-                text = "New Message"
-            )
+@Composable
+private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> Unit) {
+    if (chats.isEmpty()) {
+        EmptyState("NO CHATS YET", "Add a Node ID or open Nearby to start a conversation.")
+        return
+    }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 28.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        items(chats, key = { it.peerNodeId }) { chat -> ChatRow(chat, onConversationClick) }
+    }
+}
+
+@Composable
+private fun NearbyList(networkState: NetworkState, knownPeers: List<PeerEntity>, onConversationClick: (String) -> Unit, onOpenDevices: () -> Unit) {
+    val names = knownPeers.associateBy { it.nodeId.uppercase() }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 28.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (networkState.scanningState != BleOperationState.ACTIVE) {
+            item {
+                Column(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("DISCOVERY IS IDLE", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
+                    Text("Nearby discovery is managed by the background mesh service. Open Devices only for Bluetooth access or settings.")
+                    Button(onClick = onOpenDevices) { Text("OPEN DEVICES") }
+                }
+            }
+        }
+        if (networkState.peers.isEmpty()) {
+            item { EmptyState("NO PEERS IN RANGE", "Only currently discovered Hybrid Mesh nodes appear here.") }
+        } else {
+            items(networkState.peers, key = { it.nodeId }) { peer ->
+                val key = peer.nodeId.uppercase()
+                val name = names[key]?.displayName?.takeIf { it.isNotBlank() && !it.equals(peer.nodeId, true) } ?: peer.deviceName
+                Column(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface).border(1.dp, RelayBorder, MaterialTheme.shapes.large).clickable { onConversationClick(peer.nodeId) }.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(9.dp).background(RelayAccent, CircleShape))
+                        Spacer(Modifier.size(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Text(peer.nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1)
+                        }
+                        Text("${peer.rssi} dBm", style = TechnicalTextStyle, color = RelayTextMuted, maxLines = 1)
+                    }
+                    Text("${peer.deviceType.name} • IN RANGE • BLE DISCOVERED", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.padding(top = 8.dp), maxLines = 1)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun MessageListItem(
-    message: Message,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = RelaySurface,
-                shape = RoundedCornerShape(14.dp)
-            )
-            .border(
-                width = 1.dp,
-                color = RelayBorder,
-                shape = RoundedCornerShape(14.dp)
-            )
-            .clickable(
-                onClick = onClick
-            )
-            .padding(16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-
-        Column(
-            modifier = Modifier.weight(1f)
-        ) {
-
-            Text(
-                text = message.recipientId,
-                style = MaterialTheme.typography.titleMedium
-            )
-
-            Spacer(
-                modifier = Modifier.height(4.dp)
-            )
-
-            Text(
-                text = message.content,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            Spacer(
-                modifier = Modifier.height(6.dp)
-            )
-
-            Text(
-                text = "${message.status.name} • ${message.type.name}",
-                color = RelayTextMuted,
-                style = TechnicalTextStyle
-            )
+private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
+    val status = when (chat.lastStatus) {
+        DeliveryStatus.DELIVERED -> "DELIVERED"
+        DeliveryStatus.QUEUED -> "QUEUED"
+        DeliveryStatus.IN_FLIGHT -> "SENDING"
+        DeliveryStatus.FAILED -> "FAILED"
+        null -> ""
+    }
+    Column(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface).border(1.dp, RelayBorder, MaterialTheme.shapes.large).clickable { onConversationClick(chat.peerNodeId) }.padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(chat.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text(chat.peerNodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1)
+            }
+            if (status.isNotBlank()) Text(status, style = TechnicalTextStyle, color = RelayTextMuted, maxLines = 1)
         }
-
-        Text(
-            text = formatMessageTime(message.timestamp),
-            color = RelayTextMuted,
-            style = MaterialTheme.typography.labelSmall
-        )
     }
 }
 
-private fun formatMessageTime(
-    timestamp: Long
-): String {
-    return SimpleDateFormat(
-        "HH:mm",
-        Locale.getDefault()
-    ).format(
-        Date(timestamp)
-    )
+@Composable
+private fun EmptyState(title: String, body: String) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 36.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
+        Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }

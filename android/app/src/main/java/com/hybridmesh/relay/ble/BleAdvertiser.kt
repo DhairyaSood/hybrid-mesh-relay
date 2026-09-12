@@ -10,252 +10,346 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.model.LocalIdentity
 import com.hybridmesh.relay.model.NodeType
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-class BleAdvertiser(
-    context: Context
-) {
-
+/**
+ * Owns only BLE advertising/discovery metadata.
+ *
+ * Each Android advertisement session gets its own callback instance. This
+ * prevents a delayed callback from an older session from overwriting the state
+ * of a newer nickname/advertising generation.
+ */
+class BleAdvertiser(context: Context) {
     private val appContext = context.applicationContext
-
     private val bluetoothManager =
-        appContext.getSystemService(
-            BluetoothManager::class.java
-        )
-
+        appContext.getSystemService(BluetoothManager::class.java)
     private val bluetoothAdapter: BluetoothAdapter?
         get() = bluetoothManager?.adapter
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val generation = AtomicLong(0L)
+
+    @Volatile
     private var advertiser: BluetoothLeAdvertiser? = null
 
-    private val _state =
-        MutableStateFlow(BleOperationState.IDLE)
+    @Volatile
+    private var activeCallback: AdvertiseCallback? = null
 
-    val state: StateFlow<BleOperationState> =
-        _state.asStateFlow()
+    @Volatile
+    private var advertisedIdentityKey: String? = null
 
-    private val _errorCode =
-        MutableStateFlow<Int?>(null)
+    @Volatile
+    private var advertisingRequested = false
 
-    val errorCode: StateFlow<Int?> =
-        _errorCode.asStateFlow()
+    private val _state = MutableStateFlow(BleOperationState.IDLE)
+    val state: StateFlow<BleOperationState> = _state.asStateFlow()
 
-    private val advertiseCallback =
-        object : AdvertiseCallback() {
-
-            override fun onStartSuccess(
-                settingsInEffect: AdvertiseSettings
-            ) {
-                _errorCode.value = null
-                _state.value = BleOperationState.ACTIVE
-            }
-
-            override fun onStartFailure(
-                errorCode: Int
-            ) {
-                _errorCode.value = errorCode
-                _state.value = BleOperationState.ERROR
-            }
-        }
+    private val _errorCode = MutableStateFlow<Int?>(null)
+    val errorCode: StateFlow<Int?> = _errorCode.asStateFlow()
 
     @SuppressLint("MissingPermission")
-    fun startAdvertising(
-        identity: LocalIdentity
+    fun startAdvertising(identity: LocalIdentity) {
+        val currentGeneration = generation.incrementAndGet()
+        startAdvertising(identity, currentGeneration)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startAdvertising(
+        identity: LocalIdentity,
+        sessionGeneration: Long
     ) {
-        if (!hasPermission()) {
-            _errorCode.value = ERROR_PERMISSION
-            _state.value = BleOperationState.ERROR
+        if (!hasAdvertisePermission()) {
+            fail(ERROR_PERMISSION)
             return
         }
 
-        if (_state.value == BleOperationState.ACTIVE ||
-            _state.value == BleOperationState.STARTING
+        val adapter = bluetoothAdapter
+        if (adapter == null) {
+            fail(ERROR_BLUETOOTH_UNAVAILABLE)
+            return
+        }
+
+        if (!safeIsEnabled(adapter)) {
+            fail(ERROR_BLUETOOTH_DISABLED)
+            return
+        }
+
+        if (!adapter.isMultipleAdvertisementSupported) {
+            fail(ERROR_ADVERTISING_NOT_SUPPORTED)
+            return
+        }
+
+        val leAdvertiser = adapter.bluetoothLeAdvertiser
+        if (leAdvertiser == null) {
+            fail(ERROR_ADVERTISER_UNAVAILABLE)
+            return
+        }
+
+        val key = identity.nodeId + "|" + identity.deviceName
+        if (
+            advertisingRequested &&
+            advertisedIdentityKey == key &&
+            _state.value == BleOperationState.ACTIVE
         ) {
             return
         }
 
-        val adapter = bluetoothAdapter ?: run {
-            _errorCode.value = ERROR_BLUETOOTH_UNAVAILABLE
-            _state.value = BleOperationState.ERROR
-            return
-        }
-
-        if (!isBleHardwareAvailable()) {
-            _errorCode.value = ERROR_BLE_UNSUPPORTED
-            _state.value = BleOperationState.ERROR
-            return
-        }
-
-        if (!safeIsBluetoothEnabled(adapter)) {
-            _errorCode.value = ERROR_BLUETOOTH_DISABLED
-            _state.value = BleOperationState.ERROR
-            return
-        }
-
-        val bleAdvertiser =
-            try {
-                adapter.bluetoothLeAdvertiser
-            } catch (exception: SecurityException) {
-                null
+        val previousAdvertiser = advertiser
+        val previousCallback = activeCallback
+        if (previousAdvertiser != null && previousCallback != null) {
+            advertisingRequested = false
+            _state.value = BleOperationState.STOPPING
+            runCatching {
+                previousAdvertiser.stopAdvertising(previousCallback)
             }
-
-        if (bleAdvertiser == null) {
-            _errorCode.value = ERROR_ADVERTISER_UNAVAILABLE
-            _state.value = BleOperationState.ERROR
-            return
         }
 
-        advertiser = bleAdvertiser
+        advertisingRequested = true
+        advertisedIdentityKey = key
         _state.value = BleOperationState.STARTING
         _errorCode.value = null
 
-        val advertiseData =
-            AdvertiseData.Builder()
-                .addServiceUuid(
-                    ParcelUuid(
-                        BleConstants.SERVICE_UUID
-                    )
-                )
-                .setIncludeDeviceName(false)
-                .setIncludeTxPowerLevel(false)
-                .build()
+        val discoveryPayload = buildDiscoveryPayload(identity)
 
-        val scanResponse =
-            AdvertiseData.Builder()
-                .addServiceData(
-                    ParcelUuid(
-                        BleConstants.SERVICE_DATA_UUID
-                    ),
-                    buildPayload(identity)
-                )
-                .setIncludeDeviceName(false)
-                .setIncludeTxPowerLevel(false)
-                .build()
+        val serviceAdvertisement = AdvertiseData.Builder()
+            .addServiceUuid(ParcelUuid(BleConstants.SERVICE_UUID))
+            .setIncludeDeviceName(false)
+            .setIncludeTxPowerLevel(false)
+            .build()
 
-        val settings =
-            AdvertiseSettings.Builder()
-                .setAdvertiseMode(
-                    AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
-                )
-                .setTxPowerLevel(
-                    AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
-                )
-                .setConnectable(true)
-                .setTimeout(0)
-                .build()
+        val scanResponse = AdvertiseData.Builder()
+            .addManufacturerData(
+                BleConstants.MANUFACTURER_ID,
+                discoveryPayload
+            )
+            .setIncludeDeviceName(false)
+            .setIncludeTxPowerLevel(false)
+            .build()
+
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(
+                AdvertiseSettings.ADVERTISE_MODE_BALANCED
+            )
+            .setTxPowerLevel(
+                AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
+            )
+            .setConnectable(true)
+            .setTimeout(0)
+            .build()
+
+        val callback = newCallback(sessionGeneration)
+
+        advertiser = leAdvertiser
+        activeCallback = callback
 
         try {
-            bleAdvertiser.startAdvertising(
+            leAdvertiser.startAdvertising(
                 settings,
-                advertiseData,
+                serviceAdvertisement,
                 scanResponse,
-                advertiseCallback
+                callback
             )
-        } catch (exception: SecurityException) {
-            _errorCode.value = ERROR_PERMISSION
-            _state.value = BleOperationState.ERROR
-        } catch (exception: IllegalArgumentException) {
-            _errorCode.value = ERROR_INVALID_DATA
-            _state.value = BleOperationState.ERROR
+        } catch (_: SecurityException) {
+            if (generation.get() == sessionGeneration) {
+                advertisingRequested = false
+                advertiser = null
+                activeCallback = null
+                advertisedIdentityKey = null
+                fail(ERROR_PERMISSION)
+            }
+        } catch (_: IllegalArgumentException) {
+            if (generation.get() == sessionGeneration) {
+                advertisingRequested = false
+                advertiser = null
+                activeCallback = null
+                advertisedIdentityKey = null
+                fail(ERROR_INVALID_CONFIGURATION)
+            }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun restartAdvertising(identity: LocalIdentity) {
+        val sessionGeneration = generation.incrementAndGet()
+        val previousAdvertiser = advertiser
+        val previousCallback = activeCallback
+
+        advertisingRequested = false
+        advertiser = null
+        activeCallback = null
+        advertisedIdentityKey = null
+
+        if (previousAdvertiser != null && previousCallback != null) {
+            _state.value = BleOperationState.STOPPING
+            runCatching {
+                previousAdvertiser.stopAdvertising(previousCallback)
+            }
+        } else {
+            _state.value = BleOperationState.IDLE
+        }
+
+        _errorCode.value = null
+
+        // Android does not expose a stop callback. Give the Bluetooth stack a
+        // small handoff window before starting the replacement session.
+        mainHandler.postDelayed({
+            if (generation.get() == sessionGeneration) {
+                startAdvertising(identity, sessionGeneration)
+            }
+        }, RESTART_HANDOFF_MS)
     }
 
     @SuppressLint("MissingPermission")
     fun stopAdvertising() {
-        val currentState = _state.value
+        generation.incrementAndGet()
+        advertisingRequested = false
 
-        if (currentState == BleOperationState.IDLE) {
+        val currentAdvertiser = advertiser
+        val currentCallback = activeCallback
+        advertiser = null
+        activeCallback = null
+        advertisedIdentityKey = null
+
+        if (currentAdvertiser == null || currentCallback == null) {
+            _state.value = BleOperationState.IDLE
+            _errorCode.value = null
             return
         }
 
         _state.value = BleOperationState.STOPPING
-
-        try {
-            advertiser?.stopAdvertising(
-                advertiseCallback
-            )
-        } catch (_: SecurityException) {
-            // Permission may have disappeared while Bluetooth was changing state.
-        } finally {
-            advertiser = null
-            _errorCode.value = null
-            _state.value = BleOperationState.IDLE
+        runCatching {
+            currentAdvertiser.stopAdvertising(currentCallback)
         }
+        _state.value = BleOperationState.IDLE
+        _errorCode.value = null
     }
 
-    private fun hasPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            appContext,
-            Manifest.permission.BLUETOOTH_ADVERTISE
-        ) == PackageManager.PERMISSION_GRANTED
+    private fun newCallback(
+        sessionGeneration: Long
+    ): AdvertiseCallback =
+        object : AdvertiseCallback() {
+            override fun onStartSuccess(
+                settingsInEffect: AdvertiseSettings
+            ) {
+                if (generation.get() != sessionGeneration) return
+                if (advertisingRequested && activeCallback === this) {
+                    _errorCode.value = null
+                    _state.value = BleOperationState.ACTIVE
+                }
+            }
+
+            override fun onStartFailure(errorCode: Int) {
+                if (generation.get() != sessionGeneration) return
+                if (advertisingRequested && activeCallback === this) {
+                    _state.value = BleOperationState.ERROR
+                    _errorCode.value = errorCode
+                }
+            }
+        }
+
+    private fun buildDiscoveryPayload(identity: LocalIdentity): ByteArray {
+        val nodeUuid = runCatching {
+            UUID.fromString(
+                identity.nodeId.removePrefix("HMR-")
+            )
+        }.getOrElse {
+            UUID(0L, 0L)
+        }
+
+        val nicknameBytes = identity.deviceName
+            .trim()
+            .toByteArray(Charsets.UTF_8)
+            .truncateUtf8(
+                BleConstants.DISCOVERY_NAME_MAX_BYTES
+            )
+
+        return ByteBuffer
+            .allocate(
+                BleConstants.DISCOVERY_BASE_BYTES +
+                    nicknameBytes.size
+            )
+            .order(ByteOrder.BIG_ENDIAN)
+            .apply {
+                put(BleConstants.DISCOVERY_VERSION)
+                putLong(nodeUuid.mostSignificantBits)
+                putLong(nodeUuid.leastSignificantBits)
+                put(
+                    when (identity.deviceType) {
+                        NodeType.PHONE ->
+                            BleConstants.DEVICE_TYPE_PHONE
+                        NodeType.RELAY ->
+                            BleConstants.DEVICE_TYPE_RELAY
+                    }
+                )
+                put(nicknameBytes.size.toByte())
+                put(nicknameBytes)
+            }
+            .array()
     }
 
-    private fun isBleHardwareAvailable(): Boolean {
-        return appContext.packageManager.hasSystemFeature(
-            PackageManager.FEATURE_BLUETOOTH_LE
-        )
+    private fun ByteArray.truncateUtf8(
+        maxBytes: Int
+    ): ByteArray {
+        if (size <= maxBytes) return this
+        var end = maxBytes
+        while (
+            end > 0 &&
+            (this[end - 1].toInt() and 0xC0) == 0x80
+        ) {
+            end--
+        }
+        return copyOf(end)
+    }
+
+    private fun hasAdvertisePermission(): Boolean {
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE)
+        } else {
+            arrayOf(Manifest.permission.BLUETOOTH)
+        }
+
+        return permissions.all {
+            ContextCompat.checkSelfPermission(
+                appContext,
+                it
+            ) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
     @SuppressLint("MissingPermission")
-    private fun safeIsBluetoothEnabled(
+    private fun safeIsEnabled(
         adapter: BluetoothAdapter
-    ): Boolean {
-        return try {
-            adapter.isEnabled
-        } catch (_: SecurityException) {
-            false
-        }
-    }
+    ): Boolean = runCatching {
+        adapter.isEnabled
+    }.getOrDefault(false)
 
-    private fun buildPayload(
-        identity: LocalIdentity
-    ): ByteArray {
-
-        val suffix =
-            identity.nodeId
-                .removePrefix("HM-")
-                .takeLast(8)
-                .padStart(8, '0')
-
-        val nodeBytes =
-            suffix
-                .chunked(2)
-                .map { pair ->
-                    pair.toInt(16).toByte()
-                }
-                .toByteArray()
-
-        val deviceType =
-            when (identity.deviceType) {
-                NodeType.PHONE ->
-                    BleConstants.DEVICE_TYPE_PHONE
-
-                NodeType.RELAY ->
-                    BleConstants.DEVICE_TYPE_RELAY
-            }
-
-        return byteArrayOf(
-            BleConstants.DISCOVERY_VERSION,
-            nodeBytes[0],
-            nodeBytes[1],
-            nodeBytes[2],
-            nodeBytes[3],
-            deviceType
-        )
+    private fun fail(code: Int) {
+        advertisingRequested = false
+        _state.value = BleOperationState.ERROR
+        _errorCode.value = code
     }
 
     companion object {
         const val ERROR_PERMISSION = -100
         const val ERROR_BLUETOOTH_UNAVAILABLE = -101
         const val ERROR_BLUETOOTH_DISABLED = -102
-        const val ERROR_BLE_UNSUPPORTED = -103
+        const val ERROR_ADVERTISING_NOT_SUPPORTED = -104
         const val ERROR_ADVERTISER_UNAVAILABLE = -105
-        const val ERROR_INVALID_DATA = -106
+        const val ERROR_INVALID_CONFIGURATION = -106
+
+        private const val RESTART_HANDOFF_MS = 200L
     }
 }

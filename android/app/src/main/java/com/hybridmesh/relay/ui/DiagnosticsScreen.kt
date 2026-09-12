@@ -4,21 +4,23 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hybridmesh.relay.data.IdentityStore
+import com.hybridmesh.relay.messaging.MessagingManager
 import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
 import com.hybridmesh.relay.ui.theme.RelayAccent
@@ -31,268 +33,76 @@ import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 
 @Composable
 fun DiagnosticsScreen() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val network by NetworkManager.getInstance(context).state.collectAsStateWithLifecycle()
+    val viewModel: MessagesViewModel = viewModel()
+    val sent by viewModel.sentCount.collectAsStateWithLifecycle()
+    val received by viewModel.receivedCount.collectAsStateWithLifecycle()
+    val queued by viewModel.queuedCount.collectAsStateWithLifecycle()
+    val transport by MessagingManager.getInstance(context).transport.collectAsStateWithLifecycle()
+    val identity by IdentityStore.getInstance(context).identity.collectAsStateWithLifecycle()
 
-    val context =
-        LocalContext.current
-
-    val networkManager =
-        NetworkManager.getInstance(context)
-
-    val state by
-        networkManager.state
-            .collectAsStateWithLifecycle()
-
-    val messagesViewModel:
-            MessagesViewModel =
-        viewModel()
-
-    val messages by
-        messagesViewModel.messages
-            .collectAsStateWithLifecycle()
-
-    val nodeId =
-        IdentityStore(context)
-            .getIdentity()
-            .nodeId
-
-    val sent =
-        messages.count {
-            it.senderId == nodeId
-        }
-
-    val received =
-        messages.count {
-            it.senderId != nodeId
-        }
-
-    val queued =
-        messages.count {
-            it.status.name == "QUEUED"
-        }
-
-    val failed =
-        messages.count {
-            it.status.name == "FAILED"
-        }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                RelayBackground
-            )
-            .padding(18.dp),
-        verticalArrangement =
-            Arrangement.spacedBy(10.dp)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().background(RelayBackground),
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-
-        Text(
-            text = "Diagnostics",
-            style =
-                MaterialTheme
-                    .typography
-                    .headlineSmall
-        )
-
-        Text(
-            text =
-                "Live system state and communication telemetry.",
-            color =
-                MaterialTheme
-                    .colorScheme
-                    .onSurfaceVariant,
-            style =
-                MaterialTheme
-                    .typography
-                    .bodyMedium
-        )
-
-        DiagnosticRow(
-            label = "BLE support",
-            value =
-                if (state.bleSupported) {
-                    "YES"
-                } else {
-                    "NO"
-                }
-        )
-
-        DiagnosticRow(
-            label = "Bluetooth",
-            value =
-                when (
-                    state.bluetoothState
-                ) {
-                    BluetoothState.ON ->
-                        "ON"
-
-                    BluetoothState.OFF ->
-                        "OFF"
-
-                    BluetoothState.UNSUPPORTED ->
-                        "UNSUPPORTED"
-                }
-        )
-
-        DiagnosticRow(
-            label = "Permissions",
-            value =
-                if (
-                    state.permissionsGranted
-                ) {
-                    "GRANTED"
-                } else {
-                    "MISSING"
-                }
-        )
-
-        DiagnosticRow(
-            label = "Advertising",
-            value =
-                state.advertisingState
-                    .name
-        )
-
-        DiagnosticRow(
-            label = "Scanning",
-            value =
-                state.scanningState
-                    .name
-        )
-
-        DiagnosticRow(
-            label = "Nearby peers",
-            value =
-                state.nearbyDeviceCount
-                    .toString()
-        )
-
-        DiagnosticRow(
-            label = "Phone peers",
-            value =
-                state.phoneNodeCount
-                    .toString()
-        )
-
-        DiagnosticRow(
-            label = "Relay peers",
-            value =
-                state.relayNodeCount
-                    .toString()
-        )
-
-        DiagnosticRow(
-            label = "Scan results",
-            value =
-                state.scanResultCount
-                    .toString()
-        )
-
-        DiagnosticRow(
-            label = "Messages sent",
-            value =
-                sent.toString()
-        )
-
-        DiagnosticRow(
-            label = "Messages received",
-            value =
-                received.toString()
-        )
-
-        DiagnosticRow(
-            label = "Messages queued",
-            value =
-                queued.toString()
-        )
-
-        DiagnosticRow(
-            label = "Messages failed",
-            value =
-                failed.toString()
-        )
-
-        DiagnosticRow(
-            label = "Node ID",
-            value =
-                nodeId
-        )
-
-        DiagnosticRow(
-            label = "Protocol",
-            value =
-                "HMR-DISCOVERY/1"
-        )
-
-        state.advertisingErrorCode?.let {
-            DiagnosticRow(
-                label =
-                    "Advertising error",
-                value =
-                    it.toString()
-            )
+        item {
+            Text("DIAGNOSTICS", style = MaterialTheme.typography.headlineSmall, maxLines = 1)
+            Text("Live system state and communication telemetry.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-
-        state.scanningErrorCode?.let {
-            DiagnosticRow(
-                label =
-                    "Scanning error",
-                value =
-                    it.toString()
-            )
+        item { DiagnosticRow("BLE capability", if (network.bleSupported) "YES" else "NO") }
+        item { DiagnosticRow("Bluetooth", when (network.bluetoothState) {
+            BluetoothState.ON -> "ON"
+            BluetoothState.OFF -> "OFF"
+            BluetoothState.UNSUPPORTED -> "UNSUPPORTED"
+        }) }
+        item { DiagnosticRow("Permissions", if (network.permissionsGranted) "GRANTED" else "MISSING") }
+        item { DiagnosticRow("Advertising", network.advertisingState.name) }
+        item { DiagnosticRow("Scanning", network.scanningState.name) }
+        item { DiagnosticRow("Nearby peers", network.nearbyDeviceCount.toString()) }
+        item { DiagnosticRow("Phone peers", network.phoneNodeCount.toString()) }
+        item { DiagnosticRow("Relay peers", network.relayNodeCount.toString()) }
+        item { DiagnosticRow("Scan callbacks", network.scanResultCount.toString()) }
+        item { DiagnosticRow("Messages sent", sent.toString()) }
+        item { DiagnosticRow("Messages received", received.toString()) }
+        item { DiagnosticRow("Messages queued", queued.toString()) }
+        item { DiagnosticRow("GATT transport", transport.state.name) }
+        item { DiagnosticRow("GATT error", transport.error.name) }
+        item { DiagnosticRow("GATT MTU", transport.mtu?.toString() ?: "—") }
+        transport.frameCount?.let {
+            item { DiagnosticRow("GATT frame", "${transport.frameIndex?.plus(1) ?: 0}/$it") }
+        }
+        item { DiagnosticRow("Internet", if (network.internetAvailable) "AVAILABLE" else "OFFLINE") }
+        item { DiagnosticRow("Node ID", identity.nodeId) }
+        item { DiagnosticRow("Protocol", "HMR-DISCOVERY/2 + HMR-GATT/1") }
+        network.advertisingErrorCode?.let { code ->
+            item { DiagnosticRow("Advertising error", code.toString()) }
+        }
+        network.scanningErrorCode?.let { code ->
+            item { DiagnosticRow("Scanning error", code.toString()) }
         }
     }
 }
 
 @Composable
-private fun DiagnosticRow(
-    label: String,
-    value: String
-) {
+private fun DiagnosticRow(label: String, value: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(
-                RelaySurface,
-                RoundedCornerShape(12.dp)
-            )
-            .border(
-                1.dp,
-                RelayBorder,
-                RoundedCornerShape(12.dp)
-            )
+            .background(RelaySurface, androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+            .border(1.dp, RelayBorder, androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
             .padding(14.dp),
-        horizontalArrangement =
-            Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
-
+        Text(label, color = RelayTextMuted, modifier = Modifier.weight(1f), maxLines = 2)
         Text(
-            text = label,
-            color =
-                RelayTextMuted,
-            style =
-                MaterialTheme
-                    .typography
-                    .bodyMedium
-        )
-
-        Text(
-            text = value,
-            style =
-                TechnicalTextStyle,
-            color =
-                if (
-                    value == "ON" ||
-                    value == "ACTIVE" ||
-                    value == "YES" ||
-                    value == "GRANTED"
-                ) {
-                    RelayAccent
-                } else {
-                    MaterialTheme
-                        .colorScheme
-                        .onSurface
-                }
+            value,
+            color = RelayAccent,
+            style = TechnicalTextStyle,
+            modifier = Modifier.padding(start = 12.dp),
+            maxLines = 3
         )
     }
 }

@@ -171,11 +171,11 @@ fun ComposeMessageScreen(
                     Priority.EMERGENCY -> MessageType.EMERGENCY
                 }
 
-                viewModel.sendMessage(
-                    recipientId = recipient,
+                viewModel.send(
+                    peerNodeId = recipient,
                     content = messageText,
                     type = type,
-                    onSaved = onMessageSent
+                    onDone = onMessageSent
                 )
             },
             enabled = recipient.isNotBlank() && messageText.isNotBlank(),
