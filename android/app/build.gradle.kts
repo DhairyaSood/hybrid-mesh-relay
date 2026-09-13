@@ -15,14 +15,35 @@ android {
         applicationId = "com.hybridmesh.relay"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+
+        // These can be overridden by GitHub Actions using:
+        // -PversionCode=...
+        // -PversionName=...
+        versionCode = providers.gradleProperty("versionCode")
+            .orElse("1")
+            .get()
+            .toInt()
+
+        versionName = providers.gradleProperty("versionName")
+            .orElse("1.0")
+            .get()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+    create("release") {
+        storeFile = file("${rootProject.projectDir}/release-key.jks")
+        storePassword = providers.environmentVariable("KEYSTORE_PASSWORD").orNull
+        keyAlias = providers.environmentVariable("KEY_ALIAS").orNull
+        keyPassword = providers.environmentVariable("KEY_PASSWORD").orNull
+    }
+}
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
+
             optimization {
                 enable = false
             }
