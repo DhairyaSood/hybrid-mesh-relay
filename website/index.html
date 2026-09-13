@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hybrid Mesh Relay — Resilient communication, without infrastructure</title>
+<meta name="description" content="Hybrid Mesh Relay is an experimental offline communication system combining smartphone peer-to-peer networking with portable long-range relay nodes." />
+<link rel="icon" type="image/png" href="assets/logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<a class="visually-hidden" href="#main">Skip to content</a>
+
+<header class="site-header" id="site-header">
+  <div class="container">
+    <a href="#top" class="brand">
+      <img src="assets/logo.png" alt="Hybrid Mesh Relay logo" width="26" height="26" />
+      <span>Hybrid Mesh Relay</span>
+    </a>
+
+    <nav class="main-nav" id="main-nav" aria-label="Primary">
+      <a href="#about">About</a>
+      <a href="#features">Features</a>
+      <a href="#how-it-works">How it works</a>
+      <a href="#technical">Technical</a>
+      <a href="#release">Release</a>
+      <a href="https://github.com/DhairyaSood/hybrid-mesh-relay">GitHub</a>
+    </nav>
+
+    <div class="nav-actions">
+      <a class="btn btn-secondary" href="https://github.com/DhairyaSood/hybrid-mesh-relay">View on GitHub</a>
+      <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="main-nav" aria-label="Toggle navigation menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ============================= HERO ============================= -->
+  <section class="hero" id="top" style="border-top:none; padding-top:56px;">
+    <div class="container hero-grid">
+      <div class="hero-copy">
+        <div class="hero-badge">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          Open-source · Android prototype
+        </div>
+
+        <img src="assets/logo.png" alt="" width="40" height="40" style="margin-bottom:20px;" aria-hidden="true" />
+
+        <h1>Hybrid Mesh Relay</h1>
+        <p class="tagline">Resilient communication, without infrastructure.</p>
+        <p class="supporting">
+          Hybrid Mesh Relay is an experimental offline communication system that combines
+          smartphone peer-to-peer networking with portable long-range relay nodes to keep
+          messages moving when conventional connectivity is unavailable.
+        </p>
+
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/DhairyaSood/hybrid-mesh-relay/releases/latest/download/hybrid-mesh-relay.apk">
+            Download APK
+          </a>
+          <a class="btn btn-secondary" href="https://github.com/DhairyaSood/hybrid-mesh-relay">
+            View on GitHub
+          </a>
+        </div>
+
+        <div class="hero-status">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          Latest Android build available
+        </div>
+      </div>
+
+      <div class="hero-visual">
+        <div class="diagram-card">
+          <svg viewBox="0 0 320 320" role="img" aria-label="Diagram showing two phones each connecting through a local phone mesh to a portable relay, with the two relays linked over LoRa">
+            <!-- vertical link lines -->
+            <line class="link-line active" x1="160" y1="30" x2="160" y2="82"/>
+            <line class="link-line" x1="160" y1="82" x2="160" y2="130"/>
+            <line class="link-line active" x1="160" y1="130" x2="160" y2="160"/>
+            <line class="link-line active" x1="160" y1="160" x2="160" y2="190"/>
+            <line class="link-line" x1="160" y1="190" x2="160" y2="238"/>
+            <line class="link-line active" x1="160" y1="238" x2="160" y2="290"/>
+
+            <!-- Phone A -->
+            <circle class="node-dot" cx="160" cy="30" r="8"/>
+            <text class="node-label" x="176" y="34">Phone</text>
+
+            <!-- Local mesh A -->
+            <text class="node-label" text-anchor="middle" x="160" y="60">local phone mesh</text>
+
+            <!-- Relay A -->
+            <circle class="node-dot relay" cx="160" cy="145" r="9"/>
+            <text class="node-label" x="176" y="149">Portable Relay</text>
+
+            <!-- LoRa label -->
+            <text class="node-label" text-anchor="middle" x="160" y="178" fill="var(--accent)">LoRa</text>
+
+            <!-- Relay B -->
+            <circle class="node-dot relay" cx="160" cy="205" r="9"/>
+            <text class="node-label" x="176" y="209">Portable Relay</text>
+
+            <!-- Local mesh B -->
+            <text class="node-label" text-anchor="middle" x="160" y="252">local phone mesh</text>
+
+            <!-- Phone B -->
+            <circle class="node-dot" cx="160" cy="290" r="8"/>
+            <text class="node-label" x="176" y="294">Phone</text>
+          </svg>
+          <div class="diagram-caption">
+            <span>phone ↔ phone (local)</span>
+            <span>relay ↔ relay (LoRa)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= ABOUT ============================= -->
+  <section id="about">
+    <div class="container">
+      <div class="section-head">
+        <h2 class="section-heading">Built for resilient communication</h2>
+        <p class="section-lede">
+          Hybrid Mesh Relay uses a two-tier communication architecture, designed around a
+          hybrid model rather than being only a smartphone mesh or only a long-range LoRa network.
+        </p>
+      </div>
+
+      <div class="tier-grid">
+        <div class="tier">
+          <div class="tier-index">Tier 1</div>
+          <h3>Local phone mesh</h3>
+          <p>Smartphones communicate directly with nearby smartphones using infrastructure-free peer-to-peer wireless communication — no cell towers, no internet, no central server.</p>
+        </div>
+        <div class="tier">
+          <div class="tier-index">Tier 2</div>
+          <h3>Portable relay bridge</h3>
+          <p>When a direct local path is unavailable or unreliable, a portable relay can bridge communication using BLE between the phone and relay, and LoRa between relay nodes.</p>
+        </div>
+      </div>
+
+      <div class="path-strip">
+        <span>Phone A</span> → <span class="accent">Relay A</span> → <span class="accent">Relay B</span> → <span>Phone B</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= FEATURES ============================= -->
+  <section id="features">
+    <div class="container">
+      <div class="section-head">
+        <h2 class="section-heading">What it does</h2>
+        <p class="section-lede">A compact set of capabilities aimed at keeping messages moving when the network can't.</p>
+      </div>
+
+      <div class="feature-grid">
+        <div class="feature">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.4 8.5 8.5 0 0 1-4-1L3 20l1.2-5.5A8.4 8.4 0 0 1 3.5 11.5 8.38 8.38 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5Z"/></svg>
+          <h3>Offline messaging</h3>
+          <p>Messages can be exchanged without relying on cellular service or internet connectivity.</p>
+        </div>
+        <div class="feature">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M6 8.4V12l6 4M18 8.4V12l-6 4"/></svg>
+          <h3>Hybrid networking</h3>
+          <p>Combines local smartphone communication with portable long-range relay nodes.</p>
+        </div>
+        <div class="feature">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h.01M15 9h.01M9 15h6"/></svg>
+          <h3>Portable relay nodes</h3>
+          <p>Low-cost ESP32-based relay devices extend communication between separated phone clusters.</p>
+        </div>
+        <div class="feature">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>
+          <h3>Store and forward</h3>
+          <p>Messages can be temporarily queued by relay nodes and forwarded once a path becomes available.</p>
+        </div>
+        <div class="feature">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12l5 5L20 6"/></svg>
+          <h3>Delivery tracking</h3>
+          <p>Messages expose useful delivery and transport states such as queued, relaying and delivered.</p>
+        </div>
+        <div class="feature">
+          <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+          <h3>Network visibility</h3>
+          <p>Inspect nearby devices, relay nodes, transport state and useful diagnostics.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= HOW IT WORKS ============================= -->
+  <section id="how-it-works">
+    <div class="container">
+      <div class="section-head">
+        <h2 class="section-heading">How a message travels</h2>
+        <p class="section-lede">A conceptual path from one phone to another when a portable relay bridges the gap.</p>
+      </div>
+
+      <div class="flow">
+        <div class="flow-node">
+          <div class="flow-marker">A</div>
+          <div class="flow-body">
+            <strong>Phone A</strong>
+            <span>Message originates on the sending device</span>
+          </div>
+        </div>
+        <div class="flow-connector"><span class="flow-connector-label">local mesh</span></div>
+
+        <div class="flow-node">
+          <div class="flow-marker relay">R</div>
+          <div class="flow-body">
+            <strong>Portable Relay A</strong>
+            <span>Received over Bluetooth Low Energy</span>
+          </div>
+        </div>
+        <div class="flow-connector"><span class="flow-connector-label">LoRa</span></div>
+
+        <div class="flow-node">
+          <div class="flow-marker relay">R</div>
+          <div class="flow-body">
+            <strong>Portable Relay B</strong>
+            <span>Long-range hop between relay nodes</span>
+          </div>
+        </div>
+        <div class="flow-connector"><span class="flow-connector-label">local mesh</span></div>
+
+        <div class="flow-node">
+          <div class="flow-marker">B</div>
+          <div class="flow-body">
+            <strong>Phone B</strong>
+            <span>Message delivered over Bluetooth Low Energy</span>
+          </div>
+        </div>
+      </div>
+
+      <p class="flow-note">Range and reliability depend on terrain, hardware and conditions. Hybrid Mesh Relay does not guarantee kilometer-scale range or commercial public-safety reliability.</p>
+    </div>
+  </section>
+
+  <!-- ============================= TECHNICAL ============================= -->
+  <section id="technical">
+    <div class="container">
+      <div class="section-head">
+        <h2 class="section-heading">Technical overview</h2>
+        <p class="section-lede">For those who want the detail underneath the product story.</p>
+      </div>
+
+      <dl class="spec-table">
+        <div class="spec-row">
+          <dt>Platform</dt>
+          <dd>Android-first prototype</dd>
+        </div>
+        <div class="spec-row">
+          <dt>Phone ↔ Phone</dt>
+          <dd>Wi-Fi peer-to-peer — infrastructure-free local communication</dd>
+        </div>
+        <div class="spec-row">
+          <dt>Phone ↔ Relay</dt>
+          <dd>Bluetooth Low Energy</dd>
+        </div>
+        <div class="spec-row">
+          <dt>Relay ↔ Relay</dt>
+          <dd>LoRa</dd>
+        </div>
+        <div class="spec-row">
+          <dt>Relay hardware</dt>
+          <dd>ESP32 + SX1278 / Ra-02 class LoRa hardware</dd>
+        </div>
+        <div class="spec-row">
+          <dt>Messaging</dt>
+          <dd>Compact packet-based protocol</dd>
+        </div>
+        <div class="spec-row">
+          <dt>Routing concepts</dt>
+          <dd>
+            <div class="chip-row">
+              <span class="chip">TTL</span>
+              <span class="chip">Message IDs</span>
+              <span class="chip">Deduplication</span>
+              <span class="chip">ACKs</span>
+              <span class="chip">Store-and-forward</span>
+            </div>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <!-- ============================= STATUS ============================= -->
+  <section id="status">
+    <div class="container">
+      <div class="section-head">
+        <h2 class="section-heading">Project status</h2>
+      </div>
+
+      <div class="status-panel">
+        <div>
+          <div class="status-indicator">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            Active development
+          </div>
+          <p>
+            Hybrid Mesh Relay is an experimental, open-source engineering project. It is being
+            developed and evaluated through controlled testing, and is not presented as a
+            production-grade emergency communications service.
+          </p>
+        </div>
+        <div class="status-meta">
+          <div>repo: hybrid-mesh-relay</div>
+          <div>license: open-source</div>
+          <div>stage: prototype</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= RELEASE ============================= -->
+  <section id="release">
+    <div class="container">
+      <div class="section-head">
+        <h2 class="section-heading">Latest release</h2>
+      </div>
+
+      <div class="release-card">
+        <div class="release-meta">
+          <div class="eyebrow">Latest release</div>
+          <h3>Hybrid Mesh Relay</h3>
+          <div class="platform">Android APK</div>
+          <div class="release-version">
+            <span class="mono" id="release-version">version: latest</span>
+          </div>
+        </div>
+        <div class="release-actions">
+          <a class="btn btn-primary" href="https://github.com/DhairyaSood/hybrid-mesh-relay/releases/latest/download/hybrid-mesh-relay.apk">
+            Download latest APK
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/DhairyaSood/hybrid-mesh-relay/releases">
+            View releases
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= INSTALLATION ============================= -->
+  <section id="installation">
+    <div class="container">
+      <div class="section-head">
+        <h2 class="section-heading">Installation</h2>
+      </div>
+
+      <ol class="steps">
+        <li>Download the APK.</li>
+        <li>Open the downloaded APK on Android.</li>
+        <li>Allow installation from the browser or file manager if Android requests it.</li>
+        <li>Install the app.</li>
+        <li>Grant the required wireless and network permissions.</li>
+      </ol>
+
+      <p class="install-note">This project is currently distributed as an Android APK outside Google Play.</p>
+    </div>
+  </section>
+
+  <!-- ============================= OPEN SOURCE ============================= -->
+  <section id="open-source">
+    <div class="container">
+      <div class="oss-panel">
+        <div>
+          <h2 class="section-heading" style="font-size:22px; margin-bottom:10px;">Open source</h2>
+          <p>The project is developed in public. Source code, protocol design, firmware and documentation are all available on GitHub.</p>
+        </div>
+        <a class="btn btn-secondary" href="https://github.com/DhairyaSood/hybrid-mesh-relay">View source</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= CREATOR ============================= -->
+  <section id="creator">
+    <div class="container">
+      <div class="creator-row">
+        <div>
+          <div class="eyebrow">Built by</div>
+          <div class="creator-name">Dhairya Sood</div>
+        </div>
+        <div class="creator-links">
+          <a class="icon-link" href="https://github.com/DhairyaSood" aria-label="Dhairya Sood on GitHub">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.93.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.34-1.28-1.7-1.28-1.7-1.04-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.26-1.28-5.26-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.76.12 3.05.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.4-5.28 5.69.42.36.78 1.08.78 2.18 0 1.57-.01 2.83-.01 3.22 0 .3.2.66.79.55A10.52 10.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
+          </a>
+          <a class="icon-link" href="https://www.linkedin.com/in/dhairya-sood/" aria-label="Dhairya Sood on LinkedIn">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4.98 3.5a2.5 2.5 0 1 1 0 5.001 2.5 2.5 0 0 1 0-5.001ZM.5 8.98h8.96V23.5H.5V8.98ZM8.98 8.98h8.6v2h.12c.37-.7 1.62-2.32 4.14-2.32 4.42 0 5.24 2.91 5.24 6.69v7.15h-8.96v-6.34c0-1.51-.03-3.45-2.1-3.45-2.1 0-2.43 1.64-2.43 3.34v6.45H8.98V8.98Z"/></svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============================= FOOTER ============================= -->
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <div class="footer-brand">
+          <img src="assets/logo.png" alt="Hybrid Mesh Relay logo" width="22" height="22" />
+          <span>Hybrid Mesh Relay</span>
+        </div>
+        <div class="footer-tagline">Resilient communication, without infrastructure.</div>
+      </div>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/DhairyaSood/hybrid-mesh-relay">GitHub</a>
+        <a href="https://www.linkedin.com/in/dhairya-sood/">LinkedIn</a>
+        <a href="https://github.com/DhairyaSood/hybrid-mesh-relay/releases/latest/download/hybrid-mesh-relay.apk">Download APK</a>
+      </nav>
+    </div>
+
+    <div class="footer-bottom">Open-source project • Android prototype</div>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>
