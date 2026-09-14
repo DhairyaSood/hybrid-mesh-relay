@@ -19,8 +19,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -122,17 +125,46 @@ fun ConversationScreen(peerNodeId: String) {
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(displayName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Text(peerNodeId, style = MaterialTheme.typography.labelSmall, color = RelayAccent)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            displayName,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text(
+                            if (networkState.peers.any { it.nodeId.equals(peerNodeId, true) }) {
+                                "IN RANGE"
+                            } else {
+                                "NOT IN RANGE"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = RelayTextMuted
+                        )
                     }
-                    Text(
-                        if (networkState.peers.any { it.nodeId.equals(peerNodeId, true) }) "IN RANGE" else "NOT IN RANGE",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = RelayTextMuted
-                    )
+
+                    TextButton(onClick = { showDeleteChat = true }) {
+                        Text(
+                            "DELETE CHAT",
+                            color = RelayTextMuted,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
                 }
+
+                Text(
+                    peerNodeId,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = RelayAccent
+                )
+
                 if (networkState.bleRuntimeState != BleRuntimeState.READY) {
                     Text(
                         when (networkState.bleRuntimeState) {
@@ -183,7 +215,14 @@ fun ConversationScreen(peerNodeId: String) {
                             }
                         },
                         modifier = Modifier.size(44.dp)
-                    ) { Text("⌖", color = RelayAccent) }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.LocationOn,
+                            contentDescription = "Share location",
+                            tint = RelayAccent
+                        )
+                    }
+
                     OutlinedTextField(
                         value = draft,
                         onValueChange = { draft = it },
@@ -192,14 +231,17 @@ fun ConversationScreen(peerNodeId: String) {
                         maxLines = 4,
                         placeholder = { Text("Message") }
                     )
+
                     Spacer(Modifier.size(6.dp))
                     Button(onClick = ::sendText, enabled = draft.trim().isNotBlank(), modifier = Modifier.height(46.dp)) {
                         Text("SEND")
                     }
                 }
+
                 if (locationError != null) {
                     Text(locationError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 46.dp, top = 4.dp))
                 }
+
                 Row(Modifier.padding(start = 46.dp, top = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     listOf(MessageType.NORMAL, MessageType.PRIORITY, MessageType.EMERGENCY).forEach { type ->
                         TextButton(onClick = { selectedType = type.name }) {
@@ -207,7 +249,6 @@ fun ConversationScreen(peerNodeId: String) {
                         }
                     }
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { showDeleteChat = true }) { Text("DELETE CHAT", color = RelayTextMuted, style = MaterialTheme.typography.labelSmall) }
                 }
             }
         }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -70,7 +71,14 @@ private fun Advanced(state: NetworkState, transport: com.hybridmesh.relay.messag
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { MetricCard("TRANSPORT STATE", transport.state.name, transport.error.name) }
         item { MetricCard("PEER", transport.peerAddress ?: "—", transport.messageId ?: "No active message") }
-        item { MetricCard("MTU", transport.mtu.toString(), "payload/frame ${com.hybridmesh.relay.messaging.protocol.GattPacketCodec.safePayloadBytes(transport.mtu)} B") }
+        item {
+            val mtu = transport.mtu ?: 23
+            MetricCard(
+                "MTU",
+                mtu.toString(),
+                "payload/frame ${com.hybridmesh.relay.messaging.protocol.GattPacketCodec.safePayloadBytes(mtu)} B"
+            )
+        }
         item { MetricCard("FRAMES", "${transport.frameIndex?.plus(1) ?: 0} / ${transport.frameCount ?: 0}", "bytes sent ${transport.bytesSent}") }
         item { MetricCard("RUNTIME", state.bleRuntimeState.name, "generation ${state.runtimeGeneration}") }
         item { MetricCard("NODE DISCOVERY", "${state.nearbyDeviceCount} live", "phones ${state.phoneNodeCount} • relays ${state.relayNodeCount}") }

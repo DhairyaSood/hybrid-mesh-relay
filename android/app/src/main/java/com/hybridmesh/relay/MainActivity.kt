@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.unit.dp
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -15,6 +16,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import com.hybridmesh.relay.ui.theme.RelayAccent
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -298,8 +301,8 @@ private fun NicknameOnboarding(
             .padding(horizontal = 28.dp, vertical = 48.dp),
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
     ) {
-        Text("NEYRA", style = MaterialTheme.typography.displaySmall)
-        Text("Choose your name", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(top = 20.dp))
+        Text("Neyra", style = MaterialTheme.typography.displaySmall, color = RelayAccent)
+        Text("Choose your name", style = MaterialTheme.typography.headlineMedium, color = RelayAccent, modifier = Modifier.padding(top = 20.dp))
         Text(
             "This is how you'll appear to nearby devices. It can be anything you like and doesn't need to be unique.",
             color = MaterialTheme.colorScheme.onSurfaceVariant,

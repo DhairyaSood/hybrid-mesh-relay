@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -77,10 +78,12 @@ fun MessagesScreen(onConversationClick: (String) -> Unit, onOpenDevices: () -> U
                     TextButton(onClick = { nodeIdInput = ""; error = null; showAddDialog = true }) { Text("ADD NODE") }
                 }
             }
+
             PrimaryTabRow(selectedTabIndex = selectedTab) {
                 Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("CHATS", maxLines = 1) })
                 Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("NEARBY", maxLines = 1) })
             }
+
             if (selectedTab == 0) ChatList(chats, onConversationClick)
             else NearbyList(networkState, knownPeers, onConversationClick, onOpenDevices)
         }
@@ -120,9 +123,38 @@ fun MessagesScreen(onConversationClick: (String) -> Unit, onOpenDevices: () -> U
 @Composable
 private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> Unit) {
     if (chats.isEmpty()) {
-        EmptyState("NO CHATS YET", "Send or receive a message to create your first conversation.")
+        Box(
+            Modifier
+                .fillMaxSize()
+                .padding(18.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(RelaySurface, MaterialTheme.shapes.large)
+                    .border(1.dp, RelayBorder, MaterialTheme.shapes.large)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "NO CHATS YET",
+                    style = TechnicalTextStyle,
+                    color = RelayAccent,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Text(
+                    "Your conversations will appear here after you exchange a message with another node.",
+                    color = RelayTextMuted,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
         return
     }
+
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 28.dp),
@@ -140,6 +172,7 @@ private fun NearbyList(
     onOpenDevices: () -> Unit
 ) {
     val names = knownPeers.associateBy { it.nodeId.uppercase() }
+
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 28.dp),
@@ -155,6 +188,7 @@ private fun NearbyList(
                 )
             }
         }
+
         if (networkState.peers.isEmpty()) {
             item { EmptyState("NO PEERS IN RANGE", "Only currently discovered Neyra nodes appear here.") }
         } else {
@@ -162,7 +196,13 @@ private fun NearbyList(
                 val name = names[peer.nodeId.uppercase()]?.displayName
                     ?.takeIf { it.isNotBlank() && !it.equals(peer.nodeId, true) }
                     ?: peer.deviceName
-                PeerRow(name = name, nodeId = peer.nodeId, rssi = peer.rssi, type = peer.deviceType.name) {
+
+                PeerRow(
+                    name = name,
+                    nodeId = peer.nodeId,
+                    rssi = peer.rssi,
+                    type = peer.deviceType.name
+                ) {
                     onConversationClick(peer.nodeId)
                 }
             }
@@ -185,6 +225,7 @@ private fun PeerRow(name: String, nodeId: String, rssi: Int, type: String, onCli
             }
             Text("$rssi dBm", style = TechnicalTextStyle, color = RelayTextMuted)
         }
+
         Text("$type • IN RANGE • BLE DISCOVERED", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.padding(top = 8.dp))
     }
 }
@@ -198,6 +239,7 @@ private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
         DeliveryStatus.FAILED -> "FAILED"
         null -> ""
     }
+
     Row(
         Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface)
             .border(1.dp, RelayBorder, MaterialTheme.shapes.large)
@@ -223,8 +265,12 @@ private fun StatusCard(title: String, body: String, action: String, onAction: ()
 
 @Composable
 private fun EmptyState(title: String, body: String) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 48.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         Text(title, style = TechnicalTextStyle, color = RelayAccent, fontWeight = FontWeight.Bold)
-        Text(body, color = RelayTextMuted)
+        Text(body, color = RelayTextMuted, textAlign = TextAlign.Center)
     }
 }
