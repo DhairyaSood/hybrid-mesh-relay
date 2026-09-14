@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.data.NodeIdGenerator
+import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.MessagingManager
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
@@ -168,6 +169,26 @@ class MessagesViewModel(
                 type.name
             )
             onDone()
+        }
+    }
+
+    fun sendLocation(
+        peerNodeId: String,
+        latitude: Double,
+        longitude: Double,
+        accuracyMeters: Float?,
+        timestamp: Long
+    ) {
+        val nodeId = peerNodeId.trim().uppercase(Locale.US)
+        if (!NodeIdGenerator.isValid(nodeId) || nodeId.equals(localNodeId, ignoreCase = true)) return
+        if (!latitude.isFinite() || !longitude.isFinite()) return
+
+        viewModelScope.launch {
+            repository.addOutgoing(
+                content = LocationPayload(latitude, longitude, accuracyMeters, timestamp).encode(),
+                recipientNodeId = nodeId,
+                messageType = MessageType.LOCATION.name
+            )
         }
     }
 

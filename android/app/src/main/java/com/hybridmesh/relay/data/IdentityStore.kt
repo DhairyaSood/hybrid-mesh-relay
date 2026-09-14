@@ -20,19 +20,17 @@ class IdentityStore private constructor(context: Context) {
 
     fun getIdentity(): LocalIdentity = _identity.value
 
+    fun isNicknameConfigured(): Boolean =
+        preferences.getString(KEY_DEVICE_NAME, null)?.trim()?.isNotBlank() == true
+
     fun updateDeviceName(name: String): LocalIdentity {
-        val cleaned = name
-            .trim()
-            .take(MAX_DISPLAY_NAME_CHARS)
-            .ifBlank { defaultDeviceName() }
+        val cleaned = name.trim().take(MAX_DISPLAY_NAME_CHARS)
+        require(cleaned.isNotBlank()) { "Nickname cannot be blank" }
 
         val current = _identity.value
-        if (current.deviceName == cleaned) return current
+        if (current.deviceName == cleaned && isNicknameConfigured()) return current
 
-        preferences.edit()
-            .putString(KEY_DEVICE_NAME, cleaned)
-            .apply()
-
+        preferences.edit().putString(KEY_DEVICE_NAME, cleaned).apply()
         return current.copy(deviceName = cleaned).also { _identity.value = it }
     }
 
@@ -45,16 +43,11 @@ class IdentityStore private constructor(context: Context) {
             }
 
         val storedName = preferences.getString(KEY_DEVICE_NAME, null)
-        val name = storedName
-            ?.trim()
-            ?.take(MAX_DISPLAY_NAME_CHARS)
-            ?.ifBlank { null }
+        val name = storedName?.trim()?.take(MAX_DISPLAY_NAME_CHARS)?.takeIf { it.isNotBlank() }
             ?: defaultDeviceName()
 
-        if (storedName != name) {
-            preferences.edit().putString(KEY_DEVICE_NAME, name).apply()
-        }
-
+        // Existing installations already had an identity name; new installations do not.
+        // The distinction is stored by the presence of KEY_DEVICE_NAME, not by the fallback model name.
         return LocalIdentity(
             nodeId = nodeId,
             deviceName = name,
@@ -63,7 +56,7 @@ class IdentityStore private constructor(context: Context) {
     }
 
     private fun defaultDeviceName(): String =
-        Build.MODEL?.trim()?.takeIf { it.isNotBlank() } ?: "Hybrid Mesh Device"
+        Build.MODEL?.trim()?.takeIf { it.isNotBlank() } ?: "Neyra Device"
 
     companion object {
         private const val PREFERENCES_NAME = "hybrid_mesh_identity"
@@ -71,8 +64,7 @@ class IdentityStore private constructor(context: Context) {
         private const val KEY_DEVICE_NAME = "device_name"
         const val MAX_DISPLAY_NAME_CHARS = 32
 
-        @Volatile
-        private var INSTANCE: IdentityStore? = null
+        @Volatile private var INSTANCE: IdentityStore? = null
 
         fun getInstance(context: Context): IdentityStore =
             INSTANCE ?: synchronized(this) {

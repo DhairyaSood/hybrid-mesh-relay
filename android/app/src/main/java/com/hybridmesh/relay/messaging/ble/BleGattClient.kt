@@ -34,11 +34,15 @@ class BleGattClient(context: Context) {
     suspend fun sendMessage(
         device: BluetoothDevice,
         record: MessageRecordEntity,
+        runtimeGeneration: Long,
+        isRuntimeGenerationCurrent: () -> Boolean,
         onState: (GattTransportSnapshot) -> Unit = {}
     ): GattSendResult {
         val session = ClientSession(
             address = safeAddress(device),
             messageId = record.messageId,
+            runtimeGeneration = runtimeGeneration,
+            isRuntimeGenerationCurrent = isRuntimeGenerationCurrent,
             publish = onState
         )
 
@@ -56,6 +60,7 @@ class BleGattClient(context: Context) {
         }
 
         try {
+            session.requireRuntime()
             session.transition(GattTransportState.DISCOVERING_SERVICES)
             discoverServices(gatt, session)
 
@@ -101,6 +106,7 @@ class BleGattClient(context: Context) {
             session.bytesSent = 0
 
             for (index in 0 until chunkCount) {
+                session.requireRuntime()
                 val start = index * payloadSize
                 val end = minOf(envelope.size, start + payloadSize)
                 val payload = envelope.copyOfRange(start, end)
@@ -121,6 +127,7 @@ class BleGattClient(context: Context) {
                 session.bytesSent += payload.size
             }
 
+            session.requireRuntime()
             session.transition(GattTransportState.WAITING_ACK, frameIndex = null)
             val accepted = try {
                 withTimeout(BleGattConstants.ACK_TIMEOUT_MS) {
@@ -165,17 +172,23 @@ class BleGattClient(context: Context) {
     @SuppressLint("MissingPermission")
     suspend fun readIdentity(
         device: BluetoothDevice,
+        runtimeGeneration: Long,
+        isRuntimeGenerationCurrent: () -> Boolean,
         onState: (GattTransportSnapshot) -> Unit = {}
     ): RemoteIdentity? {
         val session = ClientSession(
             address = safeAddress(device),
+            runtimeGeneration = runtimeGeneration,
+            isRuntimeGenerationCurrent = isRuntimeGenerationCurrent,
             publish = onState
         )
 
         val gatt = connect(device, session) ?: return null
         try {
+            session.requireRuntime()
             session.transition(GattTransportState.DISCOVERING_SERVICES)
             discoverServices(gatt, session)
+            session.requireRuntime()
             session.transition(GattTransportState.READY)
 
             val characteristic = session.service?.getCharacteristic(
@@ -259,6 +272,13 @@ class BleGattClient(context: Context) {
                 status: Int,
                 newState: Int
             ) {
+                if (!session.isRuntimeCurrent()) {
+                    session.fail(com.hybridmesh.relay.messaging.model.GattTransportError.CONNECTION_FAILED)
+                    runCatching { gatt.disconnect() }
+                    runCatching { gatt.close() }
+                    if (!resumed.getAndSet(true)) continuation.resume(null)
+                    return
+                }
                 if (
                     newState == BluetoothProfile.STATE_CONNECTED &&
                     status == BluetoothGatt.GATT_SUCCESS
@@ -273,6 +293,7 @@ class BleGattClient(context: Context) {
             }
 
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                if (!session.isRuntimeCurrent()) return
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     session.fail(GattTransportError.SERVICE_DISCOVERY_FAILED)
                     return
@@ -297,6 +318,7 @@ class BleGattClient(context: Context) {
                 descriptor: BluetoothGattDescriptor,
                 status: Int
             ) {
+                if (!session.isRuntimeCurrent()) return
                 if (descriptor.uuid != BleGattConstants.CLIENT_CONFIG_UUID) return
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     session.notificationsReady.complete(Unit)
@@ -310,6 +332,7 @@ class BleGattClient(context: Context) {
                 gatt: BluetoothGatt,
                 characteristic: BluetoothGattCharacteristic
             ) {
+                if (!session.isRuntimeCurrent()) return
                 handleNotification(session, characteristic.value)
             }
 
@@ -318,6 +341,7 @@ class BleGattClient(context: Context) {
                 characteristic: BluetoothGattCharacteristic,
                 value: ByteArray
             ) {
+                if (!session.isRuntimeCurrent()) return
                 handleNotification(session, value)
             }
 
@@ -326,6 +350,7 @@ class BleGattClient(context: Context) {
                 characteristic: BluetoothGattCharacteristic,
                 status: Int
             ) {
+                if (!session.isRuntimeCurrent()) return
                 val waiter = session.writeWaiter
                 session.writeWaiter = null
                 if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -342,6 +367,7 @@ class BleGattClient(context: Context) {
                 characteristic: BluetoothGattCharacteristic,
                 status: Int
             ) {
+                if (!session.isRuntimeCurrent()) return
                 val waiter = session.readValue
                 session.readValue = null
                 if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -354,6 +380,7 @@ class BleGattClient(context: Context) {
             }
 
             override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+                if (!session.isRuntimeCurrent()) return
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     session.mtu = mtu.coerceAtLeast(GattPacketCodec.MIN_ATT_MTU)
                 }
@@ -387,6 +414,7 @@ class BleGattClient(context: Context) {
 
     @SuppressLint("MissingPermission")
     private suspend fun discoverServices(gatt: BluetoothGatt, session: ClientSession) {
+        session.requireRuntime()
         val started = runCatching { gatt.discoverServices() }.getOrDefault(false)
         if (!started) throw GattTransportException(GattTransportError.SERVICE_DISCOVERY_FAILED)
 
@@ -404,6 +432,7 @@ class BleGattClient(context: Context) {
 
     @SuppressLint("MissingPermission")
     private suspend fun enableNotifications(gatt: BluetoothGatt, session: ClientSession) {
+        session.requireRuntime()
         val tx = session.tx ?: throw GattTransportException(GattTransportError.CHARACTERISTIC_MISSING)
         if (!gatt.setCharacteristicNotification(tx, true)) {
             throw GattTransportException(GattTransportError.NOTIFICATION_SETUP_FAILED)
@@ -440,6 +469,7 @@ class BleGattClient(context: Context) {
 
     @SuppressLint("MissingPermission")
     private suspend fun negotiateMtu(gatt: BluetoothGatt, session: ClientSession): Int {
+        session.requireRuntime()
         session.mtu = GattPacketCodec.MIN_ATT_MTU
         val accepted = runCatching {
             gatt.requestMtu(BleGattConstants.TARGET_MTU)
@@ -463,6 +493,7 @@ class BleGattClient(context: Context) {
         session: ClientSession,
         value: ByteArray
     ) {
+        session.requireRuntime()
         val characteristic = session.rx
             ?: throw GattTransportException(GattTransportError.CHARACTERISTIC_MISSING)
 
@@ -531,6 +562,7 @@ class BleGattClient(context: Context) {
     private fun messageTypeCode(type: String): Byte = when (type) {
         "PRIORITY" -> 2
         "EMERGENCY" -> 3
+        "LOCATION" -> 4
         else -> 1
     }
 
@@ -570,6 +602,8 @@ class BleGattClient(context: Context) {
     private class ClientSession(
         val address: String,
         val messageId: String? = null,
+        val runtimeGeneration: Long = 0L,
+        private val isRuntimeGenerationCurrent: () -> Boolean = { true },
         private val publish: (GattTransportSnapshot) -> Unit
     ) {
         var gatt: BluetoothGatt? = null
@@ -591,6 +625,15 @@ class BleGattClient(context: Context) {
         val mtuChanged = CompletableDeferred<Boolean>()
         val ack = CompletableDeferred<Boolean>()
         val failure = CompletableDeferred<Unit>()
+
+        fun isRuntimeCurrent(): Boolean = isRuntimeGenerationCurrent()
+
+        fun requireRuntime() {
+            if (!isRuntimeCurrent()) {
+                fail(com.hybridmesh.relay.messaging.model.GattTransportError.CONNECTION_FAILED)
+                throw GattTransportException(com.hybridmesh.relay.messaging.model.GattTransportError.CONNECTION_FAILED)
+            }
+        }
 
         fun transition(
             state: GattTransportState,

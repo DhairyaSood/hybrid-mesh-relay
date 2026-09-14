@@ -19,6 +19,7 @@ import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.messaging.protocol.GattPacketCodec
 import com.hybridmesh.relay.model.MessageType
+import com.hybridmesh.relay.notifications.MessagingNotificationCoordinator
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -36,6 +37,7 @@ class BleGattServer(context: Context) {
     private val identityStore = IdentityStore.getInstance(appContext)
     private val repository = MessagingRepository.getInstance(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val notificationCoordinator = MessagingNotificationCoordinator.getInstance(appContext)
 
     @Volatile
     private var server: BluetoothGattServer? = null
@@ -50,6 +52,7 @@ class BleGattServer(context: Context) {
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
     private var txCharacteristic: BluetoothGattCharacteristic? = null
     private var identityCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile private var serverGeneration: Long = 0L
 
     private val subscribedDevices = ConcurrentHashMap.newKeySet<String>()
     private val assemblies = ConcurrentHashMap<String, Assembly>()
@@ -61,11 +64,12 @@ class BleGattServer(context: Context) {
     @SuppressLint("MissingPermission")
     @Synchronized
     fun start(): Boolean {
-        if (server != null) return true
+        if (server != null) return isReady
+        val currentGeneration = ++serverGeneration
         val manager = bluetoothManager ?: return false
 
         return try {
-            val opened = manager.openGattServer(appContext, callback) ?: return false
+            val opened = manager.openGattServer(appContext, callbackFor(currentGeneration)) ?: return false
             val readySignal = CompletableDeferred<Boolean>()
             readiness = readySignal
             isReady = false
@@ -153,6 +157,7 @@ class BleGattServer(context: Context) {
     @SuppressLint("MissingPermission")
     @Synchronized
     fun stop() {
+        serverGeneration += 1L
         isReady = false
         readiness?.complete(false)
         readiness = null
@@ -167,11 +172,12 @@ class BleGattServer(context: Context) {
         identityCharacteristic = null
     }
 
-    private val callback = object : BluetoothGattServerCallback() {
+    private fun callbackFor(callbackGeneration: Long) = object : BluetoothGattServerCallback() {
         override fun onServiceAdded(
             status: Int,
             service: BluetoothGattService
         ) {
+            if (callbackGeneration != serverGeneration) return
             if (service.uuid != BleGattConstants.SERVICE_UUID) return
 
             val success = status == BluetoothGatt.GATT_SUCCESS
@@ -194,6 +200,7 @@ class BleGattServer(context: Context) {
             status: Int,
             newState: Int
         ) {
+            if (callbackGeneration != serverGeneration) return
             if (newState != BluetoothProfile.STATE_CONNECTED) {
                 val prefix = "${safeAddress(device)}|"
                 assemblies.keys.removeIf { it.startsWith(prefix) }
@@ -210,6 +217,7 @@ class BleGattServer(context: Context) {
             offset: Int,
             value: ByteArray
         ) {
+            if (callbackGeneration != serverGeneration) return
             var status = BluetoothGatt.GATT_SUCCESS
             if (preparedWrite || offset != 0 || descriptor.uuid != BleGattConstants.CLIENT_CONFIG_UUID) {
                 status = BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
@@ -232,6 +240,7 @@ class BleGattServer(context: Context) {
             offset: Int,
             characteristic: BluetoothGattCharacteristic
         ) {
+            if (callbackGeneration != serverGeneration) return
             if (characteristic.uuid != BleGattConstants.IDENTITY_CHARACTERISTIC_UUID) {
                 server?.sendResponse(
                     device,
@@ -277,6 +286,7 @@ class BleGattServer(context: Context) {
             offset: Int,
             value: ByteArray
         ) {
+            if (callbackGeneration != serverGeneration) return
             val supported = characteristic.uuid == BleGattConstants.RX_CHARACTERISTIC_UUID &&
                 !preparedWrite &&
                 offset == 0
@@ -304,11 +314,12 @@ class BleGattServer(context: Context) {
                 )
             }
 
-            handleIncoming(device, value)
+            handleIncoming(device, value, callbackGeneration)
         }
     }
 
-    private fun handleIncoming(device: BluetoothDevice, bytes: ByteArray) {
+    private fun handleIncoming(device: BluetoothDevice, bytes: ByteArray, callbackGeneration: Long) {
+        if (callbackGeneration != serverGeneration) return
         val frame = GattPacketCodec.decode(bytes) as? GattPacketCodec.DataFrame ?: return
         if (frame.chunkCount !in 1..GattPacketCodec.MAX_CHUNKS) return
 
@@ -359,6 +370,7 @@ class BleGattServer(context: Context) {
 
         scope.launch {
             try {
+                if (callbackGeneration != serverGeneration) return@launch
                 val existing = repository.getById(messageId)
                 if (existing == null) {
                     repository.addIncoming(
@@ -377,7 +389,14 @@ class BleGattServer(context: Context) {
                             lastError = null
                         )
                     )
+                    val peer = repository.getPeer(envelope.senderNodeId)
+                    notificationCoordinator.notifyIncoming(
+                        peerNodeId = envelope.senderNodeId,
+                        displayName = peer?.displayName?.takeIf { it.isNotBlank() && !it.equals(envelope.senderNodeId, true) } ?: envelope.senderNodeId,
+                        body = if (typeName == MessageType.LOCATION.name) "Shared a location" else envelope.content
+                    )
                 }
+                if (callbackGeneration != serverGeneration) return@launch
                 sendAck(device, frame.transferId, accepted = true)
             } catch (_: Exception) {
                 sendAck(device, frame.transferId, accepted = false)
@@ -454,6 +473,7 @@ class BleGattServer(context: Context) {
         1 -> MessageType.NORMAL.name
         2 -> MessageType.PRIORITY.name
         3 -> MessageType.EMERGENCY.name
+        4 -> MessageType.LOCATION.name
         else -> MessageType.NORMAL.name
     }
 

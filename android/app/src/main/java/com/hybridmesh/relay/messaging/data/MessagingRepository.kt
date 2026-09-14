@@ -28,6 +28,8 @@ class MessagingRepository private constructor(context: Context) {
 
     suspend fun upsertPeer(peer: PeerEntity) = peers.upsert(peer)
 
+    suspend fun getPeer(nodeId: String): PeerEntity? = peers.get(nodeId.trim().uppercase())
+
     suspend fun ensurePeer(nodeId: String) {
         val normalized = nodeId.trim().uppercase()
         val localNodeId = identityStore.getIdentity().nodeId

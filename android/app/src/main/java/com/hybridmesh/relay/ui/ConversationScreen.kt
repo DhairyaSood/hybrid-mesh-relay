@@ -1,152 +1,237 @@
 package com.hybridmesh.relay.ui
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.location.LocationManager
+import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
+import com.hybridmesh.relay.network.BleRuntimeState
+import com.hybridmesh.relay.notifications.MessagingNotificationCoordinator
+import com.hybridmesh.relay.permissions.LocationPermissionLevel
+import com.hybridmesh.relay.permissions.PermissionManager
 import com.hybridmesh.relay.ui.theme.RelayAccent
+import com.hybridmesh.relay.ui.theme.RelayBorder
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import java.text.DateFormat
 import java.util.Date
 
 @Composable
 fun ConversationScreen(peerNodeId: String) {
+    val context = LocalContext.current
     val viewModel: MessagesViewModel = viewModel()
     val identity by viewModel.identity.collectAsStateWithLifecycle()
     val peers by viewModel.knownPeers.collectAsStateWithLifecycle()
     val networkState by viewModel.networkState.collectAsStateWithLifecycle()
-    val messages by viewModel.observeConversation(peerNodeId)
-        .collectAsStateWithLifecycle(initialValue = emptyList())
-    val listState = rememberLazyListState()
-    var draft by remember { mutableStateOf("") }
-    var selectedType by remember { mutableStateOf(MessageType.NORMAL) }
+    val messages by viewModel.observeConversation(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
+    val locationManager = remember { LocationManager(context) }
+    val notificationCoordinator = remember { MessagingNotificationCoordinator.getInstance(context) }
+    val scope = rememberCoroutineScope()
+
+    var draft by rememberSaveable { mutableStateOf("") }
+    var selectedType by rememberSaveable { mutableStateOf(MessageType.NORMAL.name) }
     var deleteMessageId by remember { mutableStateOf<String?>(null) }
     var showDeleteChat by remember { mutableStateOf(false) }
+    var locationError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+    val peer = peers.firstOrNull { it.nodeId.equals(peerNodeId, true) }
+    val displayName = peer?.displayName?.takeIf { it.isNotBlank() && !it.equals(peerNodeId, true) } ?: peerNodeId
+
+    DisposableEffect(peerNodeId) {
+        notificationCoordinator.clearConversation(peerNodeId)
+        onDispose { }
+    }
+
+    fun sendText() {
+        val text = draft.trim()
+        if (text.isBlank()) return
+        val type = runCatching { MessageType.valueOf(selectedType) }.getOrDefault(MessageType.NORMAL)
+        viewModel.send(peerNodeId, text, type) { draft = "" }
+    }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        val precise = result[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        val approximate = result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (!precise && !approximate) {
+            locationError = "Location permission was not granted."
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            val location = locationManager.getCurrentLocation()
+            if (location == null) {
+                locationError = "Could not get a current location. Check that a location provider is enabled."
+            } else {
+                viewModel.sendLocation(
+                    peerNodeId = peerNodeId,
+                    latitude = location.latitude,
+                    longitude = location.longitude,
+                    accuracyMeters = location.accuracy.takeIf { it >= 0f },
+                    timestamp = location.time
+                )
+                locationError = null
+            }
         }
     }
 
-    val peer = peers.firstOrNull { it.nodeId.equals(peerNodeId, ignoreCase = true) }
-    val displayName = peer?.displayName?.takeIf { it != peerNodeId } ?: peerNodeId
-    val isNearby = networkState.peers.any { it.nodeId.equals(peerNodeId, ignoreCase = true) }
-
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(displayName, style = MaterialTheme.typography.titleLarge, maxLines = 1)
-                        Text(peerNodeId, style = MaterialTheme.typography.labelSmall, color = RelayTextMuted, maxLines = 1)
+                        Text(displayName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        Text(peerNodeId, style = MaterialTheme.typography.labelSmall, color = RelayAccent)
                     }
-                    TextButton(onClick = { showDeleteChat = true }) { Text("DELETE CHAT") }
+                    Text(
+                        if (networkState.peers.any { it.nodeId.equals(peerNodeId, true) }) "IN RANGE" else "NOT IN RANGE",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = RelayTextMuted
+                    )
                 }
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = if (isNearby) "IN RANGE • BLE DISCOVERED" else "OUT OF RANGE • NEW MESSAGES WILL QUEUE",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (isNearby) RelayAccent else RelayTextMuted,
-                    maxLines = 1
-                )
-                Text("Tap a message to delete your local copy.", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
-            }
-
-            LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                state = listState,
-                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(messages, key = { it.messageId }) { message ->
-                    MessageBubble(
-                        message = message,
-                        outgoing = message.senderNodeId.equals(identity.nodeId, ignoreCase = true),
-                        onClick = { deleteMessageId = message.messageId }
+                if (networkState.bleRuntimeState != BleRuntimeState.READY) {
+                    Text(
+                        when (networkState.bleRuntimeState) {
+                            BleRuntimeState.PERMISSION_REQUIRED -> "Queued locally until Bluetooth access is available."
+                            BleRuntimeState.BLUETOOTH_OFF -> "Queued locally until Bluetooth is turned on."
+                            else -> "Queued locally until the BLE transport is ready."
+                        },
+                        color = RelayTextMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 6.dp)
                     )
                 }
             }
 
-            Composer(
-                draft = draft,
-                onDraftChanged = { draft = it },
-                type = selectedType,
-                onTypeChanged = { selectedType = it },
-                onSend = {
-                    viewModel.send(peerNodeId, draft, selectedType) { draft = "" }
+            LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (messages.isEmpty()) {
+                    item { EmptyConversationState(displayName) }
                 }
-            )
+                items(messages, key = { it.messageId }) { message ->
+                    val incoming = !message.senderNodeId.equals(identity.nodeId, true)
+                    MessageBubble(message, incoming, onLongPress = { deleteMessageId = message.messageId })
+                }
+            }
+
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+                    IconButton(
+                        onClick = {
+                            locationError = null
+                            val state = PermissionManager.location(context)
+                            when (state.level) {
+                                LocationPermissionLevel.PRECISE,
+                                LocationPermissionLevel.APPROXIMATE -> {
+                                    scope.launch {
+                                        val location = locationManager.getCurrentLocation()
+                                        if (location == null) locationError = "Could not get your current location."
+                                        else viewModel.sendLocation(peerNodeId, location.latitude, location.longitude, location.accuracy.takeIf { it >= 0f }, location.time)
+                                    }
+                                }
+                                else -> {
+                                    PermissionManager.markLocationRequestAttempted(context)
+                                    locationPermissionLauncher.launch(PermissionManager.locationPermissionsToRequest())
+                                }
+                            }
+                        },
+                        modifier = Modifier.size(44.dp)
+                    ) { Text("⌖", color = RelayAccent) }
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        modifier = Modifier.weight(1f),
+                        minLines = 1,
+                        maxLines = 4,
+                        placeholder = { Text("Message") }
+                    )
+                    Spacer(Modifier.size(6.dp))
+                    Button(onClick = ::sendText, enabled = draft.trim().isNotBlank(), modifier = Modifier.height(46.dp)) {
+                        Text("SEND")
+                    }
+                }
+                if (locationError != null) {
+                    Text(locationError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 46.dp, top = 4.dp))
+                }
+                Row(Modifier.padding(start = 46.dp, top = 2.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(MessageType.NORMAL, MessageType.PRIORITY, MessageType.EMERGENCY).forEach { type ->
+                        TextButton(onClick = { selectedType = type.name }) {
+                            Text(type.name, color = if (selectedType == type.name) RelayAccent else RelayTextMuted, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { showDeleteChat = true }) { Text("DELETE CHAT", color = RelayTextMuted, style = MaterialTheme.typography.labelSmall) }
+                }
+            }
         }
     }
 
     deleteMessageId?.let { messageId ->
-        val message = messages.firstOrNull { it.messageId == messageId }
-        if (message != null) {
-            AlertDialog(
-                onDismissRequest = { deleteMessageId = null },
-                title = { Text("DELETE MESSAGE") },
-                text = {
-                    Text(
-                        if (message.status == DeliveryStatus.DELIVERED.name && !message.senderNodeId.equals(identity.nodeId, true)) {
-                            "Delete your local copy. The sender keeps their copy."
-                        } else if (message.status == DeliveryStatus.DELIVERED.name) {
-                            "Delete your local copy. The recipient keeps their copy."
-                        } else {
-                            "This message is still local/queued. It has not been delivered yet."
-                        }
-                    )
-                },
-                confirmButton = {
-                    Button(onClick = { viewModel.deleteMessage(messageId); deleteMessageId = null }) { Text("DELETE") }
-                },
-                dismissButton = { TextButton(onClick = { deleteMessageId = null }) { Text("CANCEL") } }
-            )
-        }
+        AlertDialog(
+            onDismissRequest = { deleteMessageId = null },
+            title = { Text("DELETE MESSAGE") },
+            text = { Text("Remove this message from this device?") },
+            confirmButton = {
+                TextButton(onClick = { viewModel.deleteMessage(messageId); deleteMessageId = null }) { Text("DELETE") }
+            },
+            dismissButton = { TextButton(onClick = { deleteMessageId = null }) { Text("CANCEL") } }
+        )
     }
 
     if (showDeleteChat) {
         AlertDialog(
             onDismissRequest = { showDeleteChat = false },
             title = { Text("DELETE CHAT") },
-            text = { Text("Remove the local conversation history. The peer identity remains saved, and the other device keeps its copies.") },
+            text = { Text("Remove this conversation from this device? This does not send anything to the other node.") },
             confirmButton = {
-                Button(onClick = { viewModel.deleteConversation(peerNodeId); showDeleteChat = false }) { Text("DELETE") }
+                TextButton(onClick = { viewModel.deleteConversation(peerNodeId); showDeleteChat = false }) { Text("DELETE") }
             },
             dismissButton = { TextButton(onClick = { showDeleteChat = false }) { Text("CANCEL") } }
         )
@@ -154,96 +239,41 @@ fun ConversationScreen(peerNodeId: String) {
 }
 
 @Composable
-private fun MessageBubble(
-    message: MessageRecordEntity,
-    outgoing: Boolean,
-    onClick: () -> Unit
-) {
-    val background = if (outgoing && message.messageType == MessageType.EMERGENCY.name) {
-        MaterialTheme.colorScheme.error
-    } else {
-        RelaySurface
+private fun EmptyConversationState(displayName: String) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 56.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("NO MESSAGES YET", fontWeight = FontWeight.Bold, color = RelayAccent)
+        Text("Start a conversation with $displayName.", color = RelayTextMuted)
     }
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start
-    ) {
+}
+
+@Composable
+private fun MessageBubble(message: MessageRecordEntity, incoming: Boolean, onLongPress: () -> Unit) {
+    val shape = RoundedCornerShape(16.dp)
+    val payload = if (message.messageType == MessageType.LOCATION.name) LocationPayload.decode(message.content) else null
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (incoming) Arrangement.Start else Arrangement.End) {
         Column(
-            modifier = Modifier
-                .widthIn(max = 420.dp)
-                .background(background, RoundedCornerShape(16.dp))
-                .clickable(onClick = onClick)
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+            Modifier.widthIn(max = 310.dp).background(if (incoming) RelaySurface else RelayAccent.copy(alpha = 0.16f), shape).border(1.dp, RelayBorder, shape).padding(12.dp)
+                .clickable(onClick = onLongPress)
         ) {
-            Text(
-                message.content,
-                color = if (outgoing && message.messageType == MessageType.EMERGENCY.name) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "${formatTime(message.createdAt)} • ${statusLabel(message.status)}",
-                style = MaterialTheme.typography.labelSmall,
-                color = if (outgoing && message.messageType == MessageType.EMERGENCY.name) MaterialTheme.colorScheme.onError.copy(alpha = .8f) else RelayTextMuted
-            )
-        }
-    }
-}
-
-@Composable
-private fun Composer(
-    draft: String,
-    onDraftChanged: (String) -> Unit,
-    type: MessageType,
-    onTypeChanged: (MessageType) -> Unit,
-    onSend: () -> Unit
-) {
-    Surface(shadowElevation = 2.dp, tonalElevation = 1.dp) {
-        Column(Modifier.fillMaxWidth().padding(12.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                MessageTypeButton(MessageType.NORMAL, type == MessageType.NORMAL, onTypeChanged, Modifier.weight(1f))
-                MessageTypeButton(MessageType.PRIORITY, type == MessageType.PRIORITY, onTypeChanged, Modifier.weight(1f))
-                MessageTypeButton(MessageType.EMERGENCY, type == MessageType.EMERGENCY, onTypeChanged, Modifier.weight(1f))
+            if (payload != null) {
+                Text("LOCATION", style = MaterialTheme.typography.labelSmall, color = RelayAccent, fontWeight = FontWeight.Bold)
+                Text("${LocationPayload.formatCoordinate(payload.latitude)}, ${LocationPayload.formatCoordinate(payload.longitude)}", color = MaterialTheme.colorScheme.onSurface)
+                payload.accuracyMeters?.let { Text("Accuracy ±${it.toInt()} m", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted) }
+            } else {
+                Text(message.content, color = MaterialTheme.colorScheme.onSurface)
             }
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = draft,
-                    onValueChange = { onDraftChanged(it.take(2_048)) },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message") },
-                    minLines = 1,
-                    maxLines = 5
+            Row(Modifier.padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.createdAt)), style = MaterialTheme.typography.labelSmall, color = RelayTextMuted)
+                if (!incoming) Text(
+                    when (message.status) {
+                        DeliveryStatus.DELIVERED.name -> "DELIVERED"
+                        DeliveryStatus.IN_FLIGHT.name -> "SENDING"
+                        DeliveryStatus.QUEUED.name -> "QUEUED"
+                        DeliveryStatus.FAILED.name -> "FAILED"
+                        else -> ""
+                    }, style = MaterialTheme.typography.labelSmall, color = if (message.status == DeliveryStatus.FAILED.name) MaterialTheme.colorScheme.error else RelayTextMuted
                 )
-                Button(onClick = onSend, enabled = draft.isNotBlank()) { Text("SEND") }
             }
         }
     }
-}
-
-@Composable
-private fun MessageTypeButton(
-    value: MessageType,
-    selected: Boolean,
-    onSelected: (MessageType) -> Unit,
-    modifier: Modifier
-) {
-    TextButton(onClick = { onSelected(value) }, modifier = modifier) {
-        Text(
-            value.name,
-            color = if (selected) RelayAccent else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1
-        )
-    }
-}
-
-private fun formatTime(timestamp: Long): String =
-    DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(timestamp))
-
-private fun statusLabel(status: String): String = when (status) {
-    DeliveryStatus.QUEUED.name -> "QUEUED"
-    DeliveryStatus.IN_FLIGHT.name -> "SENDING"
-    DeliveryStatus.DELIVERED.name -> "DELIVERED"
-    DeliveryStatus.FAILED.name -> "FAILED"
-    else -> status
 }

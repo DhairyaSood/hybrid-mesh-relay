@@ -72,7 +72,9 @@ class MessagingManager private constructor(context: Context) {
                 .distinctUntilChanged { old, new ->
                     old.bluetoothState == new.bluetoothState &&
                         old.permissionsGranted == new.permissionsGranted &&
-                        old.bleSupported == new.bleSupported
+                        old.bleSupported == new.bleSupported &&
+                        old.runtimeGeneration == new.runtimeGeneration &&
+                        old.gattServerReady == new.gattServerReady
                 }
                 .collect { state ->
                     val ready = state.bleSupported &&
@@ -81,12 +83,16 @@ class MessagingManager private constructor(context: Context) {
 
                     if (ready) {
                         gattServer.start()
+                        networkManager.setGattServerReady(gattServer.isReady)
                         if (gattServer.isReady) {
                             repository.makeAllQueuedEligible()
                             networkManager.refresh()
+                            wakeChannel.trySend(Unit)
                         } else {
                             scope.launch {
-                                if (gattServer.awaitReady(BleGattConstants.SERVER_READY_TIMEOUT_MS)) {
+                                val serverReady = gattServer.awaitReady(BleGattConstants.SERVER_READY_TIMEOUT_MS)
+                                networkManager.setGattServerReady(serverReady && gattServer.isReady)
+                                if (serverReady) {
                                     repository.makeAllQueuedEligible()
                                     networkManager.refresh()
                                     wakeChannel.trySend(Unit)
@@ -97,6 +103,7 @@ class MessagingManager private constructor(context: Context) {
                         }
                     } else {
                         gattServer.stop()
+                        networkManager.setGattServerReady(false)
                         networkManager.refresh()
                     }
                     wakeChannel.trySend(Unit)
@@ -158,8 +165,13 @@ class MessagingManager private constructor(context: Context) {
 
         if (!ready) return false
 
-        if (!gattServer.start()) return false
-        return gattServer.awaitReady(timeoutMs)
+        if (!gattServer.start()) {
+            networkManager.setGattServerReady(false)
+            return false
+        }
+        val serverReady = gattServer.awaitReady(timeoutMs)
+        networkManager.setGattServerReady(serverReady && gattServer.isReady)
+        return serverReady
     }
 
     @Synchronized
@@ -169,6 +181,7 @@ class MessagingManager private constructor(context: Context) {
         jobs.forEach(Job::cancel)
         jobs.clear()
         gattServer.stop()
+        networkManager.setGattServerReady(false)
         _transport.value = GattTransportSnapshot()
     }
 
@@ -177,7 +190,8 @@ class MessagingManager private constructor(context: Context) {
             val state = networkManager.state.value
             val ready = state.bleSupported &&
                 state.permissionsGranted &&
-                state.bluetoothState == BluetoothState.ON
+                state.bluetoothState == BluetoothState.ON &&
+                state.gattServerReady
 
             if (!ready) {
                 waitForWake(30_000L)
@@ -199,6 +213,8 @@ class MessagingManager private constructor(context: Context) {
                     continue
                 }
 
+                val runtimeGeneration = state.runtimeGeneration
+                if (runtimeGeneration != networkManager.runtimeGeneration.value) continue
                 val peer = state.peers.firstOrNull {
                     it.nodeId.equals(message.recipientNodeId, ignoreCase = true) &&
                         it.address != "Unknown"
@@ -259,9 +275,14 @@ class MessagingManager private constructor(context: Context) {
         message: com.hybridmesh.relay.messaging.data.MessageRecordEntity,
         device: android.bluetooth.BluetoothDevice
     ) {
+        val runtimeGeneration = networkManager.runtimeGeneration.value
         val result = gattClient.sendMessage(
             device = device,
             record = message,
+            runtimeGeneration = runtimeGeneration,
+            isRuntimeGenerationCurrent = { networkManager.runtimeGeneration.value == runtimeGeneration &&
+                networkManager.state.value.bluetoothState == BluetoothState.ON &&
+                networkManager.state.value.gattServerReady },
             onState = { snapshot -> _transport.value = snapshot }
         )
 
@@ -313,7 +334,12 @@ class MessagingManager private constructor(context: Context) {
 
     private suspend fun identitySyncLoop() {
         while (currentCoroutineContext().isActive && started) {
-            val peers = networkManager.state.value.peers
+            val state = networkManager.state.value
+            if (!state.gattServerReady) {
+                delay(2_000L)
+                continue
+            }
+            val peers = state.peers
             peers.forEach { peer ->
                 syncPeerIdentityIfNeeded(
                     nodeId = peer.nodeId,
@@ -354,7 +380,15 @@ class MessagingManager private constructor(context: Context) {
                     return@withLock
                 }
 
-                val identity = gattClient.readIdentity(device)
+                val runtimeGeneration = networkManager.runtimeGeneration.value
+                if (runtimeGeneration != networkManager.state.value.runtimeGeneration) return@withLock
+                val identity = gattClient.readIdentity(
+                    device = device,
+                    runtimeGeneration = runtimeGeneration,
+                    isRuntimeGenerationCurrent = { networkManager.runtimeGeneration.value == runtimeGeneration &&
+                        networkManager.state.value.bluetoothState == BluetoothState.ON &&
+                        networkManager.state.value.gattServerReady }
+                )
                 if (identity == null) {
                     recordIdentitySyncFailure(nodeId)
                     return@withLock

@@ -10,26 +10,21 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.PrimaryTabRow
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.messaging.MessagingManager
-import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.network.BluetoothState
-import com.hybridmesh.relay.ble.BleOperationState
+import com.hybridmesh.relay.network.NetworkState
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
@@ -40,117 +35,62 @@ import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 
 @Composable
 fun NetworkScreen() {
-    val context = androidx.compose.ui.platform.LocalContext.current
     val viewModel: MessagesViewModel = viewModel()
     val state by viewModel.networkState.collectAsStateWithLifecycle()
-    val sent by viewModel.sentCount.collectAsStateWithLifecycle()
-    val received by viewModel.receivedCount.collectAsStateWithLifecycle()
-    val queued by viewModel.queuedCount.collectAsStateWithLifecycle()
-    val knownPeers by viewModel.knownPeers.collectAsStateWithLifecycle()
-    val identity by IdentityStore.getInstance(context).identity.collectAsStateWithLifecycle()
-    val transport by MessagingManager.getInstance(context).transport.collectAsStateWithLifecycle()
-    var selectedView by rememberSaveable { mutableIntStateOf(0) }
+    val transport by MessagingManager.getInstance(androidx.compose.ui.platform.LocalContext.current).transport.collectAsStateWithLifecycle()
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 
     Column(Modifier.fillMaxSize().background(RelayBackground)) {
-        Text(
-            "NETWORK",
-            style = MaterialTheme.typography.headlineSmall,
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp)
-        )
-        PrimaryTabRow(selectedTabIndex = selectedView) {
-            Tab(
-                selected = selectedView == 0,
-                onClick = { selectedView = 0 },
-                text = { Text("OVERVIEW", maxLines = 1) }
-            )
-            Tab(
-                selected = selectedView == 1,
-                onClick = { selectedView = 1 },
-                text = { Text("ADVANCED", maxLines = 1) }
-            )
-        }
-
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 28.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            if (selectedView == 0) {
-                item { SectionLabel("CONNECTIVITY") }
-                item { MetricRow("Bluetooth", bluetoothLabel(state.bluetoothState)) }
-                item { MetricRow("BLE capability", if (state.bleSupported) "AVAILABLE" else "UNSUPPORTED") }
-                item { MetricRow("Internet", if (state.internetAvailable) "AVAILABLE" else "OFFLINE") }
-                item { MetricRow("Permissions", if (state.permissionsGranted) "GRANTED" else "MISSING") }
-
-                item { SectionLabel("MESH") }
-                item { MetricRow("Nearby nodes", state.nearbyDeviceCount.toString()) }
-                item { MetricRow("Phone nodes", state.phoneNodeCount.toString()) }
-                item { MetricRow("Relay nodes", state.relayNodeCount.toString()) }
-                item { MetricRow("Scanning", state.scanningState.name) }
-                item { MetricRow("Advertising", state.advertisingState.name) }
-
-                item { SectionLabel("MESSAGING") }
-                item { MetricRow("Messages sent", sent.toString()) }
-                item { MetricRow("Messages received", received.toString()) }
-                item { MetricRow("Messages queued", queued.toString()) }
-            } else {
-                item { SectionLabel("ACTIVE TRANSPORT") }
-                item { MetricRow("State", transport.state.name) }
-                item { MetricRow("Error", transport.error.name) }
-                item { MetricRow("MTU", transport.mtu?.toString() ?: "—") }
-                item { MetricRow("Frame", transport.frameCount?.let { "${(transport.frameIndex ?: 0) + 1}/$it" } ?: "—") }
-                item { MetricRow("Bytes sent", transport.bytesSent.toString()) }
-                item { MetricRow("Protocol", "HMR-DISCOVERY/2 + HMR-GATT/1") }
-                item { MetricRow("Node ID", identity.nodeId) }
-                item { MetricRow("Peer address", transport.peerAddress ?: "—") }
-                item { MetricRow("Message ID", transport.messageId ?: "—") }
-
-                item { SectionLabel("BLE DIAGNOSTICS") }
-                item { MetricRow("Scan callbacks", state.scanResultCount.toString()) }
-                state.advertisingErrorCode?.let { code -> item { MetricRow("Advertising error", code.toString()) } }
-                state.scanningErrorCode?.let { code -> item { MetricRow("Scanning error", code.toString()) } }
-
-                if (state.peers.isNotEmpty()) {
-                    item { SectionLabel("LIVE PEERS") }
-                    items(state.peers, key = { it.nodeId }) { peer ->
-                        MetricRow(
-                            peer.deviceName.ifBlank { peer.nodeId },
-                            "${peer.rssi} dBm • ${peer.deviceType.name} • ${peer.nodeId}"
-                        )
-                    }
-                }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+            Text("NETWORK", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Observe the current BLE runtime without controlling it from this screen.", color = RelayTextMuted)
+            Row(Modifier.padding(top = 8.dp)) {
+                TextButton(onClick = { selectedTab = 0 }) { Text("OVERVIEW", color = if (selectedTab == 0) RelayAccent else RelayTextMuted) }
+                TextButton(onClick = { selectedTab = 1 }) { Text("ADVANCED", color = if (selectedTab == 1) RelayAccent else RelayTextMuted) }
             }
         }
+        if (selectedTab == 0) Overview(state) else Advanced(state, transport)
+    }
+}
+
+@Composable
+private fun Overview(state: NetworkState) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { MetricCard("INITIALIZATION", state.initializationState.name, "generation ${state.runtimeGeneration}") }
+        item { MetricCard("RUNTIME", state.bleRuntimeState.name, "BLE runtime condition") }
+        item { MetricCard("BLUETOOTH", bluetoothLabel(state.bluetoothState), "BLE capability: ${if (state.bleSupported) "available" else "unsupported"}") }
+        item { MetricCard("DISCOVERY", state.scanningState.name, "${state.nearbyDeviceCount} nodes in range") }
+        item { MetricCard("ADVERTISING", state.advertisingState.name, if (state.gattServerReady) "GATT server ready" else "Waiting for GATT readiness") }
+        item { MetricCard("CONNECTIVITY", if (state.internetAvailable) "INTERNET AVAILABLE" else "OFFLINE", "Internet is informational; BLE messaging does not depend on it") }
+    }
+}
+
+@Composable
+private fun Advanced(state: NetworkState, transport: com.hybridmesh.relay.messaging.model.GattTransportSnapshot) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item { MetricCard("TRANSPORT STATE", transport.state.name, transport.error.name) }
+        item { MetricCard("PEER", transport.peerAddress ?: "—", transport.messageId ?: "No active message") }
+        item { MetricCard("MTU", transport.mtu.toString(), "payload/frame ${com.hybridmesh.relay.messaging.protocol.GattPacketCodec.safePayloadBytes(transport.mtu)} B") }
+        item { MetricCard("FRAMES", "${transport.frameIndex?.plus(1) ?: 0} / ${transport.frameCount ?: 0}", "bytes sent ${transport.bytesSent}") }
+        item { MetricCard("RUNTIME", state.bleRuntimeState.name, "generation ${state.runtimeGeneration}") }
+        item { MetricCard("NODE DISCOVERY", "${state.nearbyDeviceCount} live", "phones ${state.phoneNodeCount} • relays ${state.relayNodeCount}") }
+    }
+}
+
+@Composable
+private fun MetricCard(title: String, value: String, detail: String) {
+    Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        Text(title, style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
+        Text(value, style = MaterialTheme.typography.titleMedium, color = RelayAccent)
+        Text(detail, style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
     }
 }
 
 private fun bluetoothLabel(state: BluetoothState): String = when (state) {
     BluetoothState.ON -> "ON"
     BluetoothState.OFF -> "OFF"
+    BluetoothState.TURNING_ON -> "TURNING ON"
+    BluetoothState.TURNING_OFF -> "TURNING OFF"
     BluetoothState.UNSUPPORTED -> "UNSUPPORTED"
-}
-
-@Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text,
-        style = TechnicalTextStyle,
-        color = RelayTextMuted,
-        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
-    )
-}
-
-@Composable
-private fun MetricRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RelaySurface, RoundedCornerShape(14.dp))
-            .border(1.dp, RelayBorder, RoundedCornerShape(14.dp))
-            .padding(15.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(label, color = RelayTextMuted, modifier = Modifier.weight(1f), maxLines = 2)
-        Text(value, color = RelayAccent, style = TechnicalTextStyle, modifier = Modifier.padding(start = 10.dp), maxLines = 3)
-    }
+    BluetoothState.ERROR -> "ERROR"
 }

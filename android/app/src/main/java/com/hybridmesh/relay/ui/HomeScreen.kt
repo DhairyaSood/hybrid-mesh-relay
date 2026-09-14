@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -61,7 +62,7 @@ fun HomeScreen(onNetworkClick: () -> Unit) {
         item {
             Column(Modifier.fillMaxWidth()) {
                 Text(
-                    text = "HYBRID MESH RELAY",
+                    text = "NEYRA",
                     style = MaterialTheme.typography.displaySmall,
                     maxLines = 2
                 )
@@ -85,6 +86,10 @@ fun HomeScreen(onNetworkClick: () -> Unit) {
         }
 
         item {
+            RuntimeStatusCard(state = networkState)
+        }
+
+        item {
             NetworkStatusCard(
                 state = networkState,
                 onClick = onNetworkClick
@@ -98,15 +103,41 @@ fun HomeScreen(onNetworkClick: () -> Unit) {
 }
 
 @Composable
+private fun RuntimeStatusCard(state: NetworkState) {
+    val active = state.bleRuntimeState == com.hybridmesh.relay.network.BleRuntimeState.READY
+    val headline = when (state.bleRuntimeState) {
+        com.hybridmesh.relay.network.BleRuntimeState.READY -> "Mesh runtime ready"
+        com.hybridmesh.relay.network.BleRuntimeState.RECOVERING -> "Recovering mesh runtime"
+        com.hybridmesh.relay.network.BleRuntimeState.STARTING -> "Starting mesh runtime"
+        com.hybridmesh.relay.network.BleRuntimeState.PERMISSION_REQUIRED -> "Permission required"
+        com.hybridmesh.relay.network.BleRuntimeState.BLUETOOTH_OFF -> "Bluetooth is off"
+        com.hybridmesh.relay.network.BleRuntimeState.UNSUPPORTED -> "BLE unsupported"
+        com.hybridmesh.relay.network.BleRuntimeState.DEGRADED -> "Mesh runtime degraded"
+    }
+    Column(Modifier.fillMaxWidth().background(RelaySurface, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).border(1.dp, RelayBorder, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("RUNTIME", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.weight(1f))
+            Text(state.initializationState.name, style = TechnicalTextStyle, color = if (active) RelayAccent else RelayTextMuted)
+        }
+        Text(headline, style = MaterialTheme.typography.titleMedium)
+        if (state.bleRuntimeState == com.hybridmesh.relay.network.BleRuntimeState.STARTING || state.bleRuntimeState == com.hybridmesh.relay.network.BleRuntimeState.RECOVERING) {
+            androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+        }
+        Text("${state.nearbyDeviceCount} nearby • generation ${state.runtimeGeneration}", style = TechnicalTextStyle, color = RelayTextMuted)
+    }
+}
+
+@Composable
 private fun NetworkStatusCard(
     state: NetworkState,
     onClick: () -> Unit
 ) {
     val headline = when (state.bluetoothState) {
         BluetoothState.UNSUPPORTED -> "BLE unsupported"
-
         BluetoothState.OFF -> "Bluetooth is off"
-
+        BluetoothState.TURNING_ON -> "Bluetooth is turning on"
+        BluetoothState.TURNING_OFF -> "Bluetooth is turning off"
+        BluetoothState.ERROR -> "Bluetooth unavailable"
         BluetoothState.ON -> when {
             state.scanningState == BleOperationState.ACTIVE ->
                 "Discovery active"

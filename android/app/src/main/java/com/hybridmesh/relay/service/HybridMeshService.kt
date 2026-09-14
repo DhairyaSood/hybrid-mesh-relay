@@ -106,7 +106,7 @@ class HybridMeshService : Service() {
                 android.R.drawable.stat_sys_data_bluetooth
             )
             .setContentTitle(
-                "Hybrid Mesh Relay"
+                "Neyra"
             )
             .setContentText(
                 "Mesh communication is active in the background"
@@ -136,7 +136,7 @@ class HybridMeshService : Service() {
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description =
-                    "Keeps Hybrid Mesh Relay available for nearby communication and queued message delivery."
+                    "Keeps Neyra available for nearby communication and queued message delivery."
 
                 setShowBadge(false)
             }
