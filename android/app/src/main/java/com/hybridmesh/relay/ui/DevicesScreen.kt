@@ -1,18 +1,11 @@
 package com.hybridmesh.relay.ui
 
-import android.Manifest
-import android.bluetooth.BluetoothAdapter
-import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
+import android.net.Uri
 import android.provider.Settings
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,35 +14,26 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.hybridmesh.relay.ble.BleOperationState
-import com.hybridmesh.relay.ble.BlePeer
+import com.hybridmesh.relay.messaging.data.PeerEntity
+import com.hybridmesh.relay.ble.PeerOrderingPolicy
+import com.hybridmesh.relay.network.BleRuntimeState
 import com.hybridmesh.relay.network.BluetoothState
+import com.hybridmesh.relay.permissions.PermissionManager
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
@@ -64,430 +48,131 @@ fun DevicesScreen() {
     val viewModel: DevicesViewModel = viewModel()
     val state by viewModel.state.collectAsStateWithLifecycle()
     val identity by viewModel.identity.collectAsStateWithLifecycle()
+    val knownPeers by viewModel.knownPeers.collectAsStateWithLifecycle()
+    val ble = PermissionManager.ble(context)
 
-    var permissionsGranted by remember {
-        mutableStateOf(hasRequiredBlePermissions(context))
-    }
-    var showBluetoothDialog by remember { mutableStateOf(false) }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        permissionsGranted = hasRequiredBlePermissions(context)
-        viewModel.refresh()
-    }
-
-    val enableBluetoothLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        permissionsGranted = hasRequiredBlePermissions(context)
-        viewModel.refresh()
-    }
-
-    LaunchedEffect(Unit) {
-        permissionsGranted = hasRequiredBlePermissions(context)
-        viewModel.refresh()
-    }
-
-    LaunchedEffect(state.bluetoothState) {
-        if (state.bluetoothState == BluetoothState.OFF && state.networkEnabled) {
-            showBluetoothDialog = true
-        }
-    }
+    val orderedLive = PeerOrderingPolicy.stableLive(state.peers)
+    val deviceRows = PeerOrderingPolicy.mergeKnownWithLive(knownPeers, orderedLive)
 
     LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(RelayBackground),
-        contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 34.dp),
+        modifier = Modifier.fillMaxSize().background(RelayBackground),
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Text(
-                text = "DEVICES",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1
-            )
-            Text(
-                text = "Your node and currently discovered peers.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp)
-            )
+            Text("DEVICES", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Known devices, live proximity, and controls for recovering BLE.", color = RelayTextMuted)
         }
 
         item {
-            LocalDeviceCard(
-                name = identity.deviceName,
-                nodeId = identity.nodeId,
+            RuntimeCard(
+                runtime = state.bleRuntimeState,
                 bluetoothState = state.bluetoothState,
-                advertisingState = state.advertisingState
+                scanState = state.scanningState.name,
+                advertiseState = state.advertisingState.name,
+                gattReady = state.gattServerReady
             )
         }
 
-        if (!state.bleSupported) {
-            item {
-                InfoCard(
-                    "BLE NOT AVAILABLE",
-                    "This phone does not report Bluetooth Low Energy capability."
-                )
-            }
-        } else if (!permissionsGranted) {
-            item {
-                InfoCardWithButton(
-                    title = "BLUETOOTH ACCESS REQUIRED",
-                    body = "Grant Bluetooth scan, advertise, and connect access to use the mesh.",
-                    button = "ENABLE BLUETOOTH ACCESS",
-                    onClick = {
-                        permissionLauncher.launch(requiredBlePermissions())
-                    }
-                )
-            }
-        } else if (state.bluetoothState == BluetoothState.OFF) {
-            item {
-                InfoCardWithButton(
-                    title = "BLUETOOTH IS OFF",
-                    body = "Discovery and BLE advertising are paused until Bluetooth is enabled.",
-                    button = "TURN BLUETOOTH ON",
-                    onClick = {
-                        enableBluetoothLauncher.launch(
-                            Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-                        )
-                    }
-                )
-            }
-        }
-
-        if (state.advertisingState == BleOperationState.ERROR) {
-            item {
-                InfoCard(
-                    "BLE ADVERTISING ERROR",
-                    advertisingErrorMessage(state.advertisingErrorCode)
-                )
-            }
-        }
-
-        if (state.scanningState == BleOperationState.ERROR) {
-            item {
-                InfoCard(
-                    "BLE SCANNING ERROR",
-                    scanningErrorMessage(state.scanningErrorCode)
-                )
-            }
-        }
-
         item {
-            ScannerControlCard(
-                scanning = state.scanningState == BleOperationState.ACTIVE,
-                starting = state.scanningState == BleOperationState.STARTING,
-                count = state.nearbyDeviceCount,
-                onSettings = {
+            AccessCard(
+                scanGranted = ble.scanGranted,
+                advertiseGranted = ble.advertiseGranted,
+                connectGranted = ble.connectGranted,
+                onOpenAppSettings = {
+                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")))
+                },
+                onOpenBluetooth = {
                     context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                },
+                onOpenBattery = {
+                    context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                 }
             )
         }
 
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "NEARBY HYBRID MESH NODES",
-                    style = TechnicalTextStyle,
-                    color = RelayTextMuted,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "${state.nearbyDeviceCount} FOUND",
-                    style = TechnicalTextStyle,
-                    color = RelayAccent,
-                    fontWeight = FontWeight.Bold
-                )
+            Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("LOCAL DEVICE", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
+                Text(identity.deviceName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text(identity.nodeId, style = TechnicalTextStyle, color = RelayAccent)
+                Text("The mesh service continues independently when this screen is closed.", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
             }
         }
 
-        if (state.peers.isEmpty()) {
+        item { Text("KNOWN DEVICES", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold) }
+        if (deviceRows.isEmpty()) {
             item {
-                InfoCard(
-                    if (state.scanningState == BleOperationState.ACTIVE) {
-                        "SEARCHING FOR MESH NODES"
-                    } else {
-                        "NO MESH NODES FOUND"
-                    },
-                    if (state.scanningState == BleOperationState.ACTIVE) {
-                        "Nearby devices will appear here when fresh BLE advertisements are received."
-                    } else {
-                        "Discovery is controlled by the mesh service and may be temporarily unavailable while Bluetooth or permissions are changing."
-                    }
-                )
+                Text("No saved peers yet. Discover a device or add a Node ID from Messages.", color = RelayTextMuted, modifier = Modifier.padding(vertical = 18.dp))
             }
         } else {
-            items(state.peers, key = { it.nodeId }) { peer ->
-                PeerCard(peer)
+            items(deviceRows, key = { it.first.nodeId }) { (peer, live) ->
+                KnownPeerRow(peer, live)
             }
         }
-    }
 
-    if (showBluetoothDialog) {
-        AlertDialog(
-            onDismissRequest = { showBluetoothDialog = false },
-            title = { Text("BLUETOOTH OFF") },
-            text = {
-                Text(
-                    "Hybrid Mesh Relay has stopped BLE scanning and advertising because Bluetooth is disabled."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showBluetoothDialog = false
-                        enableBluetoothLauncher.launch(
-                            Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-                        )
-                    }
-                ) {
-                    Text("TURN ON")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showBluetoothDialog = false }) {
-                    Text("LATER")
-                }
-            }
-        )
+        if (knownPeers.none { it.nodeId.equals(identity.nodeId, true) }) {
+            item { Spacer(Modifier.height(4.dp)) }
+        }
     }
 }
 
 @Composable
-private fun LocalDeviceCard(
-    name: String,
-    nodeId: String,
-    bluetoothState: BluetoothState,
-    advertisingState: BleOperationState
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RelaySurface, RoundedCornerShape(18.dp))
-            .border(1.dp, RelayBorder, RoundedCornerShape(18.dp))
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp)
-    ) {
-        Text("LOCAL DEVICE", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
-        Text(name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 2)
-        Text(nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1)
-        StatusLine("Bluetooth", bluetoothState.name)
-        StatusLine("BLE advertising", advertisingState.name)
+private fun RuntimeCard(runtime: BleRuntimeState, bluetoothState: BluetoothState, scanState: String, advertiseState: String, gattReady: Boolean) {
+    val headline = when (runtime) {
+        BleRuntimeState.READY -> "BLE runtime ready"
+        BleRuntimeState.RECOVERING -> "Recovering BLE runtime"
+        BleRuntimeState.STARTING -> "Starting BLE runtime"
+        BleRuntimeState.PERMISSION_REQUIRED -> "Bluetooth permissions required"
+        BleRuntimeState.BLUETOOTH_OFF -> "Bluetooth is off"
+        BleRuntimeState.UNSUPPORTED -> "BLE unsupported"
+        BleRuntimeState.DEGRADED -> "BLE runtime degraded"
+    }
+    Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(16.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text("RUNTIME", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
+        Text(headline, style = MaterialTheme.typography.titleMedium)
+        Text("Bluetooth: ${bluetoothState.name} • GATT: ${if (gattReady) "READY" else "NOT READY"}", style = TechnicalTextStyle, color = RelayAccent)
+        Text("Scanner: $scanState • Advertiser: $advertiseState", style = TechnicalTextStyle, color = RelayTextMuted)
     }
 }
 
 @Composable
-private fun ScannerControlCard(
-    scanning: Boolean,
-    starting: Boolean,
-    count: Int,
-    onSettings: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RelaySurface, RoundedCornerShape(18.dp))
-            .border(1.dp, RelayBorder, RoundedCornerShape(18.dp))
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+private fun AccessCard(scanGranted: Boolean, advertiseGranted: Boolean, connectGranted: Boolean, onOpenAppSettings: () -> Unit, onOpenBluetooth: () -> Unit, onOpenBattery: () -> Unit) {
+    Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("ACCESS & RECOVERY", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
+        PermissionRow("Scan", scanGranted)
+        PermissionRow("Advertise", advertiseGranted)
+        PermissionRow("Connect", connectGranted)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onOpenAppSettings, modifier = Modifier.weight(1f)) { Text("APP SETTINGS") }
+            OutlinedButton(onClick = onOpenBluetooth, modifier = Modifier.weight(1f)) { Text("BLUETOOTH") }
+        }
+        OutlinedButton(onClick = onOpenBattery, modifier = Modifier.fillMaxWidth()) { Text("BACKGROUND / BATTERY SETTINGS") }
+        Text("OEMs may additionally pause background apps. Neyra keeps its core permission model vendor-neutral; use these settings only when an OEM restricts background execution.", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
+    }
+}
+
+@Composable
+private fun PermissionRow(label: String, granted: Boolean) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("●", color = if (granted) RelayAccent else MaterialTheme.colorScheme.error)
+        Spacer(Modifier.padding(start = 5.dp))
+        Text(label, Modifier.weight(1f))
+        Text(if (granted) "GRANTED" else "MISSING", style = TechnicalTextStyle, color = if (granted) RelayAccent else MaterialTheme.colorScheme.error)
+    }
+}
+
+@Composable
+private fun KnownPeerRow(peer: PeerEntity, live: com.hybridmesh.relay.ble.BlePeer?) {
+    Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(15.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(
-                    "BLE DISCOVERY",
-                    style = TechnicalTextStyle,
-                    color = RelayTextMuted,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    when {
-                        starting -> "Starting scanner…"
-                        scanning -> "Scanning nearby devices"
-                        else -> "Discovery is waiting for the mesh runtime"
-                    },
-                    style = MaterialTheme.typography.titleMedium
-                )
+                Text(peer.displayName.takeIf { it.isNotBlank() && !it.equals(peer.nodeId, true) } ?: peer.nodeId, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text(peer.nodeId, style = TechnicalTextStyle, color = RelayAccent)
             }
-            Text(
-                "$count FOUND",
-                style = TechnicalTextStyle,
-                color = RelayAccent,
-                fontWeight = FontWeight.Bold
-            )
+            Text(if (live != null) "IN RANGE" else "KNOWN", style = TechnicalTextStyle, color = if (live != null) RelayAccent else RelayTextMuted)
         }
-
-        Text(
-            "Discovery is managed by the background mesh service and remains independent of this screen.",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall
-        )
-
-        Button(
-            onClick = onSettings,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        ) {
-            Text("BLUETOOTH SETTINGS")
-        }
+        if (live != null) Text("${live.deviceType.name} • ${live.rssi} dBm • seen now", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.padding(top = 6.dp))
+        else Text("Last seen: ${peer.lastSeenAt?.let { java.text.DateFormat.getTimeInstance().format(java.util.Date(it)) } ?: "not discovered"}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted, modifier = Modifier.padding(top = 6.dp))
     }
-}
-
-@Composable
-private fun InfoCard(title: String, body: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RelaySurface, RoundedCornerShape(16.dp))
-            .border(1.dp, RelayBorder, RoundedCornerShape(16.dp))
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text(title, style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
-        Text(body, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun InfoCardWithButton(
-    title: String,
-    body: String,
-    button: String,
-    onClick: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RelaySurface, RoundedCornerShape(16.dp))
-            .border(1.dp, RelayBorder, RoundedCornerShape(16.dp))
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text(title, style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
-        Text(body, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Button(
-            onClick = onClick,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = RelayAccent,
-                contentColor = RelayBackground
-            )
-        ) {
-            Text(button)
-        }
-    }
-}
-
-@Composable
-private fun PeerCard(peer: BlePeer) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(RelaySurface, RoundedCornerShape(16.dp))
-            .border(1.dp, RelayBorder, RoundedCornerShape(16.dp))
-            .padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier
-                .width(10.dp)
-                .height(10.dp)
-                .clip(CircleShape)
-                .background(RelayAccent)
-        )
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(peer.deviceName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-            Text(peer.nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1)
-            Text(
-                "${peer.deviceType.name} • DISCOVERED",
-                style = MaterialTheme.typography.bodySmall,
-                color = RelayTextMuted
-            )
-        }
-        Text("${peer.rssi} dBm", style = TechnicalTextStyle, color = RelayTextMuted, maxLines = 1)
-    }
-}
-
-@Composable
-private fun StatusLine(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = TechnicalTextStyle)
-    }
-}
-
-private fun requiredBlePermissions(): Array<String> {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        arrayOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.BLUETOOTH_ADVERTISE
-        )
-    } else {
-        arrayOf(
-            Manifest.permission.BLUETOOTH,
-            Manifest.permission.BLUETOOTH_ADMIN,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
-    }
-}
-
-private fun hasRequiredBlePermissions(context: Context): Boolean =
-    requiredBlePermissions().all { permission ->
-        ContextCompat.checkSelfPermission(context, permission) ==
-            PackageManager.PERMISSION_GRANTED
-    }
-
-private fun isBluetoothEnabled(context: Context): Boolean =
-    runCatching {
-        context
-            .getSystemService(android.bluetooth.BluetoothManager::class.java)
-            ?.adapter
-            ?.isEnabled == true
-    }.getOrDefault(false)
-
-private fun advertisingErrorMessage(errorCode: Int?): String = when (errorCode) {
-    -100 -> "Bluetooth advertising permission is missing."
-    -101 -> "Bluetooth is not available on this device."
-    -102 -> "Bluetooth is currently turned off."
-    -103 -> "This device does not provide BLE hardware."
-    -105 -> "Android could not provide a BLE advertiser."
-    -106 -> "The advertising payload was rejected as invalid."
-    1 -> "Android rejected the advertisement because the data was too large."
-    2 -> "Too many BLE advertisers are currently active."
-    3 -> "Android reported an internal advertising error."
-    4, 5 -> "Android reported BLE advertising as unsupported."
-    else -> "Android reported advertising error code $errorCode."
-}
-
-private fun scanningErrorMessage(errorCode: Int?): String = when (errorCode) {
-    -200 -> "Bluetooth scan permission is missing."
-    -201 -> "Bluetooth is not available on this device."
-    -202 -> "Bluetooth is currently turned off."
-    -203 -> "This device does not provide BLE hardware."
-    -204 -> "Android could not provide a BLE scanner."
-    -205 -> "The BLE scan settings were rejected."
-    1 -> "A BLE scan is already active."
-    2 -> "Android could not register the scan."
-    3 -> "Android reported an internal scan error."
-    4, 5 -> "Android reported BLE scanning as unsupported."
-    else -> "Android reported scan error code $errorCode."
 }
