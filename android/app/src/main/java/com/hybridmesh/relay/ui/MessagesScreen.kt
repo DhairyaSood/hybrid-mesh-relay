@@ -26,7 +26,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -53,12 +52,16 @@ import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 
 @Composable
-fun MessagesScreen(onConversationClick: (String) -> Unit, onOpenDevices: () -> Unit = {}) {
+fun MessagesScreen(
+    selectedTab: Int,
+    onSelectedTabChange: (Int) -> Unit,
+    onConversationClick: (String) -> Unit,
+    onOpenDevices: () -> Unit = {}
+) {
     val viewModel: MessagesViewModel = viewModel()
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val networkState by viewModel.networkState.collectAsStateWithLifecycle()
     val knownPeers by viewModel.knownPeers.collectAsStateWithLifecycle()
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var nodeIdInput by rememberSaveable { mutableStateOf("") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
@@ -80,8 +83,16 @@ fun MessagesScreen(onConversationClick: (String) -> Unit, onOpenDevices: () -> U
             }
 
             PrimaryTabRow(selectedTabIndex = selectedTab) {
-                Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("CHATS", maxLines = 1) })
-                Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("NEARBY", maxLines = 1) })
+                Tab(
+                    selected = selectedTab == 0,
+                    onClick = { onSelectedTabChange(0) },
+                    text = { Text("CHATS", maxLines = 1) }
+                )
+                Tab(
+                    selected = selectedTab == 1,
+                    onClick = { onSelectedTabChange(1) },
+                    text = { Text("NEARBY", maxLines = 1) }
+                )
             }
 
             if (selectedTab == 0) ChatList(chats, onConversationClick)
@@ -194,7 +205,7 @@ private fun NearbyList(
         } else {
             items(PeerOrderingPolicy.stableLive(networkState.peers), key = { it.nodeId }) { peer ->
                 val name = names[peer.nodeId.uppercase()]?.displayName
-                    ?.takeIf { it.isNotBlank() && !it.equals(peer.nodeId, true) }
+                    ?.takeIf { it.isNotBlank() && !it.equals(peer.deviceName, true) }
                     ?: peer.deviceName
 
                 PeerRow(
@@ -256,7 +267,11 @@ private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
 
 @Composable
 private fun StatusCard(title: String, body: String, action: String, onAction: () -> Unit) {
-    Column(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(
+        Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface)
+            .border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         Text(title, style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
         Text(body)
         Button(onClick = onAction) { Text(action) }

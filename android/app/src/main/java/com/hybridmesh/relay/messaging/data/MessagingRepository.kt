@@ -19,19 +19,21 @@ class MessagingRepository private constructor(context: Context) {
 
     val knownPeers: Flow<List<PeerEntity>> = peers.observeAll()
 
-
     fun observePendingCount(): Flow<Int> =
         messages.observePendingCount(identityStore.getIdentity().nodeId)
 
     fun observeQueuedOutgoing(): Flow<List<MessageRecordEntity>> =
         messages.observeQueuedOutgoing(identityStore.getIdentity().nodeId)
 
+    private fun normalizeNodeId(nodeId: String): String =
+        nodeId.trim().lowercase().replaceFirst("hmr-", "HMR-")
+
     suspend fun upsertPeer(peer: PeerEntity) = peers.upsert(peer)
 
-    suspend fun getPeer(nodeId: String): PeerEntity? = peers.get(nodeId.trim().uppercase())
+    suspend fun getPeer(nodeId: String): PeerEntity? = peers.get(normalizeNodeId(nodeId))
 
     suspend fun ensurePeer(nodeId: String) {
-        val normalized = nodeId.trim().uppercase()
+        val normalized = normalizeNodeId(nodeId)
         val localNodeId = identityStore.getIdentity().nodeId
         if (normalized.equals(localNodeId, ignoreCase = true)) return
 
@@ -50,20 +52,22 @@ class MessagingRepository private constructor(context: Context) {
     }
 
     suspend fun updateDiscoveredPeer(peer: BlePeer) {
-        if (peer.nodeId.equals(identityStore.getIdentity().nodeId, ignoreCase = true)) {
+        val normalized = normalizeNodeId(peer.nodeId)
+
+        if (normalized.equals(identityStore.getIdentity().nodeId, ignoreCase = true)) {
             return
         }
 
-        val existing = peers.get(peer.nodeId)
+        val existing = peers.get(normalized)
         val advertisedName = peer.deviceName.trim()
         val name = advertisedName
-            .takeIf { it.isNotBlank() && !it.equals(peer.nodeId, ignoreCase = true) }
+            .takeIf { it.isNotBlank() && !it.equals(normalized, ignoreCase = true) }
             ?: existing?.displayName
-            ?: peer.nodeId
+            ?: normalized
 
         peers.upsert(
             PeerEntity(
-                nodeId = peer.nodeId,
+                nodeId = normalized,
                 displayName = name,
                 deviceType = peer.deviceType.name,
                 address = peer.address.takeIf { it != "Unknown" } ?: existing?.address,
@@ -78,7 +82,7 @@ class MessagingRepository private constructor(context: Context) {
         displayName: String,
         deviceType: String
     ) {
-        val normalized = nodeId.trim().uppercase()
+        val normalized = normalizeNodeId(nodeId)
         val existing = peers.get(normalized)
 
         peers.upsert(
@@ -104,7 +108,7 @@ class MessagingRepository private constructor(context: Context) {
         recipientNodeId: String,
         messageType: String
     ): MessageRecordEntity {
-        val cleanRecipient = recipientNodeId.trim().uppercase()
+        val cleanRecipient = normalizeNodeId(recipientNodeId)
         require(content.isNotBlank())
         require(NodeIdGenerator.isValid(cleanRecipient))
         require(!cleanRecipient.equals(identityStore.getIdentity().nodeId, ignoreCase = true))
@@ -193,7 +197,7 @@ class MessagingRepository private constructor(context: Context) {
     suspend fun makeRecipientEligible(peerNodeId: String) {
         messages.makeRecipientEligible(
             localNodeId = identityStore.getIdentity().nodeId,
-            peerNodeId = peerNodeId.trim().uppercase(),
+            peerNodeId = normalizeNodeId(peerNodeId),
             now = System.currentTimeMillis()
         )
     }
@@ -221,7 +225,7 @@ class MessagingRepository private constructor(context: Context) {
     suspend fun deleteConversation(peerNodeId: String) =
         messages.deleteConversation(
             identityStore.getIdentity().nodeId,
-            peerNodeId.trim().uppercase()
+            normalizeNodeId(peerNodeId)
         )
 
     companion object {

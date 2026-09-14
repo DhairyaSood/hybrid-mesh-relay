@@ -192,6 +192,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
 
     val navigationStack = remember { mutableStateListOf(AppScreen.HOME) }
     var selectedPeerNodeId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedMessagesTab by rememberSaveable { mutableIntStateOf(0) }
 
     LaunchedEffect(peerRequest) {
         val request = peerRequest?.trim().orEmpty()
@@ -261,7 +262,12 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
                 when (currentScreen) {
                     AppScreen.HOME -> HomeScreen(onNetworkClick = { navigateTab(AppScreen.NETWORK) })
                     AppScreen.NETWORK -> NetworkScreen()
-                    AppScreen.MESSAGES -> MessagesScreen(onConversationClick = ::openConversation, onOpenDevices = { navigateTab(AppScreen.DEVICES) })
+                    AppScreen.MESSAGES -> MessagesScreen(
+                        selectedTab = selectedMessagesTab,
+                        onSelectedTabChange = { selectedMessagesTab = it },
+                        onConversationClick = ::openConversation,
+                        onOpenDevices = { navigateTab(AppScreen.DEVICES) }
+                    )
                     AppScreen.DEVICES -> DevicesScreen()
                     AppScreen.CONVERSATION -> selectedPeerNodeId?.let { ConversationScreen(peerNodeId = it) }
                     AppScreen.PROFILE -> ProfileScreen()
@@ -322,4 +328,3 @@ private fun NicknameOnboarding(
         ) { Text("CONTINUE") }
     }
 }
-
