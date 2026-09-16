@@ -38,7 +38,9 @@ import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 fun NetworkScreen() {
     val viewModel: MessagesViewModel = viewModel()
     val state by viewModel.networkState.collectAsStateWithLifecycle()
-    val transport by MessagingManager.getInstance(androidx.compose.ui.platform.LocalContext.current).transport.collectAsStateWithLifecycle()
+    val messagingManager = MessagingManager.getInstance(androidx.compose.ui.platform.LocalContext.current)
+    val transport by messagingManager.transport.collectAsStateWithLifecycle()
+    val mesh by messagingManager.mesh.collectAsStateWithLifecycle()
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
 
     Column(Modifier.fillMaxSize().background(RelayBackground)) {
@@ -50,12 +52,12 @@ fun NetworkScreen() {
                 TextButton(onClick = { selectedTab = 1 }) { Text("ADVANCED", color = if (selectedTab == 1) RelayAccent else RelayTextMuted) }
             }
         }
-        if (selectedTab == 0) Overview(state) else Advanced(state, transport)
+        if (selectedTab == 0) Overview(state, mesh) else Advanced(state, transport, mesh)
     }
 }
 
 @Composable
-private fun Overview(state: NetworkState) {
+private fun Overview(state: NetworkState, mesh: com.hybridmesh.relay.messaging.mesh.MeshRuntimeSnapshot) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { MetricCard("INITIALIZATION", state.initializationState.name, "generation ${state.runtimeGeneration}") }
         item { MetricCard("RUNTIME", state.bleRuntimeState.name, "BLE runtime condition") }
@@ -63,11 +65,13 @@ private fun Overview(state: NetworkState) {
         item { MetricCard("DISCOVERY", state.scanningState.name, "${state.nearbyDeviceCount} nodes in range") }
         item { MetricCard("ADVERTISING", state.advertisingState.name, if (state.gattServerReady) "GATT server ready" else "Waiting for GATT readiness") }
         item { MetricCard("CONNECTIVITY", if (state.internetAvailable) "INTERNET AVAILABLE" else "OFFLINE", "Internet is informational; BLE messaging does not depend on it") }
+        item { MetricCard("MESH", if (mesh.running) "READY" else "STOPPED", "relay ${if (mesh.relayEnabled) "enabled" else "disabled"} • forwarding ${mesh.pendingForwarding}") }
+        item { MetricCard("MESH CACHE", mesh.cachedPackets.toString(), "active packet identities") }
     }
 }
 
 @Composable
-private fun Advanced(state: NetworkState, transport: com.hybridmesh.relay.messaging.model.GattTransportSnapshot) {
+private fun Advanced(state: NetworkState, transport: com.hybridmesh.relay.messaging.model.GattTransportSnapshot, mesh: com.hybridmesh.relay.messaging.mesh.MeshRuntimeSnapshot) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { MetricCard("TRANSPORT STATE", transport.state.name, transport.error.name) }
         item { MetricCard("PEER", transport.peerAddress ?: "—", transport.messageId ?: "No active message") }
@@ -82,6 +86,9 @@ private fun Advanced(state: NetworkState, transport: com.hybridmesh.relay.messag
         item { MetricCard("FRAMES", "${transport.frameIndex?.plus(1) ?: 0} / ${transport.frameCount ?: 0}", "bytes sent ${transport.bytesSent}") }
         item { MetricCard("RUNTIME", state.bleRuntimeState.name, "generation ${state.runtimeGeneration}") }
         item { MetricCard("NODE DISCOVERY", "${state.nearbyDeviceCount} live", "phones ${state.phoneNodeCount} • relays ${state.relayNodeCount}") }
+        item { MetricCard("FORWARD QUEUE", mesh.pendingForwarding.toString(), "durable transit packets") }
+        item { MetricCard("SEEN CACHE", mesh.cachedPackets.toString(), "duplicate suppression entries") }
+        mesh.lastDeliveredHopCount?.let { item { MetricCard("LAST DELIVERY", "$it hops", "destination-confirmed") } }
     }
 }
 

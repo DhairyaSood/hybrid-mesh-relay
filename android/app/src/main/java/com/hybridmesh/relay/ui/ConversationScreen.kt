@@ -347,11 +347,13 @@ private fun MessageBubble(message: MessageRecordEntity, incoming: Boolean, onLon
             Row(Modifier.padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.createdAt)), style = MaterialTheme.typography.labelSmall, color = RelayTextMuted)
                 if (!incoming) Text(
-                    when (message.status) {
-                        DeliveryStatus.DELIVERED.name -> "DELIVERED"
-                        DeliveryStatus.IN_FLIGHT.name -> "SENDING"
-                        DeliveryStatus.QUEUED.name -> "QUEUED"
-                        DeliveryStatus.FAILED.name -> "FAILED"
+                    when {
+                        message.status == DeliveryStatus.DELIVERED.name && (message.deliveryHopCount ?: 0) > 0 ->
+                            "DELIVERED · ${message.deliveryHopCount} HOPS"
+                        message.status == DeliveryStatus.DELIVERED.name -> "DELIVERED"
+                        message.status == DeliveryStatus.IN_FLIGHT.name -> "SENDING"
+                        message.status == DeliveryStatus.QUEUED.name -> "QUEUED"
+                        message.status == DeliveryStatus.FAILED.name -> "FAILED"
                         else -> ""
                     }, style = MaterialTheme.typography.labelSmall, color = if (message.status == DeliveryStatus.FAILED.name) MaterialTheme.colorScheme.error else RelayTextMuted
                 )

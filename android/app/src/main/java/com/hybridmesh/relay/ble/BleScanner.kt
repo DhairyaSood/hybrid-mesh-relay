@@ -162,11 +162,15 @@ class BleScanner(
         if (generation.get() != sessionGeneration || !scanning) return
         val record = result.scanRecord ?: return
         val data = record.getManufacturerSpecificData(BleConstants.MANUFACTURER_ID) ?: return
-        if (data.size < BleConstants.DISCOVERY_BASE_BYTES) return
+        if (data.size < BleConstants.LEGACY_DISCOVERY_BASE_BYTES) return
 
         try {
             val buffer = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
-            if (buffer.get() != BleConstants.DISCOVERY_VERSION) return
+            val discoveryVersion = buffer.get()
+            if (discoveryVersion != BleConstants.DISCOVERY_VERSION &&
+                discoveryVersion != 3.toByte() &&
+                discoveryVersion != BleConstants.LEGACY_DISCOVERY_VERSION
+            ) return
             val nodeUuid = UUID(buffer.long, buffer.long)
             val nodeId = "HMR-$nodeUuid"
             if (nodeId.equals(localNodeIdProvider(), true)) return
@@ -176,8 +180,41 @@ class BleScanner(
                 BleConstants.DEVICE_TYPE_RELAY -> NodeType.RELAY
                 else -> return
             }
-            val nameLength = buffer.get().toInt() and 0xFF
+
+            val meshProtocolVersion: Int
+            val canRelay: Boolean
+            val canStoreForward: Boolean
+            val nameLength: Int
+
+            when (discoveryVersion.toInt()) {
+                BleConstants.DISCOVERY_VERSION.toInt() -> {
+                    if (buffer.remaining() < 3) return
+                    val capabilities = buffer.get().toInt() and 0xFF
+                    meshProtocolVersion = buffer.get().toInt() and 0xFF
+                    canRelay = capabilities and BleConstants.CAPABILITY_CAN_RELAY.toInt() != 0
+                    canStoreForward =
+                        capabilities and BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() != 0
+                    nameLength = buffer.get().toInt() and 0xFF
+                }
+                3 -> {
+                    if (buffer.remaining() < 2) return
+                    val capabilities = buffer.get().toInt() and 0xFF
+                    meshProtocolVersion = BleConstants.MESH_PROTOCOL_VERSION.toInt()
+                    canRelay = capabilities and BleConstants.CAPABILITY_CAN_RELAY.toInt() != 0
+                    canStoreForward =
+                        capabilities and BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() != 0
+                    nameLength = buffer.get().toInt() and 0xFF
+                }
+                else -> {
+                    meshProtocolVersion = 0
+                    canRelay = false
+                    canStoreForward = false
+                    nameLength = buffer.get().toInt() and 0xFF
+                }
+            }
+
             if (nameLength > BleConstants.DISCOVERY_NAME_MAX_BYTES || buffer.remaining() < nameLength) return
+            if (discoveryVersion.toInt() >= 3 && meshProtocolVersion < 1) return
             val nameBytes = ByteArray(nameLength)
             buffer.get(nameBytes)
             val deviceName = nameBytes.toString(Charsets.UTF_8).trim().ifBlank { "Hybrid Mesh Device" }
@@ -192,7 +229,10 @@ class BleScanner(
                     deviceType = deviceType,
                     address = address,
                     rssi = result.rssi,
-                    lastSeen = seenAt
+                    lastSeen = seenAt,
+                    meshProtocolVersion = meshProtocolVersion,
+                    canRelay = canRelay,
+                    canStoreForward = canStoreForward
                 ).let { fresh ->
                     // Preserve first-seen ordering. RSSI is telemetry, not the list sort key.
                     if (previous == null) fresh else fresh
