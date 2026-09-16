@@ -38,9 +38,45 @@ class BleGattClient(context: Context) {
         isRuntimeGenerationCurrent: () -> Boolean,
         onState: (GattTransportSnapshot) -> Unit = {}
     ): GattSendResult {
+        val packet = com.hybridmesh.relay.messaging.mesh.MeshPacket(
+            packetId = com.hybridmesh.relay.messaging.mesh.MeshPacketCodec.stableDataPacketId(record.messageId),
+            messageId = record.messageId,
+            originNodeId = record.senderNodeId,
+            destinationNodeId = record.recipientNodeId,
+            createdAt = record.createdAt,
+            expiresAt = record.createdAt +
+                com.hybridmesh.relay.messaging.mesh.MeshEngine.MESSAGE_LIFETIME_MS,
+            ttl = com.hybridmesh.relay.messaging.mesh.MeshEngine.INITIAL_TTL,
+            hopCount = 0,
+            packetType = com.hybridmesh.relay.messaging.mesh.MeshPacket.PacketType.DATA,
+            messageType = record.messageType,
+            content = record.content
+        )
+        return sendPayload(
+            device = device,
+            payload = com.hybridmesh.relay.messaging.mesh.MeshPacketCodec.encode(packet),
+            messageId = record.messageId,
+            transferId = com.hybridmesh.relay.messaging.mesh.MeshPacketCodec.newTransferId(),
+            runtimeGeneration = runtimeGeneration,
+            isRuntimeGenerationCurrent = isRuntimeGenerationCurrent,
+            onState = onState
+        )
+    }
+
+    /** Sends an already-encoded network payload over the existing reliable GATT transport. */
+    @SuppressLint("MissingPermission")
+    suspend fun sendPayload(
+        device: BluetoothDevice,
+        payload: ByteArray,
+        messageId: String?,
+        transferId: Long = UUID.randomUUID().leastSignificantBits,
+        runtimeGeneration: Long,
+        isRuntimeGenerationCurrent: () -> Boolean,
+        onState: (GattTransportSnapshot) -> Unit = {}
+    ): GattSendResult {
         val session = ClientSession(
             address = safeAddress(device),
-            messageId = record.messageId,
+            messageId = messageId,
             runtimeGeneration = runtimeGeneration,
             isRuntimeGenerationCurrent = isRuntimeGenerationCurrent,
             publish = onState
@@ -72,26 +108,7 @@ class BleGattClient(context: Context) {
             session.transition(GattTransportState.READY)
             val payloadSize = GattPacketCodec.safePayloadBytes(mtu)
 
-            val envelope = GattPacketCodec.encodeMessageEnvelope(
-                senderNodeId = record.senderNodeId,
-                recipientNodeId = record.recipientNodeId,
-                messageType = messageTypeCode(record.messageType),
-                createdAt = record.createdAt,
-                content = record.content
-            )
-
-            val token = GattPacketCodec.tokenFromMessageId(record.messageId)
-                ?: run {
-                    session.fail(GattTransportError.PROTOCOL_ERROR)
-                    return GattSendResult.Failed(
-                        GattTransportError.PROTOCOL_ERROR,
-                        session.snapshot()
-                    )
-                }
-
-            val chunkCount = ((envelope.size + payloadSize - 1) / payloadSize)
-                .coerceAtLeast(1)
-
+            val chunkCount = ((payload.size + payloadSize - 1) / payloadSize).coerceAtLeast(1)
             if (chunkCount > GattPacketCodec.MAX_CHUNKS) {
                 session.fail(GattTransportError.FRAME_TOO_LARGE)
                 return GattSendResult.Failed(
@@ -100,7 +117,7 @@ class BleGattClient(context: Context) {
                 )
             }
 
-            session.expectedTransferId = token
+            session.expectedTransferId = transferId
             session.frameCount = chunkCount
             session.mtu = mtu
             session.bytesSent = 0
@@ -108,14 +125,13 @@ class BleGattClient(context: Context) {
             for (index in 0 until chunkCount) {
                 session.requireRuntime()
                 val start = index * payloadSize
-                val end = minOf(envelope.size, start + payloadSize)
-                val payload = envelope.copyOfRange(start, end)
+                val end = minOf(payload.size, start + payloadSize)
                 val frame = GattPacketCodec.encodeData(
                     GattPacketCodec.DataFrame(
-                        transferId = token,
+                        transferId = transferId,
                         chunkIndex = index,
                         chunkCount = chunkCount,
-                        payload = payload
+                        payload = payload.copyOfRange(start, end)
                     )
                 )
 
@@ -124,7 +140,7 @@ class BleGattClient(context: Context) {
                     frameIndex = index
                 )
                 writeCharacteristic(gatt, session, frame)
-                session.bytesSent += payload.size
+                session.bytesSent += end - start
             }
 
             session.requireRuntime()

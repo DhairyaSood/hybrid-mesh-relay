@@ -17,5 +17,6 @@ data class MessageRecordEntity(
     val deliveredAt: Long?,
     @ColumnInfo(defaultValue = "0") val attemptCount: Int = 0,
     val nextAttemptAt: Long? = null,
-    val lastError: String? = null
+    val lastError: String? = null,
+    val deliveryHopCount: Int? = null
 )

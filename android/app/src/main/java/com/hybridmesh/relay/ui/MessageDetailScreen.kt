@@ -209,6 +209,13 @@ private fun MessageInfo(
             value = message.lastTransport ?: "LOCAL"
         )
 
+        message.deliveryHopCount?.let { hops ->
+            DetailRow(
+                label = "HOPS",
+                value = hops.toString()
+            )
+        }
+
         DetailRow(
             label = "MESSAGE ID",
             value = message.messageId

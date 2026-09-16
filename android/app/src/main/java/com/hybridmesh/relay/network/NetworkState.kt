@@ -29,7 +29,7 @@ data class NetworkState(
         get() = peers.size
 
     val relayNodeCount: Int
-        get() = peers.count { it.deviceType == NodeType.RELAY }
+        get() = peers.count { it.canRelay }
 
     val phoneNodeCount: Int
         get() = peers.count { it.deviceType == NodeType.PHONE }

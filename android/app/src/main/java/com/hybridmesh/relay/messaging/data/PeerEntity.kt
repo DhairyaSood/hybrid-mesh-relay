@@ -10,5 +10,8 @@ data class PeerEntity(
     val deviceType: String,
     val address: String?,
     val lastRssi: Int?,
-    val lastSeenAt: Long?
+    val lastSeenAt: Long?,
+    val meshProtocolVersion: Int = 0,
+    val canRelay: Boolean = false,
+    val canStoreForward: Boolean = false
 )

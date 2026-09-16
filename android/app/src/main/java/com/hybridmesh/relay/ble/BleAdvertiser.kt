@@ -272,15 +272,10 @@ class BleAdvertiser(context: Context) {
         val nicknameBytes = identity.deviceName
             .trim()
             .toByteArray(Charsets.UTF_8)
-            .truncateUtf8(
-                BleConstants.DISCOVERY_NAME_MAX_BYTES
-            )
+            .truncateUtf8(BleConstants.MESH_DISCOVERY_NAME_MAX_BYTES)
 
         return ByteBuffer
-            .allocate(
-                BleConstants.DISCOVERY_BASE_BYTES +
-                    nicknameBytes.size
-            )
+            .allocate(BleConstants.DISCOVERY_BASE_BYTES + nicknameBytes.size)
             .order(ByteOrder.BIG_ENDIAN)
             .apply {
                 put(BleConstants.DISCOVERY_VERSION)
@@ -288,12 +283,15 @@ class BleAdvertiser(context: Context) {
                 putLong(nodeUuid.leastSignificantBits)
                 put(
                     when (identity.deviceType) {
-                        NodeType.PHONE ->
-                            BleConstants.DEVICE_TYPE_PHONE
-                        NodeType.RELAY ->
-                            BleConstants.DEVICE_TYPE_RELAY
+                        NodeType.PHONE -> BleConstants.DEVICE_TYPE_PHONE
+                        NodeType.RELAY -> BleConstants.DEVICE_TYPE_RELAY
                     }
                 )
+                put(
+                    (BleConstants.CAPABILITY_CAN_RELAY.toInt() or
+                        BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt()).toByte()
+                )
+                put(BleConstants.MESH_PROTOCOL_VERSION)
                 put(nicknameBytes.size.toByte())
                 put(nicknameBytes)
             }
