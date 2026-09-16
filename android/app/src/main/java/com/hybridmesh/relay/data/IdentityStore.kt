@@ -1,7 +1,6 @@
 package com.hybridmesh.relay.data
 
 import android.content.Context
-import android.os.Build
 import com.hybridmesh.relay.model.LocalIdentity
 import com.hybridmesh.relay.model.NodeType
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,11 +20,13 @@ class IdentityStore private constructor(context: Context) {
     fun getIdentity(): LocalIdentity = _identity.value
 
     fun isNicknameConfigured(): Boolean =
-        preferences.getString(KEY_DEVICE_NAME, null)?.trim()?.isNotBlank() == true
+        preferences.getString(KEY_DEVICE_NAME, null)?.let(NicknamePolicy::isValid) == true
 
     fun updateDeviceName(name: String): LocalIdentity {
-        val cleaned = name.trim().take(MAX_DISPLAY_NAME_CHARS)
-        require(cleaned.isNotBlank()) { "Nickname cannot be blank" }
+        val cleaned = NicknamePolicy.clean(name)
+        require(NicknamePolicy.isValid(cleaned)) {
+            NicknamePolicy.errorMessage(cleaned) ?: "Invalid username"
+        }
 
         val current = _identity.value
         if (current.deviceName == cleaned && isNicknameConfigured()) return current
@@ -43,11 +44,13 @@ class IdentityStore private constructor(context: Context) {
             }
 
         val storedName = preferences.getString(KEY_DEVICE_NAME, null)
-        val name = storedName?.trim()?.take(MAX_DISPLAY_NAME_CHARS)?.takeIf { it.isNotBlank() }
-            ?: defaultDeviceName()
+        val name = storedName
+            ?.let(NicknamePolicy::clean)
+            ?.takeIf(NicknamePolicy::isValid)
+            ?: ""
 
-        // Existing installations already had an identity name; new installations do not.
-        // The distinction is stored by the presence of KEY_DEVICE_NAME, not by the fallback model name.
+        // A fresh installation deliberately has no default username. The user must
+        // explicitly configure one before the mesh advertises this identity.
         return LocalIdentity(
             nodeId = nodeId,
             deviceName = name,
@@ -55,14 +58,11 @@ class IdentityStore private constructor(context: Context) {
         )
     }
 
-    private fun defaultDeviceName(): String =
-        Build.MODEL?.trim()?.takeIf { it.isNotBlank() } ?: "Neyra Device"
-
     companion object {
         private const val PREFERENCES_NAME = "hybrid_mesh_identity"
         private const val KEY_NODE_ID = "node_id"
         private const val KEY_DEVICE_NAME = "device_name"
-        const val MAX_DISPLAY_NAME_CHARS = 32
+        const val MAX_DISPLAY_NAME_CHARS = NicknamePolicy.MAX_LENGTH
 
         @Volatile private var INSTANCE: IdentityStore? = null
 

@@ -13,6 +13,7 @@ import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +44,8 @@ class MessagingManager private constructor(context: Context) {
     private val gattClient = BleGattClient(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val wakeChannel = Channel<Unit>(Channel.CONFLATED)
+    @Volatile
+    private var startupResetCompleted: CompletableDeferred<Boolean>? = null
     private val peerLocks = ConcurrentHashMap<String, Mutex>()
     private val identitySyncInFlight = ConcurrentHashMap.newKeySet<String>()
     // Successful identity sync is tied to node + address + advertised name so a
@@ -62,52 +65,38 @@ class MessagingManager private constructor(context: Context) {
         if (started) return
         started = true
 
+        val startupReset = CompletableDeferred<Boolean>()
+        startupResetCompleted = startupReset
+
         jobs += scope.launch {
-            repository.resetInFlightMessages()
+            var success = false
+            try {
+                repository.resetInFlightMessages()
+                success = true
+            } finally {
+                // A new reset gate is created for every service start so a later
+                // service restart cannot reuse an already-completed gate and race
+                // stale IN_FLIGHT cleanup.
+                startupReset.complete(success)
+            }
             wakeChannel.trySend(Unit)
         }
 
         jobs += scope.launch {
-            networkManager.state
-                .distinctUntilChanged { old, new ->
-                    old.bluetoothState == new.bluetoothState &&
-                        old.permissionsGranted == new.permissionsGranted &&
-                        old.bleSupported == new.bleSupported &&
-                        old.runtimeGeneration == new.runtimeGeneration &&
-                        old.gattServerReady == new.gattServerReady
-                }
-                .collect { state ->
-                    val ready = state.bleSupported &&
-                        state.permissionsGranted &&
-                        state.bluetoothState == BluetoothState.ON
-
-                    if (ready) {
-                        gattServer.start()
-                        networkManager.setGattServerReady(gattServer.isReady)
-                        if (gattServer.isReady) {
-                            repository.makeAllQueuedEligible()
-                            networkManager.refresh()
-                            wakeChannel.trySend(Unit)
-                        } else {
-                            scope.launch {
-                                val serverReady = gattServer.awaitReady(BleGattConstants.SERVER_READY_TIMEOUT_MS)
-                                networkManager.setGattServerReady(serverReady && gattServer.isReady)
-                                if (serverReady) {
-                                    repository.makeAllQueuedEligible()
-                                    networkManager.refresh()
-                                    wakeChannel.trySend(Unit)
-                                } else {
-                                    networkManager.refresh()
-                                }
-                            }
-                        }
-                    } else {
-                        gattServer.stop()
-                        networkManager.setGattServerReady(false)
-                        networkManager.refresh()
+            networkManager.runtimeEvents.collect { event ->
+                when (event) {
+                    com.hybridmesh.relay.network.BleRuntimeEvent.TRANSPORT_UNAVAILABLE -> {
+                        repository.resetInFlightMessages()
+                        _transport.value = GattTransportSnapshot()
+                        wakeChannel.trySend(Unit)
                     }
-                    wakeChannel.trySend(Unit)
+                    com.hybridmesh.relay.network.BleRuntimeEvent.TRANSPORT_AVAILABLE -> {
+                        // Runtime recovery wakes the outbox but does not erase
+                        // legitimate retry backoff timestamps.
+                        wakeChannel.trySend(Unit)
+                    }
                 }
+            }
         }
 
         jobs += scope.launch {
@@ -170,10 +159,22 @@ class MessagingManager private constructor(context: Context) {
             return false
         }
         val serverReady = gattServer.awaitReady(timeoutMs)
-        networkManager.setGattServerReady(serverReady && gattServer.isReady)
-        return serverReady
+        val actuallyReady = serverReady && gattServer.isReady
+        if (!actuallyReady) {
+            // A timed-out GATT start must not leave a half-open server behind.
+            // Otherwise the next recovery attempt can see an existing server
+            // object and refuse to recreate it.
+            gattServer.stop()
+        }
+        networkManager.setGattServerReady(actuallyReady)
+        return actuallyReady
     }
 
+
+    fun stopGattServer() {
+        gattServer.stop()
+        networkManager.setGattServerReady(false)
+    }
     @Synchronized
     fun stop() {
         if (!started) return
@@ -186,6 +187,9 @@ class MessagingManager private constructor(context: Context) {
     }
 
     private suspend fun drainOutboxLoop() {
+        val resetGate = startupResetCompleted ?: return
+        if (!resetGate.await()) return
+
         while (currentCoroutineContext().isActive && started) {
             val state = networkManager.state.value
             val ready = state.bleSupported &&
@@ -200,8 +204,7 @@ class MessagingManager private constructor(context: Context) {
 
             val now = System.currentTimeMillis()
             if (!gattServer.isReady) {
-                gattServer.start()
-                waitForWake(250L)
+                waitForWake(500L)
                 continue
             }
 
@@ -221,9 +224,8 @@ class MessagingManager private constructor(context: Context) {
                 }
 
                 if (peer == null) {
-                    scheduleRetry(message.messageId, message.attemptCount + 1, "PEER_UNAVAILABLE")
-                    attempted = true
-                    break
+                    deferUnavailableMessage(message.messageId, "PEER_UNAVAILABLE")
+                    continue
                 }
 
                 val device = runCatching {
@@ -231,9 +233,8 @@ class MessagingManager private constructor(context: Context) {
                 }.getOrNull()
 
                 if (device == null) {
-                    scheduleRetry(message.messageId, message.attemptCount + 1, "DEVICE_UNAVAILABLE")
-                    attempted = true
-                    break
+                    deferUnavailableMessage(message.messageId, "DEVICE_UNAVAILABLE")
+                    continue
                 }
 
                 val lock = peerLocks.computeIfAbsent(peer.nodeId) { Mutex() }
@@ -246,7 +247,7 @@ class MessagingManager private constructor(context: Context) {
                     if (claimed == null) {
                         repository.scheduleRetry(
                             messageId = message.messageId,
-                            attemptCount = message.attemptCount + 1,
+                            attemptCount = message.attemptCount,
                             nextAttemptAt = System.currentTimeMillis() + 2_000L,
                             error = "CLAIM_READBACK_FAILED"
                         )
@@ -286,6 +287,19 @@ class MessagingManager private constructor(context: Context) {
             onState = { snapshot -> _transport.value = snapshot }
         )
 
+        if (networkManager.runtimeGeneration.value != runtimeGeneration ||
+            networkManager.state.value.bluetoothState != BluetoothState.ON
+        ) {
+            repository.requeueIfInFlight(
+                messageId = message.messageId,
+                nextAttemptAt = System.currentTimeMillis(),
+                error = "BLE_RUNTIME_LOST"
+            )
+            _transport.value = GattTransportSnapshot()
+            wakeChannel.trySend(Unit)
+            return
+        }
+
         when (result) {
             is BleGattClient.GattSendResult.Delivered -> {
                 repository.markDelivered(message.messageId, "BLE")
@@ -313,6 +327,17 @@ class MessagingManager private constructor(context: Context) {
                 }
             }
         }
+    }
+
+    private suspend fun deferUnavailableMessage(
+        messageId: String,
+        error: String
+    ) {
+        repository.deferQueuedMessage(
+            messageId = messageId,
+            nextAttemptAt = System.currentTimeMillis() + PEER_AVAILABILITY_RETRY_MS,
+            error = error
+        )
     }
 
     private suspend fun scheduleRetry(
@@ -432,6 +457,8 @@ class MessagingManager private constructor(context: Context) {
     )
 
     companion object {
+        private const val PEER_AVAILABILITY_RETRY_MS = 15_000L
+
         @Volatile
         private var INSTANCE: MessagingManager? = null
 
