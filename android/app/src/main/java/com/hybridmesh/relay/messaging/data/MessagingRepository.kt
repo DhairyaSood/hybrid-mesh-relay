@@ -194,6 +194,22 @@ class MessagingRepository private constructor(context: Context) {
         )
     }
 
+    suspend fun requeueIfInFlight(messageId: String, nextAttemptAt: Long, error: String) {
+        messages.requeueIfInFlight(messageId, nextAttemptAt, error)
+    }
+
+    suspend fun deferQueuedMessage(
+        messageId: String,
+        nextAttemptAt: Long,
+        error: String
+    ) {
+        messages.deferQueuedMessage(
+            messageId = messageId,
+            nextAttemptAt = nextAttemptAt,
+            lastError = error
+        )
+    }
+
     suspend fun makeRecipientEligible(peerNodeId: String) {
         messages.makeRecipientEligible(
             localNodeId = identityStore.getIdentity().nodeId,

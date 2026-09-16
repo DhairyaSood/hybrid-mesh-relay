@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hybridmesh.relay.data.NicknamePolicy
 import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
 import com.hybridmesh.relay.permissions.PermissionManager
@@ -121,6 +122,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     var foregroundCycle by rememberSaveable { mutableIntStateOf(0) }
     var bleRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
     var notificationRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
+    var bluetoothRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
     var showPermissionRecovery by remember { mutableStateOf(false) }
 
     val blePermissionLauncher = rememberLauncherForActivityResult(
@@ -154,7 +156,8 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(foregroundCycle, networkState.blePermissions) {
+    LaunchedEffect(foregroundCycle, networkState.blePermissions, identity.deviceName) {
+        if (identity.deviceName.isBlank()) return@LaunchedEffect
         val missing = PermissionManager.missingBlePermissions(context)
         if (missing.isNotEmpty() && bleRequestedCycle != foregroundCycle) {
             bleRequestedCycle = foregroundCycle
@@ -162,11 +165,12 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         }
     }
 
-    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, identityStore.isNicknameConfigured()) {
+    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, identity.deviceName) {
+        if (identity.deviceName.isBlank()) return@LaunchedEffect
         val notificationPermission = PermissionManager.notifications(context)
         val shouldPrompt = notificationPermission.level == com.hybridmesh.relay.permissions.NotificationPermissionLevel.NOT_REQUESTED ||
             (notificationPermission.level == com.hybridmesh.relay.permissions.NotificationPermissionLevel.DENIED && notificationPermission.previouslyGranted)
-        if (identityStore.isNicknameConfigured() &&
+        if (identity.deviceName.isNotBlank() &&
             networkState.blePermissions.allGranted &&
             shouldPrompt &&
             notificationRequestedCycle != foregroundCycle
@@ -176,16 +180,25 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         }
     }
 
-    LaunchedEffect(networkState.blePermissions.allGranted) {
-        if (networkState.blePermissions.allGranted) {
-            // The runtime may initialize while onboarding is visible.
-            // Advertising itself remains gated until the nickname exists.
+    LaunchedEffect(networkState.blePermissions.allGranted, identity.deviceName) {
+        if (networkState.blePermissions.allGranted && identity.deviceName.isNotBlank()) {
             runCatching { HybridMeshService.start(context) }
         }
     }
 
-    LaunchedEffect(networkState.permissionsGranted, networkState.bluetoothState) {
-        if (networkState.permissionsGranted && networkState.bluetoothState == BluetoothState.OFF) {
+    LaunchedEffect(
+        foregroundCycle,
+        networkState.permissionsGranted,
+        networkState.bluetoothState,
+        identity.deviceName
+    ) {
+        if (
+            identity.deviceName.isNotBlank() &&
+            networkState.permissionsGranted &&
+            networkState.bluetoothState == BluetoothState.OFF &&
+            bluetoothRequestedCycle != foregroundCycle
+        ) {
+            bluetoothRequestedCycle = foregroundCycle
             bluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
         }
     }
@@ -223,7 +236,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
 
     BackHandler(enabled = navigationStack.size > 1, onBack = ::goBack)
 
-    if (!identityStore.isNicknameConfigured()) {
+    if (identity.deviceName.isBlank()) {
         NicknameOnboarding(
             initialNickname = "",
             onSave = { nickname -> identityStore.updateDeviceName(nickname) }
@@ -300,6 +313,7 @@ private fun NicknameOnboarding(
     onSave: (String) -> Unit
 ) {
     var nickname by rememberSaveable { mutableStateOf(initialNickname) }
+    val validationError = NicknamePolicy.errorMessage(nickname)
     androidx.compose.foundation.layout.Column(
         modifier = Modifier
             .fillMaxSize()
@@ -316,14 +330,21 @@ private fun NicknameOnboarding(
         )
         androidx.compose.material3.OutlinedTextField(
             value = nickname,
-            onValueChange = { nickname = it.take(32) },
-            label = { Text("Nickname") },
+            onValueChange = { nickname = NicknamePolicy.clean(it) },
+            isError = nickname.isNotEmpty() && validationError != null,
+            label = { Text("Username") },
+            supportingText = {
+                Text(validationError ?: "Up to ${NicknamePolicy.MAX_LENGTH} characters. Use letters, numbers, _ . - @ & \$ ! # ^ ~.")
+            },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth().height(72.dp)
+            modifier = Modifier.fillMaxWidth()
         )
         androidx.compose.material3.Button(
-            onClick = { if (nickname.trim().isNotBlank()) onSave(nickname.trim()) },
-            enabled = nickname.trim().isNotBlank(),
+            onClick = {
+                val cleaned = NicknamePolicy.clean(nickname)
+                if (NicknamePolicy.isValid(cleaned)) onSave(cleaned)
+            },
+            enabled = NicknamePolicy.isValid(nickname),
             modifier = Modifier.fillMaxWidth().height(52.dp).padding(top = 12.dp)
         ) { Text("CONTINUE") }
     }

@@ -53,8 +53,18 @@ interface MessageDao {
         lastError: String?
     )
 
-    @Query("UPDATE mesh_messages SET status = 'IN_FLIGHT', lastTransport = 'BLE', nextAttemptAt = NULL, lastError = NULL WHERE messageId = :messageId AND status = 'QUEUED'")
+    @Query("UPDATE mesh_messages SET status = 'IN_FLIGHT', lastTransport = 'BLE', attemptCount = attemptCount + 1, nextAttemptAt = NULL, lastError = NULL WHERE messageId = :messageId AND status = 'QUEUED'")
     suspend fun claimForDelivery(messageId: String): Int
+
+    @Query("UPDATE mesh_messages SET status = 'QUEUED', lastTransport = 'BLE', deliveredAt = NULL, nextAttemptAt = :nextAttemptAt, lastError = :lastError WHERE messageId = :messageId AND status = 'IN_FLIGHT'")
+    suspend fun requeueIfInFlight(messageId: String, nextAttemptAt: Long, lastError: String): Int
+
+    @Query("UPDATE mesh_messages SET nextAttemptAt = :nextAttemptAt, lastError = :lastError WHERE messageId = :messageId AND status = 'QUEUED'")
+    suspend fun deferQueuedMessage(
+        messageId: String,
+        nextAttemptAt: Long,
+        lastError: String
+    ): Int
 
     @Query("UPDATE mesh_messages SET status = 'QUEUED', lastTransport = :transport, deliveredAt = NULL, attemptCount = :attemptCount, nextAttemptAt = :nextAttemptAt, lastError = :lastError WHERE messageId = :messageId")
     suspend fun scheduleRetry(
@@ -68,7 +78,7 @@ interface MessageDao {
     @Query("UPDATE mesh_messages SET status = 'QUEUED', nextAttemptAt = COALESCE(nextAttemptAt, :now), lastError = :lastError WHERE senderNodeId = :localNodeId AND status = 'IN_FLIGHT'")
     suspend fun resetInFlight(localNodeId: String, now: Long, lastError: String?)
 
-    @Query("UPDATE mesh_messages SET nextAttemptAt = :now WHERE senderNodeId = :localNodeId AND recipientNodeId = :peerNodeId AND status = 'QUEUED'")
+    @Query("UPDATE mesh_messages SET nextAttemptAt = :now WHERE senderNodeId = :localNodeId AND recipientNodeId = :peerNodeId AND status = 'QUEUED' AND lastError IN ('PEER_UNAVAILABLE', 'DEVICE_UNAVAILABLE')")
     suspend fun makeRecipientEligible(
         localNodeId: String,
         peerNodeId: String,

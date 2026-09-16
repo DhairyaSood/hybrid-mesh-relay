@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.data.NicknamePolicy
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
@@ -46,7 +47,9 @@ fun ProfileScreen() {
     val identity by viewModel.identity.collectAsStateWithLifecycle()
     var deviceName by remember(identity.deviceName) { mutableStateOf(identity.deviceName) }
     val clipboard = LocalClipboardManager.current
-    val dirty = deviceName.trim() != identity.deviceName && deviceName.trim().isNotBlank()
+    val cleanedUsername = NicknamePolicy.clean(deviceName)
+    val validationError = NicknamePolicy.errorMessage(deviceName)
+    val dirty = cleanedUsername != identity.deviceName && NicknamePolicy.isValid(cleanedUsername)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(RelayBackground),
@@ -55,23 +58,26 @@ fun ProfileScreen() {
     ) {
         item {
             Text("DEVICE PROFILE", style = MaterialTheme.typography.headlineSmall, maxLines = 1)
-            Text("Your nickname is public to nearby devices. Your Node ID is the persistent address.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Your username is public to nearby devices. Your Node ID is the persistent address.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
             Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("LOCAL IDENTITY", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
                 OutlinedTextField(
                     value = deviceName,
-                    onValueChange = { deviceName = it.take(32) },
+                    onValueChange = { deviceName = NicknamePolicy.clean(it) },
+                    isError = deviceName.isNotEmpty() && validationError != null,
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("Nickname") },
-                    supportingText = { Text("Non-unique. This is how you appear to nearby nodes.") }
+                    label = { Text("Username") },
+                    supportingText = {
+                        Text(validationError ?: "Up to ${NicknamePolicy.MAX_LENGTH} characters. Use letters, numbers, _ . - @ & \$ ! # ^ ~.")
+                    }
                 )
                 Button(
                     onClick = {
-                        viewModel.updateDeviceName(deviceName)
-                        Toast.makeText(context, "Nickname updated", Toast.LENGTH_SHORT).show()
+                        viewModel.updateDeviceName(cleanedUsername)
+                        Toast.makeText(context, "Username updated", Toast.LENGTH_SHORT).show()
                     },
                     enabled = dirty,
                     modifier = Modifier.fillMaxWidth()
@@ -88,7 +94,7 @@ fun ProfileScreen() {
         item { InfoRow("App version", viewModel.appVersion) }
         item {
             Text(
-                "Node ID is generated locally and persisted on this installation. Updating the nickname does not change it.",
+                "Node ID is generated locally and persisted on this installation. Updating the username does not change it.",
                 color = RelayTextMuted,
                 style = MaterialTheme.typography.bodySmall
             )

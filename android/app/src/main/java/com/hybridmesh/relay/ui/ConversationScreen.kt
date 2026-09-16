@@ -61,7 +61,10 @@ import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import java.text.DateFormat
+import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
+import java.util.Locale
 
 @Composable
 fun ConversationScreen(peerNodeId: String) {
@@ -186,10 +189,19 @@ fun ConversationScreen(peerNodeId: String) {
             ) {
                 if (messages.isEmpty()) {
                     item { EmptyConversationState(displayName) }
-                }
-                items(messages, key = { it.messageId }) { message ->
-                    val incoming = !message.senderNodeId.equals(identity.nodeId, true)
-                    MessageBubble(message, incoming, onLongPress = { deleteMessageId = message.messageId })
+                } else {
+                    var previousDateKey: String? = null
+                    messages.forEach { message ->
+                        val dateKey = conversationDateKey(message.createdAt)
+                        if (dateKey != previousDateKey) {
+                            item(key = "date-$dateKey") { ConversationDateMarker(message.createdAt) }
+                            previousDateKey = dateKey
+                        }
+                        item(key = message.messageId) {
+                            val incoming = !message.senderNodeId.equals(identity.nodeId, true)
+                            MessageBubble(message, incoming, onLongPress = { deleteMessageId = message.messageId })
+                        }
+                    }
                 }
             }
 
@@ -278,6 +290,35 @@ fun ConversationScreen(peerNodeId: String) {
         )
     }
 }
+
+
+private fun conversationDateKey(timestamp: Long): String =
+    SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
+
+@Composable
+private fun ConversationDateMarker(timestamp: Long) {
+    val messageCalendar = Calendar.getInstance().apply { timeInMillis = timestamp }
+    val today = Calendar.getInstance()
+    val yesterday = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, -1) }
+
+    val label = when {
+        sameCalendarDay(messageCalendar, today) -> "TODAY"
+        sameCalendarDay(messageCalendar, yesterday) -> "YESTERDAY"
+        else -> SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).format(Date(timestamp)).uppercase(Locale.getDefault())
+    }
+
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = RelayTextMuted)
+    }
+}
+
+private fun sameCalendarDay(first: Calendar, second: Calendar): Boolean =
+    first.get(Calendar.ERA) == second.get(Calendar.ERA) &&
+        first.get(Calendar.YEAR) == second.get(Calendar.YEAR) &&
+        first.get(Calendar.DAY_OF_YEAR) == second.get(Calendar.DAY_OF_YEAR)
 
 @Composable
 private fun EmptyConversationState(displayName: String) {

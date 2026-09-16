@@ -41,13 +41,15 @@ class HybridMeshService : Service() {
         // usable, then start the always-on runtime. If Bluetooth is currently
         // unavailable, NetworkManager will recover it when state changes.
         serviceScope.launch {
-            // Messaging owns GATT readiness; NetworkManager only advertises when
-            // the GATT server reports that its service has actually been added.
+            // The service owns the runtime lifecycle. NetworkManager drives the
+            // BLE recovery transaction and delegates only the GATT server
+            // implementation to MessagingManager.
             messagingManager.start()
-            networkManager.setBleAdvertisingGate { messagingManager.isGattServerReady() }
-            messagingManager.prepareGattServer()
+            networkManager.setGattLifecycle(
+                start = { messagingManager.prepareGattServer() },
+                stop = { messagingManager.stopGattServer() }
+            )
             networkManager.startRuntime()
-            networkManager.refresh()
         }
     }
 
