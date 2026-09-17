@@ -22,5 +22,5 @@ object BleGattConstants {
     const val IDENTITY_READ_TIMEOUT_MS = 4_000L
 
     const val IDENTITY_VERSION: Byte = 1
-    const val IDENTITY_NAME_MAX_BYTES = 16
+    const val IDENTITY_NAME_MAX_BYTES = 50
 }
