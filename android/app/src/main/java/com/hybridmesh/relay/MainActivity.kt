@@ -4,6 +4,7 @@ import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -120,16 +121,21 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     val peerRequest by openPeerRequest.collectAsStateWithLifecycle()
 
     var foregroundCycle by rememberSaveable { mutableIntStateOf(0) }
-    var bleRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
     var notificationRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
-    var bluetoothRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
+    var radioPromptShownForOffState by rememberSaveable { mutableStateOf(false) }
+    var showRadioPrompt by rememberSaveable { mutableStateOf(false) }
+    var meshPermissionRequestLaunched by remember { mutableStateOf(false) }
     var showPermissionRecovery by remember { mutableStateOf(false) }
+    val hasAnyMeshTransportPermission = PermissionManager.hasAnyMeshTransportPermissionGranted(context)
 
     val blePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
+        PermissionManager.markMeshPermissionRequestCompleted(context)
         networkManager.refresh()
-        showPermissionRecovery = !PermissionManager.ble(context).allGranted
+        // A denied bearer must not block the other one. Show recovery only when
+        // neither BLE nor Wi-Fi Direct has the permission needed to operate.
+        showPermissionRecovery = !PermissionManager.hasAnyMeshTransportPermissionGranted(context)
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -158,20 +164,36 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
 
     LaunchedEffect(foregroundCycle, networkState.blePermissions, identity.deviceName) {
         if (identity.deviceName.isBlank()) return@LaunchedEffect
-        val missing = PermissionManager.missingBlePermissions(context)
-        if (missing.isNotEmpty() && bleRequestedCycle != foregroundCycle) {
-            bleRequestedCycle = foregroundCycle
+        val missing = PermissionManager.missingMeshPermissions(context)
+        if (missing.isEmpty()) {
+            PermissionManager.markMeshPermissionRequestCompleted(context)
+        } else if (!PermissionManager.hasCompletedMeshPermissionRequest(context) && !meshPermissionRequestLaunched) {
+            // The in-memory guard prevents duplicate launches during recomposition.
+            // Completion is persisted only after Android returns a result, so a
+            // process death while the dialog is open does not strand permissions.
+            meshPermissionRequestLaunched = true
             blePermissionLauncher.launch(missing)
         }
     }
 
-    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, identity.deviceName) {
+    // If permissions are later revoked in Android Settings, surface recovery on
+    // the next foreground visit instead of silently leaving the runtime stopped.
+    LaunchedEffect(foregroundCycle, hasAnyMeshTransportPermission, identity.deviceName) {
+        if (identity.deviceName.isNotBlank() &&
+            !hasAnyMeshTransportPermission &&
+            PermissionManager.hasCompletedMeshPermissionRequest(context)
+        ) {
+            showPermissionRecovery = true
+        }
+    }
+
+    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, hasAnyMeshTransportPermission, identity.deviceName) {
         if (identity.deviceName.isBlank()) return@LaunchedEffect
         val notificationPermission = PermissionManager.notifications(context)
         val shouldPrompt = notificationPermission.level == com.hybridmesh.relay.permissions.NotificationPermissionLevel.NOT_REQUESTED ||
             (notificationPermission.level == com.hybridmesh.relay.permissions.NotificationPermissionLevel.DENIED && notificationPermission.previouslyGranted)
         if (identity.deviceName.isNotBlank() &&
-            networkState.blePermissions.allGranted &&
+            hasAnyMeshTransportPermission &&
             shouldPrompt &&
             notificationRequestedCycle != foregroundCycle
         ) {
@@ -180,26 +202,32 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         }
     }
 
-    LaunchedEffect(networkState.blePermissions.allGranted, identity.deviceName) {
-        if (networkState.blePermissions.allGranted && identity.deviceName.isNotBlank()) {
+    // Start the service if either bearer can operate. In particular, do not gate
+    // Wi-Fi Direct behind the full BLE permission set.
+    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, hasAnyMeshTransportPermission, identity.deviceName) {
+        if (hasAnyMeshTransportPermission && identity.deviceName.isNotBlank()) {
             runCatching { HybridMeshService.start(context) }
         }
     }
 
     LaunchedEffect(
         foregroundCycle,
-        networkState.permissionsGranted,
         networkState.bluetoothState,
         identity.deviceName
     ) {
-        if (
-            identity.deviceName.isNotBlank() &&
-            networkState.permissionsGranted &&
-            networkState.bluetoothState == BluetoothState.OFF &&
-            bluetoothRequestedCycle != foregroundCycle
-        ) {
-            bluetoothRequestedCycle = foregroundCycle
-            bluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+        val wifiEnabled = runCatching {
+            context.getSystemService(WifiManager::class.java)?.isWifiEnabled == true
+        }.getOrDefault(false)
+        if (identity.deviceName.isNotBlank()) {
+            val bluetoothEnabled = networkState.bluetoothState == BluetoothState.ON
+            if (wifiEnabled || bluetoothEnabled) {
+                // Once either bearer is available, leave the other radio alone.
+                radioPromptShownForOffState = false
+                showRadioPrompt = false
+            } else if (!radioPromptShownForOffState) {
+                radioPromptShownForOffState = true
+                showRadioPrompt = true
+            }
         }
     }
 
@@ -211,7 +239,9 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         val request = peerRequest?.trim().orEmpty()
         if (request.isNotBlank()) {
             selectedPeerNodeId = request
+            selectedMessagesTab = 0
             navigationStack.clear()
+            navigationStack.add(AppScreen.MESSAGES)
             navigationStack.add(AppScreen.CONVERSATION)
             activity?.clearOpenPeerRequest()
         }
@@ -292,9 +322,9 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     if (showPermissionRecovery) {
         AlertDialog(
             onDismissRequest = { showPermissionRecovery = false },
-            title = { Text("Bluetooth access is still missing") },
+            title = { Text("Nearby transport access is still missing") },
             text = {
-                Text("Neyra will check again the next time you open the app. You can also grant the missing Nearby Devices permissions from Android settings now.")
+                Text("Neyra needs permission for at least one nearby transport. Grant Bluetooth permissions for BLE, and/or the Wi-Fi Direct permission, in Android settings. Either transport can operate without the other.")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -303,6 +333,31 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
                 }) { Text("OPEN APP SETTINGS") }
             },
             dismissButton = { TextButton(onClick = { showPermissionRecovery = false }) { Text("LATER") } }
+        )
+    }
+
+    if (showRadioPrompt) {
+        AlertDialog(
+            onDismissRequest = { showRadioPrompt = false },
+            title = { Text("Turn on a nearby connection") },
+            text = {
+                Text("For the best discovery, turn on both Wi-Fi and Bluetooth. Wi-Fi Direct is Neyra's preferred connection, and Bluetooth provides BLE discovery and a fallback. Neyra will keep working if either radio is later turned off.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRadioPrompt = false
+                    context.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                }) { Text("WI-FI SETTINGS") }
+            },
+            dismissButton = {
+                androidx.compose.foundation.layout.Row {
+                    TextButton(onClick = {
+                        showRadioPrompt = false
+                        bluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+                    }) { Text("BLUETOOTH") }
+                    TextButton(onClick = { showRadioPrompt = false }) { Text("LATER") }
+                }
+            }
         )
     }
 }

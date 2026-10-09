@@ -579,6 +579,7 @@ class BleGattClient(context: Context) {
         "PRIORITY" -> 2
         "EMERGENCY" -> 3
         "LOCATION" -> 4
+        "ATTACHMENT" -> 5
         else -> 1
     }
 

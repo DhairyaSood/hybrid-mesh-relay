@@ -621,6 +621,7 @@ class BleGattServer(context: Context) {
             2 -> MessageType.PRIORITY.name
             3 -> MessageType.EMERGENCY.name
             4 -> MessageType.LOCATION.name
+            5 -> MessageType.ATTACHMENT.name
             else -> MessageType.NORMAL.name
         }
 

@@ -199,7 +199,7 @@ class BleScanner(
                 3 -> {
                     if (buffer.remaining() < 2) return
                     val capabilities = buffer.get().toInt() and 0xFF
-                    meshProtocolVersion = BleConstants.MESH_PROTOCOL_VERSION.toInt()
+                    meshProtocolVersion = BleConstants.LEGACY_MESH_PROTOCOL_VERSION.toInt()
                     canRelay = capabilities and BleConstants.CAPABILITY_CAN_RELAY.toInt() != 0
                     canStoreForward =
                         capabilities and BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() != 0

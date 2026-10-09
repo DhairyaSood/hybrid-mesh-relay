@@ -1,15 +1,21 @@
 package com.hybridmesh.relay.ui.viewmodel
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.data.NodeIdGenerator
 import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.MessagingManager
+import com.hybridmesh.relay.messaging.mesh.MeshPeer
+import com.hybridmesh.relay.messaging.mesh.MeshRuntimeSnapshot
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
+import com.hybridmesh.relay.messaging.data.AttachmentRecordEntity
+import com.hybridmesh.relay.messaging.data.MessageTraceEventEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.data.PeerEntity
+import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
 import com.hybridmesh.relay.messaging.model.ChatSummary
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
@@ -22,6 +28,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 class MessagesViewModel(
@@ -31,8 +39,11 @@ class MessagesViewModel(
     private val identityStore = IdentityStore.getInstance(application)
     private val repository = MessagingRepository.getInstance(application)
     private val networkManager = NetworkManager.getInstance(application)
+    private val messagingManager = MessagingManager.getInstance(application)
     val identity = identityStore.identity
     val networkState: StateFlow<NetworkState> = networkManager.state
+    val meshPeers: StateFlow<List<MeshPeer>> = messagingManager.meshPeers
+    val meshRuntime: StateFlow<MeshRuntimeSnapshot> = messagingManager.mesh
 
     val messages: StateFlow<List<MessageRecordEntity>> =
         repository.allMessages.stateIn(
@@ -101,6 +112,9 @@ class MessagesViewModel(
     val localNodeId: String
         get() = identityStore.getIdentity().nodeId
 
+    fun observeTraceEvents(messageId: String): Flow<List<MessageTraceEventEntity>> =
+        repository.observeTraceEvents(messageId)
+
     fun observeConversation(
         peerNodeId: String
     ): Flow<List<MessageRecordEntity>> {
@@ -115,6 +129,40 @@ class MessagesViewModel(
                 (sender == normalizedLocalId && recipient == normalizedPeerId) ||
                     (sender == normalizedPeerId && recipient == normalizedLocalId)
             }.sortedBy { it.createdAt }
+        }
+    }
+
+    fun observeConversationAttachments(peerNodeId: String): Flow<List<AttachmentRecordEntity>> =
+        repository.observeAttachmentsForConversation(peerNodeId)
+
+    fun sendAttachment(
+        peerNodeId: String,
+        uri: Uri,
+        onResult: (Boolean, String?) -> Unit
+    ) {
+        viewModelScope.launch {
+            var importedFile: java.io.File? = null
+            try {
+                val imported = withContext(Dispatchers.IO) {
+                    AttachmentFileStore.importPickedFile(getApplication(), uri)
+                }
+                importedFile = imported.file
+                withContext(Dispatchers.IO) {
+                    repository.addOutgoingAttachment(
+                        recipientNodeId = peerNodeId,
+                        mimeType = imported.mimeType,
+                        displayName = imported.displayName,
+                        sizeBytes = imported.sizeBytes,
+                        sha256 = imported.sha256,
+                        localPath = imported.file.absolutePath
+                    )
+                }
+                importedFile = null
+                onResult(true, null)
+            } catch (failure: Exception) {
+                withContext(Dispatchers.IO) { importedFile?.delete() }
+                onResult(false, failure.message ?: "Could not add this attachment.")
+            }
         }
     }
 
@@ -138,7 +186,7 @@ class MessagesViewModel(
                     )
 
                 else -> {
-                    repository.ensurePeer(nodeId)
+                    repository.savePeerForChat(nodeId)
                     onResult(true, nodeId)
                 }
             }
@@ -221,6 +269,10 @@ class MessagesViewModel(
         val groups =
             linkedMapOf<String, MutableList<MessageRecordEntity>>()
 
+        peerRows.filter { it.isSavedForChat }.forEach { peer ->
+            groups.getOrPut(peer.nodeId.uppercase(Locale.US)) { mutableListOf() }
+        }
+
         // A conversation exists only when an actual message exists.
         messageRows.forEach { message ->
             val sender =
@@ -252,8 +304,13 @@ class MessagesViewModel(
                             it.isNotBlank() &&
                                 !it.equals(peerId, ignoreCase = true)
                         }
-                        ?: peerId,
-                    lastMessage = last?.content,
+                        ?: "Unknown node",
+                    lastMessage = last?.let {
+                        if (it.messageType == MessageType.ATTACHMENT.name) {
+                            val descriptor = com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor.decode(it.content)
+                            if (descriptor?.mimeType?.startsWith("video/") == true) "Video" else "Photo"
+                        } else it.content
+                    },
                     lastActivity = last?.createdAt ?: 0L,
                     lastStatus = last?.let { message ->
                         DeliveryStatus.entries.firstOrNull {

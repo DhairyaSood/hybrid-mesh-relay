@@ -4,5 +4,6 @@ enum class MessageType {
     NORMAL,
     PRIORITY,
     EMERGENCY,
-    LOCATION
+    LOCATION,
+    ATTACHMENT
 }

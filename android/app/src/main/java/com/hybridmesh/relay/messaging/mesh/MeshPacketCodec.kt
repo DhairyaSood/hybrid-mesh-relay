@@ -19,7 +19,10 @@ data class MeshPacket(
     val packetType: PacketType,
     val messageType: String,
     val content: String,
-    val deliveryHopCount: Int? = null
+    val deliveryHopCount: Int? = null,
+    /** Successful incoming transport sequence before this node; compact stable codes. */
+    val routeTransportCodes: List<Int> = emptyList(),
+    val routeTraceComplete: Boolean = false
 ) {
     enum class PacketType(val code: Byte) {
         DATA(1),
@@ -34,8 +37,9 @@ data class MeshPacket(
  */
 object MeshPacketCodec {
     private val MAGIC = byteArrayOf(0x4E, 0x4D) // "NM"
-    const val PROTOCOL_VERSION: Int = 1
-    private const val VERSION: Byte = PROTOCOL_VERSION.toByte()
+    const val PROTOCOL_VERSION: Int = 2
+    private const val VERSION_1: Byte = 1
+    private const val VERSION_2: Byte = 2
     private const val FIXED_HEADER_BYTES = 2 + 1 + 1 + 16 + 16 + 16 + 2 + 2 + 2 + 1 + 1 + 1 + 8 + 8
     private const val MIN_BYTES = FIXED_HEADER_BYTES + 4
     const val MAX_PACKET_BYTES = 16 * 1024
@@ -43,7 +47,7 @@ object MeshPacketCodec {
     const val INITIAL_TTL = 8
     private const val MAX_TTL_WIRE = 32
 
-    fun encode(packet: MeshPacket): ByteArray {
+    fun encode(packet: MeshPacket, wireVersionNumber: Int = PROTOCOL_VERSION): ByteArray {
         val packetUuid = uuid(packet.packetId)
         val messageId = packet.messageId.toByteArray(Charsets.UTF_8)
         val messageType = packet.messageType.toByteArray(Charsets.UTF_8)
@@ -52,6 +56,10 @@ object MeshPacketCodec {
         require(messageId.size <= MAX_TEXT_BYTES) { "messageId too large" }
         require(messageType.size <= 255) { "messageType too large" }
         require(content.size <= MAX_TEXT_BYTES) { "mesh payload too large" }
+        require(wireVersionNumber in 1..PROTOCOL_VERSION) { "unsupported wire version" }
+        require(wireVersionNumber != 1 || packet.routeTransportCodes.isEmpty()) { "legacy packets cannot carry route trace" }
+        require(packet.routeTransportCodes.size <= INITIAL_TTL + 1) { "route trace exceeds hop budget" }
+        require(packet.routeTransportCodes.all { it in 1..3 }) { "unknown route transport code" }
         require(packet.ttl in 0..MAX_TTL_WIRE) { "ttl out of range" }
         require(packet.hopCount in 0..MAX_TTL_WIRE) { "hopCount out of range" }
         require(packet.ttl + packet.hopCount == INITIAL_TTL) {
@@ -67,6 +75,9 @@ object MeshPacketCodec {
                 require(packet.deliveryHopCount == null) {
                     "DATA packets cannot contain deliveryHopCount"
                 }
+                require(!packet.routeTraceComplete || packet.routeTransportCodes.size == packet.hopCount) {
+                    "complete DATA route must contain one transport per prior hop"
+                }
             }
             MeshPacket.PacketType.DELIVERY_ACK -> {
                 require(packet.messageType == "DELIVERY_ACK") {
@@ -78,6 +89,9 @@ object MeshPacketCodec {
                 require(packet.deliveryHopCount != null) {
                     "DELIVERY_ACK requires deliveryHopCount"
                 }
+                require(!packet.routeTraceComplete || packet.routeTransportCodes.size == packet.deliveryHopCount + 1) {
+                    "complete DELIVERY_ACK route must contain one transport per delivered link"
+                }
             }
         }
         require(packet.deliveryHopCount == null || packet.deliveryHopCount in 0..MAX_TTL_WIRE) {
@@ -86,7 +100,8 @@ object MeshPacketCodec {
 
         val header = ByteArrayOutputStream()
         header.write(MAGIC)
-        header.write(VERSION.toInt())
+        val wireVersion = if (wireVersionNumber == 1) VERSION_1 else VERSION_2
+        header.write(wireVersion.toInt())
         header.write(packet.packetType.code.toInt())
         header.write(uuidBytes(packetUuid))
         header.write(uuidBytes(uuid(packet.originNodeId)))
@@ -99,6 +114,11 @@ object MeshPacketCodec {
         header.write(if (packet.deliveryHopCount == null) 0 else packet.deliveryHopCount + 1)
         writeLong(header, packet.createdAt)
         writeLong(header, packet.expiresAt)
+        if (wireVersion == VERSION_2) {
+            header.write(packet.routeTransportCodes.size)
+            packet.routeTransportCodes.forEach(header::write)
+            header.write(if (packet.routeTraceComplete) 1 else 0)
+        }
         header.write(messageId)
         header.write(messageType)
         header.write(content)
@@ -123,7 +143,8 @@ object MeshPacketCodec {
 
             val buffer = ByteBuffer.wrap(bytes, 0, bytes.size - 4).order(ByteOrder.BIG_ENDIAN)
             if (buffer.get() != MAGIC[0] || buffer.get() != MAGIC[1]) return null
-            if (buffer.get() != VERSION) return null
+            val wireVersion = buffer.get()
+            if (wireVersion != VERSION_1 && wireVersion != VERSION_2) return null
             val packetTypeCode = buffer.get()
             val packetType = MeshPacket.PacketType.entries.firstOrNull { it.code == packetTypeCode }
                 ?: return null
@@ -138,6 +159,20 @@ object MeshPacketCodec {
             val encodedDeliveryHop = buffer.get().toInt() and 0xFF
             val createdAt = buffer.long
             val expiresAt = buffer.long
+            var routeTraceComplete = false
+            val routeTransportCodes = if (wireVersion == VERSION_2) {
+                if (!buffer.hasRemaining()) return null
+                val count = buffer.get().toInt() and 0xFF
+                if (count > INITIAL_TTL + 1 || buffer.remaining() < count) return null
+                List(count) { buffer.get().toInt() and 0xFF }.also { codes ->
+                    if (codes.any { it !in 1..3 }) return null
+                }.also {
+                    if (!buffer.hasRemaining()) return null
+                    val completeByte = buffer.get().toInt() and 0xFF
+                    if (completeByte !in 0..1) return null
+                    routeTraceComplete = completeByte == 1
+                }
+            } else emptyList()
 
             if (messageIdLength > MAX_TEXT_BYTES || messageTypeLength > 255 || contentLength > MAX_TEXT_BYTES) return null
             val required = messageIdLength + messageTypeLength + contentLength
@@ -169,6 +204,10 @@ object MeshPacketCodec {
             if (packetType == MeshPacket.PacketType.DATA) {
                 val expectedMessagePrefix = "HMRM-$originUuid::"
                 if (!messageIdText.startsWith(expectedMessagePrefix, ignoreCase = true)) return null
+                // For trace-capable packets, one transport code represents each
+                // completed link before this receiver. Legacy gaps are explicitly
+                // marked partial and may legitimately have fewer entries.
+                if (wireVersion == VERSION_2 && routeTraceComplete && routeTransportCodes.size != hopCount) return null
             }
 
             val decodedPacket = MeshPacket(
@@ -183,11 +222,13 @@ object MeshPacketCodec {
                 packetType = packetType,
                 messageType = messageTypeText,
                 content = contentBytes.toString(Charsets.UTF_8),
-                deliveryHopCount = if (encodedDeliveryHop == 0) null else encodedDeliveryHop - 1
+                deliveryHopCount = if (encodedDeliveryHop == 0) null else encodedDeliveryHop - 1,
+                routeTransportCodes = routeTransportCodes,
+                routeTraceComplete = routeTraceComplete
             )
             when (decodedPacket.packetType) {
                 MeshPacket.PacketType.DATA -> {
-                    if (decodedPacket.messageType !in setOf("NORMAL", "PRIORITY", "EMERGENCY", "LOCATION")) return null
+                    if (decodedPacket.messageType !in setOf("NORMAL", "PRIORITY", "EMERGENCY", "LOCATION", "ATTACHMENT")) return null
                     if (decodedPacket.content.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) return null
                     if (decodedPacket.deliveryHopCount != null) return null
                 }
@@ -195,6 +236,10 @@ object MeshPacketCodec {
                     if (decodedPacket.messageType != "DELIVERY_ACK") return null
                     if (decodedPacket.content.isNotEmpty()) return null
                     if (decodedPacket.deliveryHopCount == null || decodedPacket.deliveryHopCount !in 0..MAX_TTL_WIRE) return null
+                    // A complete delivery route has one transport per physical
+                    // link: relay-hop count plus the final link into the destination.
+                    if (wireVersion == VERSION_2 && decodedPacket.routeTraceComplete &&
+                        decodedPacket.routeTransportCodes.size != decodedPacket.deliveryHopCount + 1) return null
                 }
             }
             decodedPacket

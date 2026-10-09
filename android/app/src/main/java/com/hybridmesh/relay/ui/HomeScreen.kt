@@ -28,14 +28,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hybridmesh.relay.ble.BleOperationState
-import com.hybridmesh.relay.ble.BlePeer
 import com.hybridmesh.relay.data.IdentityStore
+import com.hybridmesh.relay.messaging.MessagingManager
+import com.hybridmesh.relay.messaging.mesh.MeshPeer
+import com.hybridmesh.relay.messaging.mesh.MeshRuntimeSnapshot
+import com.hybridmesh.relay.network.BleRuntimeState
 import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
 import com.hybridmesh.relay.network.NetworkState
+import com.hybridmesh.relay.permissions.PermissionManager
+import com.hybridmesh.relay.ui.components.rememberWifiEnabled
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
@@ -51,279 +57,169 @@ fun HomeScreen(onNetworkClick: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val networkState by NetworkManager.getInstance(context).state.collectAsStateWithLifecycle()
     val identity by IdentityStore.getInstance(context).identity.collectAsStateWithLifecycle()
+    val messagingManager = MessagingManager.getInstance(context)
+    val mesh by messagingManager.mesh.collectAsStateWithLifecycle()
+    val peers by messagingManager.meshPeers.collectAsStateWithLifecycle()
+    val wifiEnabled = rememberWifiEnabled()
+    val wifiSupported = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI_DIRECT)
+    val wifiPermissionGranted = PermissionManager.wifiDirectPermissionGranted(context)
 
     LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(RelayBackground),
+        modifier = Modifier.fillMaxSize().background(RelayBackground),
         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
             Column(Modifier.fillMaxWidth()) {
-                Text(
-                    text = "NEYRA",
-                    style = MaterialTheme.typography.displaySmall,
-                    maxLines = 2
-                )
-
-                Text(
-                    text = identity.deviceName,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = RelayAccent,
-                    maxLines = 1,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-
-                Text(
-                    text = identity.nodeId,
-                    style = TechnicalTextStyle,
-                    color = RelayTextMuted,
-                    maxLines = 1,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
+                Text("NEYRA", style = MaterialTheme.typography.displaySmall, maxLines = 1)
+                Text(identity.deviceName, style = MaterialTheme.typography.titleSmall, color = RelayAccent, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
+                Text(identity.nodeId, style = TechnicalTextStyle, color = RelayTextMuted, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
             }
         }
-
         item {
-            RuntimeStatusCard(state = networkState)
-        }
-
-        item {
-            NetworkStatusCard(
+            MeshStatusCard(
                 state = networkState,
+                mesh = mesh,
+                peerCount = peers.size,
+                wifiEnabled = wifiEnabled,
+                wifiSupported = wifiSupported,
+                wifiPermissionGranted = wifiPermissionGranted,
                 onClick = onNetworkClick
             )
         }
-
-        item {
-            MeshPreview(networkState.peers)
-        }
+        item { InternetStatusCard(isAvailable = networkState.internetAvailable, onClick = onNetworkClick) }
+        item { MeshPreview(peers) }
     }
 }
 
 @Composable
-private fun RuntimeStatusCard(state: NetworkState) {
-    val active = state.bleRuntimeState == com.hybridmesh.relay.network.BleRuntimeState.READY
-    val headline = when (state.bleRuntimeState) {
-        com.hybridmesh.relay.network.BleRuntimeState.READY -> "Mesh runtime ready"
-        com.hybridmesh.relay.network.BleRuntimeState.RECOVERING -> "Recovering mesh runtime"
-        com.hybridmesh.relay.network.BleRuntimeState.STARTING -> "Starting mesh runtime"
-        com.hybridmesh.relay.network.BleRuntimeState.PERMISSION_REQUIRED -> "Permission required"
-        com.hybridmesh.relay.network.BleRuntimeState.BLUETOOTH_OFF -> "Bluetooth is off"
-        com.hybridmesh.relay.network.BleRuntimeState.UNSUPPORTED -> "BLE unsupported"
-        com.hybridmesh.relay.network.BleRuntimeState.DEGRADED -> "Mesh runtime degraded"
-    }
-    Column(Modifier.fillMaxWidth().background(RelaySurface, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).border(1.dp, RelayBorder, androidx.compose.foundation.shape.RoundedCornerShape(18.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("RUNTIME", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.weight(1f))
-            Text(state.initializationState.name, style = TechnicalTextStyle, color = if (active) RelayAccent else RelayTextMuted)
-        }
-        Text(headline, style = MaterialTheme.typography.titleMedium)
-        if (state.bleRuntimeState == com.hybridmesh.relay.network.BleRuntimeState.STARTING || state.bleRuntimeState == com.hybridmesh.relay.network.BleRuntimeState.RECOVERING) {
-            androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
-        }
-        Text("${state.nearbyDeviceCount} nearby • generation ${state.runtimeGeneration}", style = TechnicalTextStyle, color = RelayTextMuted)
-    }
-}
-
-@Composable
-private fun NetworkStatusCard(
+private fun MeshStatusCard(
     state: NetworkState,
+    mesh: MeshRuntimeSnapshot,
+    peerCount: Int,
+    wifiEnabled: Boolean,
+    wifiSupported: Boolean,
+    wifiPermissionGranted: Boolean,
     onClick: () -> Unit
 ) {
-    val headline = when (state.bluetoothState) {
-        BluetoothState.UNSUPPORTED -> "BLE unsupported"
-        BluetoothState.OFF -> "Bluetooth is off"
-        BluetoothState.TURNING_ON -> "Bluetooth is turning on"
-        BluetoothState.TURNING_OFF -> "Bluetooth is turning off"
-        BluetoothState.ERROR -> "Bluetooth unavailable"
-        BluetoothState.ON -> when {
-            state.scanningState == BleOperationState.ACTIVE ->
-                "Discovery active"
-
-            state.advertisingState == BleOperationState.ACTIVE ->
-                "Mesh available"
-
-            else ->
-                "BLE ready"
-        }
+    val bleReady = state.bleSupported && state.permissionsGranted &&
+        state.bluetoothState == BluetoothState.ON && state.scanningState == BleOperationState.ACTIVE
+    val wifiReady = wifiSupported && wifiEnabled && wifiPermissionGranted &&
+        (mesh.wifiDirectDiscoveryActive || mesh.connectedWifiPeers > 0)
+    val headline = when {
+        bleReady && wifiReady -> "Nearby mesh active over both transports"
+        wifiReady -> "Nearby mesh active over Wi-Fi Direct"
+        bleReady -> "Nearby mesh active over Bluetooth LE"
+        mesh.running -> "Mesh service running · transports starting"
+        else -> "Mesh service starting"
     }
-
-    val detail = when {
-        !state.permissionsGranted ->
-            "Bluetooth permissions are required."
-
-        state.bluetoothState == BluetoothState.OFF ->
-            "Turn Bluetooth on to discover nearby nodes."
-
-        state.scanningState == BleOperationState.ACTIVE ->
-            "Discovering nearby Hybrid Mesh nodes."
-
-        else ->
-            "BLE advertising is ${state.advertisingState.name.lowercase()}."
-    }
-
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                RelaySurface,
-                androidx.compose.foundation.shape.RoundedCornerShape(18.dp)
-            )
-            .border(
-                1.dp,
-                RelayBorder,
-                androidx.compose.foundation.shape.RoundedCornerShape(18.dp)
-            )
+        Modifier.fillMaxWidth()
+            .background(RelaySurface, MaterialTheme.shapes.large)
+            .border(1.dp, RelayBorder, MaterialTheme.shapes.large)
             .clickable(onClick = onClick)
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp)
     ) {
-        Text(
-            text = "NETWORK STATUS",
-            color = RelayTextMuted,
-            style = TechnicalTextStyle
-        )
-
-        Text(
-            text = headline,
-            style = MaterialTheme.typography.titleLarge
-        )
-
-        Text(
-            text = detail,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Text(
-            text = "${state.nearbyDeviceCount} nearby • ${
-                if (state.internetAvailable) {
-                    "internet available"
-                } else {
-                    "offline"
-                }
-            }",
-            style = TechnicalTextStyle,
-            color = RelayTextMuted
-        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("MESH STATUS", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.weight(1f))
+            Text(if (mesh.running) "RUNNING" else "STARTING", style = TechnicalTextStyle, color = if (mesh.running) RelayAccent else RelayTextMuted)
+        }
+        Text(headline, style = MaterialTheme.typography.titleMedium)
+        TransportStatusLine("Bluetooth LE", bleStatus(state), bleReady)
+        TransportStatusLine("Wi-Fi Direct", wifiStatus(wifiEnabled, wifiSupported, wifiPermissionGranted, mesh), wifiReady)
+        Text("$peerCount nearby node${if (peerCount == 1) "" else "s"}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
+        Text("Tap for network details", style = TechnicalTextStyle, color = RelayTextMuted)
     }
 }
 
 @Composable
-private fun MeshPreview(peers: List<BlePeer>) {
-    val transition = rememberInfiniteTransition(label = "meshPulse")
+private fun TransportStatusLine(label: String, status: String, ready: Boolean) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("●", color = if (ready) RelayAccent else RelayTextMuted)
+        Spacer(Modifier.padding(start = 6.dp))
+        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+        Text(status, style = TechnicalTextStyle, color = if (ready) RelayAccent else RelayTextMuted)
+    }
+}
 
+private fun bleStatus(state: NetworkState): String = when {
+    !state.bleSupported -> "Unsupported"
+    !state.permissionsGranted -> "Permission needed"
+    state.bluetoothState != BluetoothState.ON -> state.bluetoothState.name.lowercase().replace('_', ' ')
+    state.scanningState == BleOperationState.ACTIVE -> "Discovering"
+    state.bleRuntimeState == BleRuntimeState.STARTING || state.bleRuntimeState == BleRuntimeState.RECOVERING -> "Starting"
+    else -> state.bleRuntimeState.name.lowercase().replace('_', ' ')
+}
+
+private fun wifiStatus(enabled: Boolean, supported: Boolean, permissionGranted: Boolean, mesh: MeshRuntimeSnapshot): String = when {
+    !supported -> "Unsupported"
+    !permissionGranted -> "Permission needed"
+    !enabled -> "Wi-Fi is off"
+    mesh.connectedWifiPeers > 0 -> "Connected"
+    mesh.wifiDirectDiscoveryActive -> "Discovering"
+    else -> "Starting"
+}
+
+@Composable
+private fun InternetStatusCard(isAvailable: Boolean, onClick: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large)
+            .border(1.dp, RelayBorder, MaterialTheme.shapes.large)
+            .clickable(onClick = onClick).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Text("INTERNET", style = TechnicalTextStyle, color = RelayTextMuted)
+        Text(if (isAvailable) "Available" else "Offline", style = MaterialTheme.typography.titleMedium)
+        Text("Nearby messaging uses Bluetooth LE and Wi-Fi Direct; internet is optional.", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
+    }
+}
+
+@Composable
+private fun MeshPreview(peers: List<MeshPeer>) {
+    val transition = rememberInfiniteTransition(label = "meshPulse")
     val pulse by transition.animateFloat(
         initialValue = 0.35f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1600),
-            repeatMode = RepeatMode.Reverse
-        ),
+        animationSpec = infiniteRepeatable(tween(1600), repeatMode = RepeatMode.Reverse),
         label = "pulse"
     )
+    val bleOnly = peers.count { !it.bleAddress.isNullOrBlank() && it.wifiHost.isNullOrBlank() }
+    val wifiOnly = peers.count { it.bleAddress.isNullOrBlank() && !it.wifiHost.isNullOrBlank() }
+    val both = peers.count { !it.bleAddress.isNullOrBlank() && !it.wifiHost.isNullOrBlank() }
+    val visiblePeers = peers.sortedByDescending { it.lastSeen }.take(8)
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                RelaySurface,
-                androidx.compose.foundation.shape.RoundedCornerShape(18.dp)
-            )
-            .border(
-                1.dp,
-                RelayBorder,
-                androidx.compose.foundation.shape.RoundedCornerShape(18.dp)
-            )
-            .padding(16.dp)
+        Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large)
+            .border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(16.dp)
     ) {
-        Text(
-            text = "LOCAL MESH",
-            color = RelayTextMuted,
-            style = TechnicalTextStyle
-        )
-
-        Spacer(Modifier.height(10.dp))
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(180.dp)
-        ) {
-            Canvas(
-                modifier = Modifier.fillMaxSize()
-            ) {
-                val center = Offset(
-                    x = size.width * 0.5f,
-                    y = size.height * 0.5f
-                )
-
-                val visiblePeers = peers.take(8)
-
-                if (visiblePeers.isNotEmpty()) {
-                    visiblePeers.forEachIndexed { index, _ ->
-                        val angle =
-                            2.0 * Math.PI * index / visiblePeers.size -
-                                Math.PI / 2.0
-
-                        val radius =
-                            minOf(size.width, size.height) * 0.31f
-
-                        val node = Offset(
-                            x = center.x +
-                                radius * cos(angle).toFloat(),
-                            y = center.y +
-                                radius * sin(angle).toFloat()
-                        )
-
-                        drawLine(
-                            color = RelayTextMuted.copy(alpha = 0.45f),
-                            start = center,
-                            end = node,
-                            strokeWidth = 2.dp.toPx(),
-                            pathEffect = PathEffect.dashPathEffect(
-                                intervals = floatArrayOf(10f, 10f)
-                            )
-                        )
-
-                        drawCircle(
-                            color = RelayNode,
-                            radius = 7.dp.toPx(),
-                            center = node
-                        )
-                    }
+        Text("LOCAL MESH", color = RelayTextMuted, style = TechnicalTextStyle)
+        Text("Nodes are deduplicated by ID; dual-radio nodes use a double ring.", color = RelayTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(180.dp)) {
+            Canvas(Modifier.fillMaxSize()) {
+                val center = Offset(size.width * 0.5f, size.height * 0.5f)
+                visiblePeers.forEachIndexed { index, peer ->
+                    val angle = 2.0 * Math.PI * index / visiblePeers.size - Math.PI / 2.0
+                    val radius = minOf(size.width, size.height) * 0.31f
+                    val node = Offset(center.x + radius * cos(angle).toFloat(), center.y + radius * sin(angle).toFloat())
+                    drawLine(
+                        color = RelayTextMuted.copy(alpha = 0.45f), start = center, end = node,
+                        strokeWidth = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f))
+                    )
+                    val hasBle = !peer.bleAddress.isNullOrBlank()
+                    val hasWifi = !peer.wifiHost.isNullOrBlank() && (peer.wifiPort ?: 0) > 0
+                    drawCircle(color = if (hasWifi && !hasBle) RelayAccent else RelayNode, radius = 7.dp.toPx(), center = node)
+                    if (hasWifi && hasBle) drawCircle(color = RelayAccent, radius = 9.dp.toPx(), center = node, style = Stroke(width = 2.dp.toPx()))
                 }
-
-                drawCircle(
-                    color = RelayAccent.copy(alpha = pulse),
-                    radius = 12.dp.toPx(),
-                    center = center
-                )
+                drawCircle(color = RelayAccent.copy(alpha = pulse), radius = 12.dp.toPx(), center = center)
             }
-
-            Text(
-                text = "YOU",
-                modifier = Modifier.align(Alignment.Center),
-                color = RelayBackground,
-                style = TechnicalTextStyle
-            )
-
+            Text("YOU", Modifier.align(Alignment.Center), color = RelayBackground, style = TechnicalTextStyle)
             if (peers.isEmpty()) {
-                Text(
-                    text = "No nearby nodes",
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                    color = RelayTextMuted,
-                    style = MaterialTheme.typography.bodySmall
-                )
+                Text("No nearby nodes", Modifier.align(Alignment.BottomCenter), color = RelayTextMuted, style = MaterialTheme.typography.bodySmall)
             }
         }
-
-        Text(
-            text = "${peers.size} nearby node${if (peers.size == 1) "" else "s"}",
-            color = RelayTextMuted,
-            style = MaterialTheme.typography.bodySmall
-        )
+        Text("${peers.size} nearby node${if (peers.size == 1) "" else "s"}", color = RelayTextMuted, style = MaterialTheme.typography.bodySmall)
+        Text("$bleOnly via Bluetooth LE · $wifiOnly via Wi-Fi Direct · $both via both", color = RelayTextMuted, style = MaterialTheme.typography.bodySmall)
     }
 }

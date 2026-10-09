@@ -1,6 +1,7 @@
 package com.hybridmesh.relay.messaging.data
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "mesh_peers")
@@ -13,5 +14,6 @@ data class PeerEntity(
     val lastSeenAt: Long?,
     val meshProtocolVersion: Int = 0,
     val canRelay: Boolean = false,
-    val canStoreForward: Boolean = false
+    val canStoreForward: Boolean = false,
+    @ColumnInfo(defaultValue = "0") val isSavedForChat: Boolean = false
 )
