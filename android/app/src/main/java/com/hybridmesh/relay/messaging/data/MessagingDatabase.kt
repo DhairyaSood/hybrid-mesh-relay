@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [PeerEntity::class, MessageRecordEntity::class, MeshForwardingRecordEntity::class, MeshSeenPacketEntity::class],
-    version = 6,
+    entities = [PeerEntity::class, MessageRecordEntity::class, MeshForwardingRecordEntity::class, MeshSeenPacketEntity::class, MessageTraceEventEntity::class],
+    version = 8,
     exportSchema = false
 )
 abstract class MessagingDatabase : RoomDatabase() {
@@ -17,6 +17,7 @@ abstract class MessagingDatabase : RoomDatabase() {
     abstract fun messageDao(): MessageDao
     abstract fun meshForwardingDao(): MeshForwardingDao
     abstract fun meshSeenPacketDao(): MeshSeenPacketDao
+    abstract fun messageTraceEventDao(): MessageTraceEventDao
 
     companion object {
         @Volatile
@@ -83,6 +84,24 @@ abstract class MessagingDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE mesh_messages ADD COLUMN routeTrace TEXT")
+                database.execSQL("ALTER TABLE mesh_messages ADD COLUMN routeTraceComplete INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("ALTER TABLE mesh_forwarding ADD COLUMN routeTrace TEXT NOT NULL DEFAULT ''")
+                database.execSQL("ALTER TABLE mesh_forwarding ADD COLUMN routeTraceComplete INTEGER NOT NULL DEFAULT 0")
+                database.execSQL("CREATE TABLE IF NOT EXISTS message_trace_events (eventId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, messageId TEXT NOT NULL, packetId TEXT, occurredAt INTEGER NOT NULL, eventType TEXT NOT NULL, transport TEXT, peerNodeId TEXT, attemptNumber INTEGER, durationMs INTEGER, resultCode TEXT, detail TEXT)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_message_trace_events_messageId_occurredAt ON message_trace_events(messageId, occurredAt)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_message_trace_events_occurredAt ON message_trace_events(occurredAt)")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE mesh_peers ADD COLUMN isSavedForChat INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): MessagingDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -95,7 +114,9 @@ abstract class MessagingDatabase : RoomDatabase() {
                         MIGRATION_2_3,
                         MIGRATION_3_4,
                         MIGRATION_4_5,
-                        MIGRATION_5_6
+                        MIGRATION_5_6,
+                        MIGRATION_6_7,
+                        MIGRATION_7_8
                     )
                     .build()
                     .also { INSTANCE = it }

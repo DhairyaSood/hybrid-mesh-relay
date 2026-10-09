@@ -17,6 +17,12 @@ interface PeerDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(peer: PeerEntity)
 
+    @Query("UPDATE mesh_peers SET isSavedForChat = 1 WHERE nodeId = :nodeId")
+    suspend fun saveForChat(nodeId: String)
+
+    @Query("UPDATE mesh_peers SET isSavedForChat = 0 WHERE nodeId = :nodeId")
+    suspend fun removeFromChats(nodeId: String)
+
     @Query("DELETE FROM mesh_peers WHERE nodeId = :nodeId")
     suspend fun delete(nodeId: String)
 }

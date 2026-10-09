@@ -34,6 +34,7 @@ object PermissionManager {
     private const val KEY_LOCATION_REQUESTED = "location_requested"
     private const val KEY_NOTIFICATION_REQUESTED = "notification_requested"
     private const val KEY_NOTIFICATION_PREVIOUSLY_GRANTED = "notification_previously_granted"
+    private const val KEY_MESH_PERMISSION_REQUEST_COMPLETED = "mesh_permission_request_completed"
 
     fun ble(context: Context): BlePermissionState {
         val appContext = context.applicationContext
@@ -69,6 +70,49 @@ object PermissionManager {
                 }
             }.toTypedArray()
         }
+    }
+
+    /** Runtime permissions needed by the combined BLE + optional Wi-Fi Direct mesh. */
+    fun missingMeshPermissions(context: Context): Array<String> {
+        val appContext = context.applicationContext
+        return (missingBlePermissions(appContext).toList() + buildList {
+            if (requiresNearbyWifiDevicesPermission(appContext)) {
+                val nearbyWifi = "android.permission.NEARBY_WIFI_DEVICES"
+                if (!granted(appContext, nearbyWifi)) add(nearbyWifi)
+            } else if (!granted(appContext, Manifest.permission.ACCESS_FINE_LOCATION)) {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }).distinct().toTypedArray()
+    }
+
+    /** Android 13 introduced NEARBY_WIFI_DEVICES for apps targeting API 33+. */
+    fun requiresNearbyWifiDevicesPermission(context: Context): Boolean =
+        Build.VERSION.SDK_INT >= 33 && context.applicationContext.applicationInfo.targetSdkVersion >= 33
+
+    fun wifiDirectPermissionGranted(context: Context): Boolean {
+        val appContext = context.applicationContext
+        return if (requiresNearbyWifiDevicesPermission(appContext)) {
+            granted(appContext, "android.permission.NEARBY_WIFI_DEVICES")
+        } else {
+            granted(appContext, Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
+    /**
+     * The long-lived mesh runtime can start when either bearer is permitted.
+     * BLE and Wi-Fi Direct are independently optional; requiring both here would
+     * prevent Wi-Fi-only operation when a user denies a Bluetooth permission.
+     */
+    fun hasAnyMeshTransportPermissionGranted(context: Context): Boolean =
+        ble(context).allGranted || wifiDirectPermissionGranted(context)
+
+    fun hasCompletedMeshPermissionRequest(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_MESH_PERMISSION_REQUEST_COMPLETED, false)
+
+    fun markMeshPermissionRequestCompleted(context: Context) {
+        prefs(context).edit()
+            .putBoolean(KEY_MESH_PERMISSION_REQUEST_COMPLETED, true)
+            .apply()
     }
 
     fun location(context: Context): LocationPermissionState {

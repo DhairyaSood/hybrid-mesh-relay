@@ -1,13 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- BLE capability -->
+    <!-- BLE capability: optional so devices without BLE can still use Wi-Fi -->
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="false" />
 
-    <!-- Network state -->
+    <!-- Wi-Fi Direct capability: optional so BLE-only devices remain supported -->
+    <uses-feature
+        android:name="android.hardware.wifi.direct"
+        android:required="false" />
+
+    <!-- Network permissions for Wi-Fi Direct and TCP socket transport -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Legacy Bluetooth permissions for Android 11 and lower -->
     <uses-permission
@@ -18,12 +26,12 @@
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
 
-    <!-- Location permission used for explicit foreground location sharing
-         and legacy BLE scanning on Android 11 and lower -->
+    <!-- Location permission for explicit location sharing and legacy BLE
+         scanning where required -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
-    <!-- Android 12+ Nearby Devices permissions -->
+    <!-- Android 12+ Nearby Devices permissions for BLE -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
@@ -33,6 +41,11 @@
 
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+    <!-- Android 13+ Wi-Fi Direct discovery -->
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
 
     <!-- Android 13+ notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

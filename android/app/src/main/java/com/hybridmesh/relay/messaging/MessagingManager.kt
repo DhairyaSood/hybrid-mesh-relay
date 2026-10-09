@@ -7,6 +7,7 @@ import com.hybridmesh.relay.messaging.ble.BleGattClient
 import com.hybridmesh.relay.messaging.ble.BleGattServer
 import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.mesh.MeshEngine
+import com.hybridmesh.relay.messaging.mesh.MeshTransportKind
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
@@ -42,6 +43,7 @@ class MessagingManager private constructor(context: Context) {
 
     private val identitySyncInFlight = ConcurrentHashMap.newKeySet<String>()
     private val lastSuccessfulAdvertisedIdentity = ConcurrentHashMap<String, String>()
+    private val lastSuccessfulIdentitySyncAt = ConcurrentHashMap<String, Long>()
     private val identitySyncAttempts = ConcurrentHashMap<String, Int>()
     private val identitySyncNextAt = ConcurrentHashMap<String, Long>()
 
@@ -49,6 +51,7 @@ class MessagingManager private constructor(context: Context) {
     val transport: StateFlow<GattTransportSnapshot> = _transport.asStateFlow()
 
     val mesh = meshEngine.snapshot
+    val meshPeers = meshEngine.peers
 
     private var started = false
     private val jobs = mutableListOf<Job>()
@@ -63,7 +66,7 @@ class MessagingManager private constructor(context: Context) {
         startupResetCompleted = resetGate
 
         gattServer.setPacketReceiver { device, payload ->
-            meshEngine.onTransportPacket(device, payload)
+            meshEngine.onBleTransportPacket(device, payload)
         }
 
         jobs += scope.launch {
@@ -88,9 +91,13 @@ class MessagingManager private constructor(context: Context) {
         jobs += scope.launch {
             networkManager.runtimeEvents.collect {
                 if (it == com.hybridmesh.relay.network.BleRuntimeEvent.TRANSPORT_UNAVAILABLE) {
-                    repository.resetInFlightMessages()
-                    repository.requeueForwardingOnTransportLoss()
                     _transport.value = GattTransportSnapshot()
+                    // A BLE runtime event is local to BLE. Do not reset durable
+                    // work if an independent Wi-Fi Direct session can still carry it.
+                    if (!meshEngine.hasAlternativeTransportAvailable(MeshTransportKind.BLE_GATT)) {
+                        repository.resetInFlightMessages()
+                        repository.requeueForwardingOnTransportLoss()
+                    }
                 }
             }
         }
@@ -186,7 +193,7 @@ class MessagingManager private constructor(context: Context) {
             val identityKey = "$address|$advertisedName"
             val previousKey = lastSuccessfulAdvertisedIdentity[nodeId]
             val retryAt = identitySyncNextAt[nodeId] ?: 0L
-            if (previousKey == identityKey || now < retryAt) return
+            if (isIdentitySyncFresh(nodeId, previousKey, identityKey, now) || now < retryAt) return
 
             val lock = identitySyncMutex(nodeId)
             lock.lock()
@@ -194,7 +201,7 @@ class MessagingManager private constructor(context: Context) {
                 val currentNow = System.currentTimeMillis()
                 val currentPreviousKey = lastSuccessfulAdvertisedIdentity[nodeId]
                 val currentRetryAt = identitySyncNextAt[nodeId] ?: 0L
-                if (currentPreviousKey == identityKey || currentNow < currentRetryAt) return
+                if (isIdentitySyncFresh(nodeId, currentPreviousKey, identityKey, currentNow) || currentNow < currentRetryAt) return
 
                 val device = runCatching { bluetoothManager?.adapter?.getRemoteDevice(address) }.getOrNull()
                     ?: run {
@@ -220,6 +227,7 @@ class MessagingManager private constructor(context: Context) {
 
                 repository.updatePeerIdentity(nodeId, identity.displayName, identity.deviceType)
                 lastSuccessfulAdvertisedIdentity[nodeId] = identityKey
+                lastSuccessfulIdentitySyncAt[nodeId] = System.currentTimeMillis()
                 identitySyncAttempts.remove(nodeId)
                 identitySyncNextAt.remove(nodeId)
             } finally {
@@ -229,6 +237,10 @@ class MessagingManager private constructor(context: Context) {
             identitySyncInFlight.remove(nodeId)
         }
     }
+
+    private fun isIdentitySyncFresh(nodeId: String, previousKey: String?, identityKey: String, now: Long): Boolean =
+        previousKey == identityKey &&
+            now - (lastSuccessfulIdentitySyncAt[nodeId] ?: 0L) < IDENTITY_REFRESH_INTERVAL_MS
 
     private fun recordIdentitySyncFailure(nodeId: String) {
         val attempt = (identitySyncAttempts[nodeId] ?: 0) + 1
@@ -248,6 +260,7 @@ class MessagingManager private constructor(context: Context) {
     )
 
     companion object {
+        private const val IDENTITY_REFRESH_INTERVAL_MS = 30_000L
         private val identitySyncLocks = ConcurrentHashMap<String, Mutex>()
 
         @Volatile private var INSTANCE: MessagingManager? = null

@@ -1,5 +1,6 @@
 package com.hybridmesh.relay.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Tab
@@ -32,8 +34,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -42,6 +50,7 @@ import com.hybridmesh.relay.ble.PeerOrderingPolicy
 import com.hybridmesh.relay.messaging.data.PeerEntity
 import com.hybridmesh.relay.messaging.model.ChatSummary
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
+import com.hybridmesh.relay.messaging.mesh.MeshPeer
 import com.hybridmesh.relay.network.NetworkState
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
@@ -58,27 +67,38 @@ fun MessagesScreen(
     onConversationClick: (String) -> Unit,
     onOpenDevices: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val viewModel: MessagesViewModel = viewModel()
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val networkState by viewModel.networkState.collectAsStateWithLifecycle()
+    val meshPeers by viewModel.meshPeers.collectAsStateWithLifecycle()
     val knownPeers by viewModel.knownPeers.collectAsStateWithLifecycle()
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var nodeIdInput by rememberSaveable { mutableStateOf("") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
+
+    fun copyNodeId(nodeId: String) {
+        clipboard.setText(AnnotatedString(nodeId))
+        Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
+    }
 
     Box(Modifier.fillMaxSize().background(RelayBackground)) {
         Column(Modifier.fillMaxSize()) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.Start
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text("MESSAGES", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("Chats are created only by actual messages.", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
-                }
-                if (selectedTab == 0) {
-                    TextButton(onClick = { nodeIdInput = ""; error = null; showAddDialog = true }) { Text("ADD NODE") }
+                    Text(
+                        "Add a Node ID or start a conversation with a nearby node.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = RelayTextMuted,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
 
@@ -95,8 +115,23 @@ fun MessagesScreen(
                 )
             }
 
-            if (selectedTab == 0) ChatList(chats, onConversationClick)
-            else NearbyList(networkState, knownPeers, onConversationClick, onOpenDevices)
+            if (selectedTab == 0) ChatList(chats, onConversationClick, ::copyNodeId)
+            else NearbyList(networkState, meshPeers, knownPeers, onConversationClick, onOpenDevices, ::copyNodeId)
+        }
+        if (selectedTab == 0) {
+            FloatingActionButton(
+                onClick = { nodeIdInput = ""; error = null; showAddDialog = true },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                containerColor = RelayAccent,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            ) {
+                Text(
+                    "+",
+                    modifier = Modifier.semantics { contentDescription = "Add a node" },
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.onPrimary
+                )
+            }
         }
     }
 
@@ -106,7 +141,7 @@ fun MessagesScreen(
             title = { Text("ADD NODE") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Save a Node ID without creating a chat. A chat appears only after a real message is exchanged.")
+                    Text("Add a Node ID to create its chat now. You can send messages while the node is away; they stay queued until it comes in range.")
                     TextField(
                         value = nodeIdInput,
                         onValueChange = { nodeIdInput = it.uppercase() },
@@ -132,7 +167,7 @@ fun MessagesScreen(
 }
 
 @Composable
-private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> Unit) {
+private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> Unit, onCopyNodeId: (String) -> Unit) {
     if (chats.isEmpty()) {
         Box(
             Modifier
@@ -157,7 +192,7 @@ private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> 
                 )
 
                 Text(
-                    "Your conversations will appear here after you exchange a message with another node.",
+                    "Add a Node ID or open a nearby device to start a conversation.",
                     color = RelayTextMuted,
                     textAlign = TextAlign.Center
                 )
@@ -168,51 +203,70 @@ private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> 
 
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 28.dp),
+        contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 104.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        items(chats, key = { it.peerNodeId }) { chat -> ChatRow(chat, onConversationClick) }
+        items(chats, key = { it.peerNodeId }) { chat -> ChatRow(chat, onConversationClick, onCopyNodeId) }
     }
 }
 
 @Composable
 private fun NearbyList(
     networkState: NetworkState,
+    meshPeers: List<MeshPeer>,
     knownPeers: List<PeerEntity>,
     onConversationClick: (String) -> Unit,
-    onOpenDevices: () -> Unit
+    onOpenDevices: () -> Unit,
+    onCopyNodeId: (String) -> Unit
 ) {
     val names = knownPeers.associateBy { it.nodeId.uppercase() }
+    val blePeers = PeerOrderingPolicy.stableLive(networkState.peers).associateBy { it.nodeId.uppercase() }
+    val nearby = meshPeers.map { meshPeer ->
+        val blePeer = blePeers[meshPeer.nodeId.uppercase()]
+        val savedName = names[meshPeer.nodeId.uppercase()]?.displayName
+        val displayName = savedName?.takeIf {
+            it.isNotBlank() && !it.equals(meshPeer.nodeId, true)
+        } ?: meshPeer.deviceName.takeIf {
+            it.isNotBlank() && !it.equals(meshPeer.nodeId, true)
+        } ?: "Nearby node"
+        val transports = buildList {
+            if (blePeer != null || !meshPeer.bleAddress.isNullOrBlank()) add("BLE")
+            if (!meshPeer.wifiHost.isNullOrBlank() && (meshPeer.wifiPort ?: 0) > 0) add("WI-FI DIRECT")
+        }.joinToString(" · ")
+        NearbyPeerItem(
+            nodeId = meshPeer.nodeId,
+            name = displayName,
+            rssi = blePeer?.rssi ?: meshPeer.rssi,
+            transportLabel = transports.ifBlank { "NEARBY" }
+        )
+    }.sortedBy { it.name.lowercase() }
 
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 28.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        if (networkState.scanningState != BleOperationState.ACTIVE) {
+        if (networkState.scanningState != BleOperationState.ACTIVE && nearby.isEmpty()) {
             item {
                 StatusCard(
-                    title = "DISCOVERY NOT ACTIVE",
-                    body = "The mesh service owns discovery. Devices contains the recovery and permission controls.",
+                    title = "BLUETOOTH DISCOVERY UNAVAILABLE",
+                    body = "Wi-Fi Direct can still discover nearby nodes. Devices contains Bluetooth recovery and permission controls.",
                     action = "OPEN DEVICES",
                     onAction = onOpenDevices
                 )
             }
         }
 
-        if (networkState.peers.isEmpty()) {
+        if (nearby.isEmpty()) {
             item { EmptyState("NO PEERS IN RANGE", "Only currently discovered Neyra nodes appear here.") }
         } else {
-            items(PeerOrderingPolicy.stableLive(networkState.peers), key = { it.nodeId }) { peer ->
-                val name = names[peer.nodeId.uppercase()]?.displayName
-                    ?.takeIf { it.isNotBlank() && !it.equals(peer.deviceName, true) }
-                    ?: peer.deviceName
-
+            items(nearby, key = { it.nodeId }) { peer ->
                 PeerRow(
-                    name = name,
+                    name = peer.name,
                     nodeId = peer.nodeId,
                     rssi = peer.rssi,
-                    type = peer.deviceType.name
+                    transportLabel = peer.transportLabel,
+                    onCopyNodeId = onCopyNodeId
                 ) {
                     onConversationClick(peer.nodeId)
                 }
@@ -221,8 +275,10 @@ private fun NearbyList(
     }
 }
 
+private data class NearbyPeerItem(val nodeId: String, val name: String, val rssi: Int, val transportLabel: String)
+
 @Composable
-private fun PeerRow(name: String, nodeId: String, rssi: Int, type: String, onClick: () -> Unit) {
+private fun PeerRow(name: String, nodeId: String, rssi: Int, transportLabel: String, onCopyNodeId: (String) -> Unit, onClick: () -> Unit) {
     Column(
         Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface)
             .border(1.dp, RelayBorder, MaterialTheme.shapes.large).clickable(onClick = onClick).padding(16.dp)
@@ -231,18 +287,18 @@ private fun PeerRow(name: String, nodeId: String, rssi: Int, type: String, onCli
             Box(Modifier.size(9.dp).background(RelayAccent, CircleShape))
             Spacer(Modifier.size(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-                Text(nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1)
+                Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { onCopyNodeId(nodeId) })
             }
             Text("$rssi dBm", style = TechnicalTextStyle, color = RelayTextMuted)
         }
 
-        Text("$type • IN RANGE • BLE DISCOVERED", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.padding(top = 8.dp))
+        Text("IN RANGE • $transportLabel", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.padding(top = 8.dp))
     }
 }
 
 @Composable
-private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
+private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit, onCopyNodeId: (String) -> Unit) {
     val status = when (chat.lastStatus) {
         DeliveryStatus.DELIVERED -> "DELIVERED"
         DeliveryStatus.QUEUED -> "QUEUED"
@@ -259,7 +315,10 @@ private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
     ) {
         Column(Modifier.weight(1f)) {
             Text(chat.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-            Text(chat.peerNodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1)
+            Text(chat.peerNodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { onCopyNodeId(chat.peerNodeId) })
+            val preview = chat.lastMessage?.replace('\n', ' ')?.takeIf { it.isNotBlank() }
+                ?: "New contact · messages wait until this node is nearby"
+            Text(preview, style = MaterialTheme.typography.bodySmall, color = RelayTextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (status.isNotBlank()) Text(status, style = TechnicalTextStyle, color = RelayTextMuted)
     }

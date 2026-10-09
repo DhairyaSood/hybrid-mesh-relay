@@ -5,6 +5,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.messaging.data.MessagingRepository
+import com.hybridmesh.relay.messaging.MessagingManager
+import com.hybridmesh.relay.messaging.mesh.MeshPeer
+import com.hybridmesh.relay.messaging.mesh.MeshRuntimeSnapshot
 import com.hybridmesh.relay.messaging.data.PeerEntity
 import com.hybridmesh.relay.network.NetworkManager
 import com.hybridmesh.relay.network.NetworkState
@@ -16,9 +19,12 @@ class DevicesViewModel(application: Application) : AndroidViewModel(application)
     private val networkManager = NetworkManager.getInstance(application)
     private val identityStore = IdentityStore.getInstance(application)
     private val repository = MessagingRepository.getInstance(application)
+    private val messagingManager = MessagingManager.getInstance(application)
 
     val identity = identityStore.identity
     val state: StateFlow<NetworkState> = networkManager.state
+    val meshPeers: StateFlow<List<MeshPeer>> = messagingManager.meshPeers
+    val meshRuntime: StateFlow<MeshRuntimeSnapshot> = messagingManager.mesh
     val knownPeers: StateFlow<List<PeerEntity>> = repository.knownPeers.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000L),

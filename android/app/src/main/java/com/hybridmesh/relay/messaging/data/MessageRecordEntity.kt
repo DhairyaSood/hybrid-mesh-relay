@@ -18,5 +18,8 @@ data class MessageRecordEntity(
     @ColumnInfo(defaultValue = "0") val attemptCount: Int = 0,
     val nextAttemptAt: Long? = null,
     val lastError: String? = null,
-    val deliveryHopCount: Int? = null
+    val deliveryHopCount: Int? = null,
+    /** Compact comma-separated transport codes reported by the destination; null means unavailable. */
+    val routeTrace: String? = null,
+    @ColumnInfo(defaultValue = "0") val routeTraceComplete: Boolean = false
 )

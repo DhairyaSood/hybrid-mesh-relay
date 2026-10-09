@@ -5,6 +5,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -40,6 +42,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -69,10 +73,13 @@ import java.util.Locale
 @Composable
 fun ConversationScreen(peerNodeId: String) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val viewModel: MessagesViewModel = viewModel()
     val identity by viewModel.identity.collectAsStateWithLifecycle()
     val peers by viewModel.knownPeers.collectAsStateWithLifecycle()
     val networkState by viewModel.networkState.collectAsStateWithLifecycle()
+    val meshPeers by viewModel.meshPeers.collectAsStateWithLifecycle()
+    val meshRuntime by viewModel.meshRuntime.collectAsStateWithLifecycle()
     val messages by viewModel.observeConversation(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
     val locationManager = remember { LocationManager(context) }
     val notificationCoordinator = remember { MessagingNotificationCoordinator.getInstance(context) }
@@ -81,11 +88,14 @@ fun ConversationScreen(peerNodeId: String) {
     var draft by rememberSaveable { mutableStateOf("") }
     var selectedType by rememberSaveable { mutableStateOf(MessageType.NORMAL.name) }
     var deleteMessageId by remember { mutableStateOf<String?>(null) }
+    var diagnosticsMessageId by remember { mutableStateOf<String?>(null) }
     var showDeleteChat by remember { mutableStateOf(false) }
     var locationError by remember { mutableStateOf<String?>(null) }
 
     val peer = peers.firstOrNull { it.nodeId.equals(peerNodeId, true) }
-    val displayName = peer?.displayName?.takeIf { it.isNotBlank() && !it.equals(peerNodeId, true) } ?: peerNodeId
+    val displayName = peer?.displayName?.takeIf { it.isNotBlank() && !it.equals(peerNodeId, true) } ?: "Unknown node"
+    val nearbyPeer = meshPeers.firstOrNull { it.nodeId.equals(peerNodeId, true) }
+    val inRange = nearbyPeer?.hasAnyEndpoint() == true
 
     DisposableEffect(peerNodeId) {
         notificationCoordinator.clearConversation(peerNodeId)
@@ -143,8 +153,12 @@ fun ConversationScreen(peerNodeId: String) {
                         )
                         Spacer(Modifier.size(8.dp))
                         Text(
-                            if (networkState.peers.any { it.nodeId.equals(peerNodeId, true) }) {
-                                "IN RANGE"
+                            if (inRange) {
+                                val transports = buildList {
+                                    if (!nearbyPeer?.bleAddress.isNullOrBlank()) add("BLE")
+                                    if (!nearbyPeer?.wifiHost.isNullOrBlank()) add("WI-FI DIRECT")
+                                }
+                                "IN RANGE · ${transports.joinToString(" · ")}"
                             } else {
                                 "NOT IN RANGE"
                             },
@@ -165,16 +179,23 @@ fun ConversationScreen(peerNodeId: String) {
                 Text(
                     peerNodeId,
                     style = MaterialTheme.typography.labelSmall,
-                    color = RelayAccent
+                    color = RelayAccent,
+                    modifier = Modifier.clickable {
+                        clipboard.setText(AnnotatedString(peerNodeId))
+                        android.widget.Toast.makeText(context, "Node ID copied", android.widget.Toast.LENGTH_SHORT).show()
+                    }
                 )
 
-                if (networkState.bleRuntimeState != BleRuntimeState.READY) {
+                if (meshRuntime.availableTransports.isEmpty()) {
                     Text(
-                        when (networkState.bleRuntimeState) {
-                            BleRuntimeState.PERMISSION_REQUIRED -> "Queued locally until Bluetooth access is available."
-                            BleRuntimeState.BLUETOOTH_OFF -> "Queued locally until Bluetooth is turned on."
-                            else -> "Queued locally until the BLE transport is ready."
-                        },
+                        "Messages stay on this phone until Wi-Fi Direct or Bluetooth is available.",
+                        color = RelayTextMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                } else if (!inRange) {
+                    Text(
+                        "Messages are saved and will send when this node is nearby.",
                         color = RelayTextMuted,
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(top = 6.dp)
@@ -199,7 +220,7 @@ fun ConversationScreen(peerNodeId: String) {
                         }
                         item(key = message.messageId) {
                             val incoming = !message.senderNodeId.equals(identity.nodeId, true)
-                            MessageBubble(message, incoming, onLongPress = { deleteMessageId = message.messageId })
+                            MessageBubble(message, incoming, onClick = { deleteMessageId = message.messageId }, onLongPress = { diagnosticsMessageId = message.messageId })
                         }
                     }
                 }
@@ -266,6 +287,19 @@ fun ConversationScreen(peerNodeId: String) {
         }
     }
 
+    diagnosticsMessageId?.let { messageId ->
+        val selectedMessage = messages.firstOrNull { it.messageId == messageId }
+        val traceEvents by viewModel.observeTraceEvents(messageId).collectAsStateWithLifecycle(initialValue = emptyList())
+        if (selectedMessage != null) {
+            MessageDiagnosticsDialog(
+                message = selectedMessage,
+                events = traceEvents,
+                localNodeId = identity.nodeId,
+                onDismiss = { diagnosticsMessageId = null }
+            )
+        }
+    }
+
     deleteMessageId?.let { messageId ->
         AlertDialog(
             onDismissRequest = { deleteMessageId = null },
@@ -328,14 +362,15 @@ private fun EmptyConversationState(displayName: String) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(message: MessageRecordEntity, incoming: Boolean, onLongPress: () -> Unit) {
+private fun MessageBubble(message: MessageRecordEntity, incoming: Boolean, onClick: () -> Unit, onLongPress: () -> Unit) {
     val shape = RoundedCornerShape(16.dp)
     val payload = if (message.messageType == MessageType.LOCATION.name) LocationPayload.decode(message.content) else null
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (incoming) Arrangement.Start else Arrangement.End) {
         Column(
             Modifier.widthIn(max = 310.dp).background(if (incoming) RelaySurface else RelayAccent.copy(alpha = 0.16f), shape).border(1.dp, RelayBorder, shape).padding(12.dp)
-                .clickable(onClick = onLongPress)
+                .combinedClickable(onClick = onClick, onLongClick = onLongPress)
         ) {
             if (payload != null) {
                 Text("LOCATION", style = MaterialTheme.typography.labelSmall, color = RelayAccent, fontWeight = FontWeight.Bold)

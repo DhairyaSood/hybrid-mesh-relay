@@ -12,10 +12,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.hybridmesh.relay.network.InitializationState
+import com.hybridmesh.relay.ble.BleOperationState
+import com.hybridmesh.relay.messaging.MessagingManager
+import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
+import com.hybridmesh.relay.permissions.PermissionManager
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
@@ -24,32 +28,37 @@ import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 @Composable
 fun AppStatusStrip() {
     val context = LocalContext.current
-    val state by NetworkManager
-        .getInstance(context)
-        .state
-        .collectAsStateWithLifecycle()
+    val state by NetworkManager.getInstance(context).state.collectAsStateWithLifecycle()
+    val manager = MessagingManager.getInstance(context)
+    val mesh by manager.mesh.collectAsStateWithLifecycle()
+    val peers by manager.meshPeers.collectAsStateWithLifecycle()
+    val wifiEnabled = rememberWifiEnabled()
+    val wifiSupported = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI_DIRECT)
+    val wifiPermissionGranted = PermissionManager.wifiDirectPermissionGranted(context)
 
-    val label = when (state.initializationState) {
-        InitializationState.BOOTSTRAPPING -> "STARTING"
-        InitializationState.CHECKING_PERMISSIONS -> "CHECKING PERMISSIONS"
-        InitializationState.STARTING_BLE -> "BLE STARTING"
-        InitializationState.STARTING_GATT -> "GATT STARTING"
-        InitializationState.STARTING_DISCOVERY -> "DISCOVERY STARTING"
-        InitializationState.READY -> "BLE READY"
-        InitializationState.RECOVERING -> "RECOVERING"
-        InitializationState.DEGRADED -> "BLE DEGRADED"
-        InitializationState.BLUETOOTH_OFF -> "BLUETOOTH OFF"
-        InitializationState.PERMISSION_REQUIRED -> "BLE PERMISSION"
+    val bleReady = state.bleSupported && state.permissionsGranted &&
+        state.bluetoothState == BluetoothState.ON && state.scanningState == BleOperationState.ACTIVE
+    val wifiReady = wifiSupported && wifiEnabled && wifiPermissionGranted &&
+        (mesh.wifiDirectDiscoveryActive || mesh.connectedWifiPeers > 0)
+    val activeBearers = buildList {
+        if (bleReady) add("BLE")
+        if (wifiReady) add("Wi-Fi Direct")
+    }
+    val label = when {
+        activeBearers.size == 2 -> "MESH ACTIVE · BLE + WI-FI DIRECT"
+        bleReady -> "MESH ACTIVE · BLE"
+        wifiReady -> "MESH ACTIVE · WI-FI DIRECT"
+        mesh.running -> "MESH RUNNING · CONNECTING"
+        else -> "MESH STARTING"
     }
 
-    val internetLabel = if (state.internetAvailable) "Internet" else "Offline"
     Row(
         modifier = Modifier.fillMaxWidth().height(34.dp).background(RelaySurface).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text("●", color = RelayAccent, style = TechnicalTextStyle)
-        Text(label, color = RelayAccent, style = TechnicalTextStyle)
-        Text("$internetLabel • ${state.nearbyDeviceCount} nearby", color = RelayTextMuted, style = TechnicalTextStyle)
+        Text("●", color = if (activeBearers.isNotEmpty()) RelayAccent else RelayTextMuted, style = TechnicalTextStyle)
+        Text(label, color = RelayAccent, style = TechnicalTextStyle, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text("${peers.size} nearby", color = RelayTextMuted, style = TechnicalTextStyle, maxLines = 1)
     }
 }

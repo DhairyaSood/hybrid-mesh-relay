@@ -1,6 +1,8 @@
 package com.hybridmesh.relay.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,6 +18,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -73,6 +78,8 @@ fun MessageDetailScreen(
 private fun ActualMessageDetail(
     message: MessageRecordEntity
 ) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val isEmergency =
         message.messageType == "EMERGENCY"
 
@@ -92,16 +99,21 @@ private fun ActualMessageDetail(
                 color = RelayTextMuted
             )
 
-            Text(
-                text = "To ${message.recipientNodeId}",
-                style = MaterialTheme.typography.titleLarge
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("To", style = MaterialTheme.typography.titleLarge)
+                Text(message.recipientNodeId, style = MaterialTheme.typography.titleLarge, modifier = Modifier.clickable {
+                    clipboard.setText(AnnotatedString(message.recipientNodeId))
+                    Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
+                })
+            }
 
-            Text(
-                text = "From ${message.senderNodeId}",
-                color = RelayTextMuted,
-                style = TechnicalTextStyle
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("From", color = RelayTextMuted, style = TechnicalTextStyle)
+                Text(message.senderNodeId, color = RelayTextMuted, style = TechnicalTextStyle, modifier = Modifier.clickable {
+                    clipboard.setText(AnnotatedString(message.senderNodeId))
+                    Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
+                })
+            }
         }
 
         MessageBubble(

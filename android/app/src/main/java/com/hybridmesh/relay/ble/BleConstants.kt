@@ -8,7 +8,10 @@ object BleConstants {
 
     const val DISCOVERY_VERSION: Byte = 4
     const val LEGACY_DISCOVERY_VERSION: Byte = 2
-    const val MESH_PROTOCOL_VERSION: Byte = 1
+    const val MESH_PROTOCOL_VERSION: Byte = 2
+    // Discovery v3 advertised mesh capabilities but had no protocol-version
+    // field. Devices using that format predate mesh packet v2.
+    const val LEGACY_MESH_PROTOCOL_VERSION: Byte = 1
     const val CAPABILITY_CAN_RELAY: Byte = 0x01
     const val CAPABILITY_CAN_STORE_FORWARD: Byte = 0x02
     const val MANUFACTURER_ID = 0xFFFF
