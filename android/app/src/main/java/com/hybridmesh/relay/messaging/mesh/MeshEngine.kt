@@ -12,7 +12,12 @@ import com.hybridmesh.relay.messaging.ble.BleGattClient
 import com.hybridmesh.relay.messaging.data.MeshForwardingRecordEntity
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MeshSeenPacketEntity
+import com.hybridmesh.relay.messaging.data.AttachmentRecordEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
+import com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor
+import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.model.MessageType
@@ -67,7 +72,10 @@ class MeshEngine(context: Context) {
         context = appContext,
         onPeerConnected = ::onWifiPeerConnected,
         onPacket = ::onWifiTransportPacket,
-        onPeerDisconnected = ::removeWifiPeer
+        onPeerDisconnected = ::removeWifiPeer,
+        onAttachmentBegin = ::onAttachmentBegin,
+        onAttachmentChunk = ::onAttachmentChunk,
+        onAttachmentFinish = ::onAttachmentFinish
     )
     private val wifiTransport = WifiDirectMeshTransport(wifiDirectManager)
     private val meshTransports = listOf<MeshTransport>(bleTransport, wifiTransport)
@@ -147,6 +155,7 @@ class MeshEngine(context: Context) {
 
         jobs += scope.launch { originLoop() }
         jobs += scope.launch { forwardingLoop() }
+        jobs += scope.launch { attachmentLoop() }
         jobs += scope.launch { maintenanceLoop() }
         jobs += scope.launch { snapshotLoop() }
     }
@@ -603,6 +612,9 @@ class MeshEngine(context: Context) {
         sourceTransport: MeshTransportKind,
         immediatePeerNodeId: String?
     ): Boolean {
+        val attachmentDescriptor = if (packet.messageType == MessageType.ATTACHMENT.name) {
+            AttachmentDescriptor.decode(packet.content)?.takeIf { it.messageId == packet.messageId } ?: return false
+        } else null
         val record = MessageRecordEntity(
             messageId = packet.messageId,
             senderNodeId = packet.originNodeId,
@@ -623,7 +635,24 @@ class MeshEngine(context: Context) {
 
         val acceptance = repository.acceptDestinationPacket(
             seen = packet.toSeenPacket(now),
-            record = record
+            record = record,
+            attachment = attachmentDescriptor?.let {
+                AttachmentRecordEntity(
+                    messageId = it.messageId,
+                    senderNodeId = packet.originNodeId,
+                    recipientNodeId = packet.destinationNodeId,
+                    mimeType = it.mimeType,
+                    displayName = it.displayName,
+                    sizeBytes = it.sizeBytes,
+                    sha256 = it.sha256,
+                    localPath = null,
+                    status = AttachmentTransferStatus.WAITING_WIFI,
+                    receivedFromNodeId = immediatePeerNodeId,
+                    hopCount = packet.hopCount,
+                    createdAt = packet.createdAt,
+                    updatedAt = now
+                )
+            }
         )
 
         if (!acceptance.messagePersisted) {
@@ -645,6 +674,8 @@ class MeshEngine(context: Context) {
             val peer = repository.getPeer(packet.originNodeId)
             val body = if (packet.messageType == MessageType.LOCATION.name) {
                 "Shared a location"
+            } else if (packet.messageType == MessageType.ATTACHMENT.name) {
+                "Sent an image or video"
             } else {
                 packet.content
             }
@@ -883,6 +914,156 @@ class MeshEngine(context: Context) {
         }
     }
 
+    /** Bulk files use Wi-Fi Direct only; BLE may carry the small attachment notice but never file bytes. */
+    private suspend fun attachmentLoop() {
+        while (currentCoroutineContext().isActive && started) {
+            val outgoing = repository.getPendingOutgoingAttachments(limit = 4)
+            for (attachment in outgoing) {
+                if (!started) break
+                val now = System.currentTimeMillis()
+                if (isExpired(attachment.createdAt, now)) {
+                    repository.expireAttachment(attachment)
+                    continue
+                }
+                if (attachment.hopCount >= AttachmentTransferManifest.MAX_HOPS) {
+                    repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.FAILED, attachment.transferredBytes, "ATTACHMENT_HOP_LIMIT")
+                    continue
+                }
+
+                val isOrigin = attachment.senderNodeId.equals(identityStore.getIdentity().nodeId, true)
+                val isWaiting = attachment.status == AttachmentTransferStatus.WAITING_WIFI || attachment.status == AttachmentTransferStatus.RELAY_QUEUED
+                if (isWaiting && now - attachment.updatedAt < ATTACHMENT_RETRY_MS) {
+                    continue
+                }
+
+                val connectedWifiPeers = peerDirectory.snapshot.value
+                    .asSequence()
+                    .filter { attachment.receivedFromNodeId.isNullOrBlank() || !it.nodeId.equals(attachment.receivedFromNodeId, true) }
+                    .filter { wifiDirectManager.hasPeer(it.nodeId) }
+                    .filter { !it.nodeId.equals(attachment.senderNodeId, true) }
+                    .toList()
+                val nextHop = connectedWifiPeers.firstOrNull { it.nodeId.equals(attachment.recipientNodeId, true) }
+                    ?: connectedWifiPeers.firstOrNull {
+                        it.canRelay && it.canStoreForward &&
+                            attachment.hopCount + 1 < AttachmentTransferManifest.MAX_HOPS
+                    }
+                if (nextHop == null) {
+                    repository.updateAttachmentProgress(
+                        attachment.messageId,
+                        if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
+                        attachment.transferredBytes
+                    )
+                    continue
+                }
+
+                val file = attachment.localPath?.let { java.io.File(it) }
+                if (file == null || !file.isFile || file.length() != attachment.sizeBytes ||
+                    runCatching { AttachmentFileStore.sha256(file) }.getOrNull() != attachment.sha256) {
+                    repository.updateAttachmentProgress(
+                        attachment.messageId,
+                        AttachmentTransferStatus.FAILED,
+                        attachment.transferredBytes,
+                        "LOCAL_ATTACHMENT_MISSING_OR_CHANGED"
+                    )
+                    continue
+                }
+                val manifest = AttachmentTransferManifest(
+                    messageId = attachment.messageId,
+                    senderNodeId = attachment.senderNodeId,
+                    recipientNodeId = attachment.recipientNodeId,
+                    mimeType = attachment.mimeType,
+                    displayName = attachment.displayName,
+                    sizeBytes = attachment.sizeBytes,
+                    sha256 = attachment.sha256,
+                    createdAt = attachment.createdAt,
+                    hopCount = attachment.hopCount + 1
+                )
+                repository.updateAttachmentProgress(
+                    attachment.messageId,
+                    AttachmentTransferStatus.SENDING,
+                    attachment.transferredBytes
+                )
+                val forwarded = wifiDirectManager.sendAttachmentToPeer(
+                    nextHop.nodeId,
+                    manifest,
+                    file,
+                    onProgress = { sent ->
+                        repository.updateAttachmentProgress(
+                            attachment.messageId,
+                            AttachmentTransferStatus.SENDING,
+                            sent
+                        )
+                    }
+                )
+                if (forwarded) {
+                    repository.markAttachmentForwarded(attachment, nextHop.nodeId.equals(attachment.recipientNodeId, true))
+                } else {
+                    repository.updateAttachmentProgress(
+                        attachment.messageId,
+                        if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
+                        attachment.transferredBytes,
+                        "WIFI_DIRECT_TRANSFER_INTERRUPTED"
+                    )
+                }
+            }
+            delay(if (outgoing.isEmpty()) 3_000L else 1_000L)
+        }
+    }
+
+    private suspend fun onAttachmentBegin(
+        sourceNodeId: String,
+        manifest: AttachmentTransferManifest
+    ): Long? {
+        val isFinalRecipient = manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)
+        if (!manifest.isValid() ||
+            (!isFinalRecipient && manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS) ||
+            manifest.createdAt > System.currentTimeMillis() + MAX_CLOCK_SKEW_MS ||
+            isExpired(manifest.createdAt, System.currentTimeMillis())) return null
+        val resumeOffset = AttachmentFileStore.prepareReceive(appContext, manifest) ?: return null
+        val finalPath = AttachmentFileStore.receivedFile(appContext, manifest.messageId).absolutePath
+        if (!repository.prepareIncomingAttachment(manifest, finalPath, resumeOffset, sourceNodeId, localCanRelay = true)) return null
+        return resumeOffset
+    }
+
+    private suspend fun onAttachmentChunk(
+        sourceNodeId: String,
+        manifest: AttachmentTransferManifest,
+        offset: Long,
+        bytes: ByteArray
+    ): Long? {
+        val nextOffset = AttachmentFileStore.appendChunk(
+            appContext,
+            manifest.messageId,
+            offset,
+            bytes,
+            manifest.sizeBytes
+        ) ?: return null
+        repository.updateAttachmentProgress(
+            manifest.messageId,
+            AttachmentTransferStatus.RECEIVING,
+            nextOffset
+        )
+        return nextOffset
+    }
+
+    private suspend fun onAttachmentFinish(
+        sourceNodeId: String,
+        manifest: AttachmentTransferManifest
+    ): Boolean {
+        val completedFile = AttachmentFileStore.finishReceive(appContext, manifest) ?: return false
+        val completed = repository.completeIncomingAttachment(manifest, completedFile.absolutePath, sourceNodeId, localCanRelay = true)
+        if (completed) {
+            repository.recordTraceEvent(
+                messageId = manifest.messageId,
+                eventType = if (manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)) "ATTACHMENT_DELIVERED" else "ATTACHMENT_STORED_FOR_RELAY",
+                transport = MeshTransportKind.WIFI_DIRECT.persistedName,
+                peerNodeId = sourceNodeId,
+                resultCode = "VERIFIED"
+            )
+        }
+        return completed
+    }
+
     private suspend fun maintenanceLoop() {
         while (currentCoroutineContext().isActive && started) {
             repository.purgeMeshState()
@@ -1028,6 +1209,7 @@ class MeshEngine(context: Context) {
         private const val MAX_FORWARD_BATCH = 16
         private const val MAX_CONCURRENT_FORWARD_PACKETS = 4
         private const val MAX_TRACKED_RECEIVE_TIMESTAMPS = 1_024
+        private const val ATTACHMENT_RETRY_MS = 15_000L
         private const val MAX_CLOCK_SKEW_MS = 2 * 60 * 1000L
         private const val DELIVERY_ACK_TYPE = "DELIVERY_ACK"
 
@@ -1035,7 +1217,8 @@ class MeshEngine(context: Context) {
             MessageType.NORMAL.name,
             MessageType.PRIORITY.name,
             MessageType.EMERGENCY.name,
-            MessageType.LOCATION.name
+            MessageType.LOCATION.name,
+            MessageType.ATTACHMENT.name
         )
 
         @Volatile

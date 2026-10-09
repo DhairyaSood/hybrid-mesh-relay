@@ -74,6 +74,7 @@ class MessagingManager private constructor(context: Context) {
             try {
                 repository.resetInFlightMessages()
                 repository.resetStaleForwarding()
+                repository.resetInterruptedAttachmentTransfers()
                 success = true
             } finally {
                 resetGate.complete(success)

@@ -228,7 +228,7 @@ object MeshPacketCodec {
             )
             when (decodedPacket.packetType) {
                 MeshPacket.PacketType.DATA -> {
-                    if (decodedPacket.messageType !in setOf("NORMAL", "PRIORITY", "EMERGENCY", "LOCATION")) return null
+                    if (decodedPacket.messageType !in setOf("NORMAL", "PRIORITY", "EMERGENCY", "LOCATION", "ATTACHMENT")) return null
                     if (decodedPacket.content.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) return null
                     if (decodedPacket.deliveryHopCount != null) return null
                 }

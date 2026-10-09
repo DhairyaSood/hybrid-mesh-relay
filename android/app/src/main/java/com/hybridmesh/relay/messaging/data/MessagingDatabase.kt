@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [PeerEntity::class, MessageRecordEntity::class, MeshForwardingRecordEntity::class, MeshSeenPacketEntity::class, MessageTraceEventEntity::class],
-    version = 8,
+    entities = [PeerEntity::class, MessageRecordEntity::class, MeshForwardingRecordEntity::class, MeshSeenPacketEntity::class, MessageTraceEventEntity::class, AttachmentRecordEntity::class],
+    version = 9,
     exportSchema = false
 )
 abstract class MessagingDatabase : RoomDatabase() {
@@ -18,6 +18,7 @@ abstract class MessagingDatabase : RoomDatabase() {
     abstract fun meshForwardingDao(): MeshForwardingDao
     abstract fun meshSeenPacketDao(): MeshSeenPacketDao
     abstract fun messageTraceEventDao(): MessageTraceEventDao
+    abstract fun attachmentDao(): AttachmentDao
 
     companion object {
         @Volatile
@@ -102,6 +103,30 @@ abstract class MessagingDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS mesh_attachments (" +
+                        "messageId TEXT NOT NULL, " +
+                        "senderNodeId TEXT NOT NULL, " +
+                        "recipientNodeId TEXT NOT NULL, " +
+                        "mimeType TEXT NOT NULL, " +
+                        "displayName TEXT NOT NULL, " +
+                        "sizeBytes INTEGER NOT NULL, " +
+                        "sha256 TEXT NOT NULL, " +
+                        "localPath TEXT, " +
+                        "status TEXT NOT NULL, " +
+                        "receivedFromNodeId TEXT, " +
+                        "hopCount INTEGER NOT NULL DEFAULT 0, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "transferredBytes INTEGER NOT NULL DEFAULT 0, " +
+                        "updatedAt INTEGER NOT NULL, " +
+                        "lastError TEXT, " +
+                        "PRIMARY KEY(messageId))"
+                )
+            }
+        }
+
         fun getInstance(context: Context): MessagingDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -116,7 +141,8 @@ abstract class MessagingDatabase : RoomDatabase() {
                         MIGRATION_4_5,
                         MIGRATION_5_6,
                         MIGRATION_6_7,
-                        MIGRATION_7_8
+                        MIGRATION_7_8,
+                        MIGRATION_8_9
                     )
                     .build()
                     .also { INSTANCE = it }

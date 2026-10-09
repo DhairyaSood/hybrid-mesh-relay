@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
+import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelaySurface
@@ -152,7 +153,11 @@ private fun MessageBubble(
                     .padding(14.dp)
             ) {
                 Text(
-                    text = message.content,
+                    text = if (message.messageType == MessageType.ATTACHMENT.name) {
+                        com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor.decode(message.content)
+                            ?.let { "${if (it.mimeType.startsWith("video/")) "Video" else "Image"}: ${it.displayName}" }
+                            ?: "Attachment"
+                    } else message.content,
                     color = RelayBackground,
                     style = MaterialTheme.typography.bodyLarge
                 )

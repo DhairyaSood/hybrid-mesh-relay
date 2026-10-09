@@ -19,6 +19,7 @@ import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.data.NodeIdGenerator
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.mesh.MeshPacketCodec
 import com.hybridmesh.relay.permissions.PermissionManager
 import java.io.BufferedInputStream
@@ -26,10 +27,12 @@ import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
+import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -44,8 +47,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withPermit
 
 /** Runtime-only identity and endpoint learned from a completed Neyra socket handshake. */
@@ -68,13 +71,17 @@ class WifiDirectManager(
     context: Context,
     private val onPeerConnected: (WifiPeerSessionInfo) -> Unit,
     private val onPacket: suspend (sourceNodeId: String, payload: ByteArray) -> Boolean,
-    private val onPeerDisconnected: (nodeId: String) -> Unit
+    private val onPeerDisconnected: (nodeId: String) -> Unit,
+    private val onAttachmentBegin: suspend (sourceNodeId: String, manifest: AttachmentTransferManifest) -> Long?,
+    private val onAttachmentChunk: suspend (sourceNodeId: String, manifest: AttachmentTransferManifest, offset: Long, bytes: ByteArray) -> Long?,
+    private val onAttachmentFinish: suspend (sourceNodeId: String, manifest: AttachmentTransferManifest) -> Boolean
 ) {
     private val appContext = context.applicationContext
     private val identityStore = IdentityStore.getInstance(appContext)
     private val manager = appContext.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessions = ConcurrentHashMap<String, PeerSession>()
+    private val activeMediaSockets = ConcurrentHashMap.newKeySet<Socket>()
     private val handshakeSlots = Semaphore(MAX_CONCURRENT_HANDSHAKES)
     private val connectAttempts = ConcurrentHashMap.newKeySet<String>()
     private val advertisedServiceDevices = ConcurrentHashMap<String, WifiP2pDevice>()
@@ -82,6 +89,9 @@ class WifiDirectManager(
     private val transferIds = AtomicLong(System.nanoTime())
     private val serviceSetupInProgress = AtomicBoolean(false)
     private val serviceSetupGeneration = AtomicLong(0L)
+    private val discoveryRequestInProgress = AtomicBoolean(false)
+    private val connectionAttemptInProgress = AtomicBoolean(false)
+    private val discoveryToken = UUID.randomUUID().toString().replace("-", "").take(12)
 
     @Volatile private var started = false
     @Volatile private var receiverRegistered = false
@@ -91,9 +101,14 @@ class WifiDirectManager(
     @Volatile private var channel: WifiP2pManager.Channel? = null
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var serverJob: Job? = null
+    @Volatile private var mediaServerSocket: ServerSocket? = null
+    @Volatile private var mediaServerJob: Job? = null
     @Volatile private var clientJob: Job? = null
-    @Volatile private var discoveryJob: Job? = null
+    @Volatile private var connectionTimeoutJob: Job? = null
     @Volatile private var serviceRetryJob: Job? = null
+    @Volatile private var discoveryRetryJob: Job? = null
+    @Volatile private var serviceDiscoveryActive = false
+    @Volatile private var discoveryRetryAttempt = 0
     @Volatile private var localService: WifiP2pDnsSdServiceInfo? = null
     @Volatile private var serviceRequest: WifiP2pDnsSdServiceRequest? = null
 
@@ -115,13 +130,18 @@ class WifiDirectManager(
                     }
                 }
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        val networkInfo = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO, NetworkInfo::class.java)
-                        if (networkInfo?.isConnected == false) resetGroupConnections()
+                    val networkInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO, NetworkInfo::class.java)
                     } else {
                         @Suppress("DEPRECATION")
-                        val networkInfo = intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
-                        if (networkInfo?.isConnected == false) resetGroupConnections()
+                        intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
+                    }
+                    // `isConnected == false` also occurs during CONNECTING and
+                    // OBTAINING_IPADDR on some Android builds. Resetting then clears
+                    // the active attempt and restarts discovery in the middle of P2P
+                    // negotiation, which can make connection setup take minutes.
+                    if (networkInfo?.detailedState == NetworkInfo.DetailedState.DISCONNECTED && groupFormed) {
+                        resetGroupConnections()
                     }
                     requestConnectionInfo()
                 }
@@ -172,10 +192,17 @@ class WifiDirectManager(
         groupOwnerAddress = null
         serviceSetupGeneration.incrementAndGet()
         serviceSetupInProgress.set(false)
-        discoveryJob?.cancel(); discoveryJob = null
+        discoveryRetryJob?.cancel(); discoveryRetryJob = null
+        serviceDiscoveryActive = false
+        discoveryRetryAttempt = 0
+        discoveryRequestInProgress.set(false)
+        connectionAttemptInProgress.set(false)
+        connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
         serviceRetryJob?.cancel(); serviceRetryJob = null
         clientJob?.cancel(); clientJob = null
         closeServer()
+        closeMediaServer()
+        closeActiveMediaSockets()
         closeAllSessions()
         channel?.let { current ->
             if (hasRequiredPermissions()) {
@@ -198,7 +225,7 @@ class WifiDirectManager(
 
     fun isStarted(): Boolean = started && channel != null && hasRequiredPermissions()
     fun isDiscoveryActive(): Boolean =
-        isStarted() && serviceRequest != null && discoveryJob?.isActive == true
+        isStarted() && serviceRequest != null && serviceDiscoveryActive
     fun isAvailable(): Boolean = sessions.isNotEmpty()
     fun connectedPeerCount(): Int = sessions.size
     fun hasPeer(nodeId: String): Boolean = sessions.containsKey(normalize(nodeId))
@@ -206,6 +233,82 @@ class WifiDirectManager(
     suspend fun sendToPeer(nodeId: String, payload: ByteArray): Boolean {
         if (payload.isEmpty() || payload.size > MeshPacketCodec.MAX_PACKET_BYTES) return false
         return sessions[normalize(nodeId)]?.send(payload, transferIds.incrementAndGet()) ?: false
+    }
+
+    /** Sends a file on a separate bounded TCP port; the mesh packet codec is untouched. */
+    suspend fun sendAttachmentToPeer(
+        nodeId: String,
+        manifest: AttachmentTransferManifest,
+        file: File,
+        onProgress: suspend (Long) -> Unit = {}
+    ): Boolean {
+        if (!manifest.isValid() || !file.isFile || file.length() != manifest.sizeBytes) return false
+        val peer = sessions[normalize(nodeId)]?.peer ?: return false
+        val socket = Socket()
+        activeMediaSockets.add(socket)
+        val finished = AtomicBoolean(false)
+        val watchdog = scope.launch {
+            delay(MEDIA_TRANSFER_TIMEOUT_MS)
+            if (!finished.get()) runCatching { socket.close() }
+        }
+        return try {
+            withContext(Dispatchers.IO) {
+                socket.tcpNoDelay = true
+                socket.keepAlive = true
+                socket.soTimeout = MEDIA_ACK_TIMEOUT_MS.toInt()
+                socket.connect(InetSocketAddress(peer.host, MEDIA_TCP_PORT), SOCKET_CONNECT_TIMEOUT_MS)
+                val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
+                val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+                output.writeInt(MEDIA_MAGIC)
+                output.writeInt(MEDIA_VERSION)
+                output.writeUTF(identityStore.getIdentity().nodeId)
+                writeManifest(output, manifest)
+                output.flush()
+                val accepted = input.readBoolean()
+                var offset = input.readLong()
+                if (!accepted || offset !in 0..manifest.sizeBytes) return@withContext false
+
+                file.inputStream().buffered(MEDIA_CHUNK_BYTES).use { source ->
+                    var skipped = 0L
+                    while (skipped < offset) {
+                        val count = source.skip(offset - skipped)
+                        if (count <= 0L) return@withContext false
+                        skipped += count
+                    }
+                    val buffer = ByteArray(MEDIA_CHUNK_BYTES)
+                    while (offset < manifest.sizeBytes) {
+                        val wanted = minOf(buffer.size.toLong(), manifest.sizeBytes - offset).toInt()
+                        var read = 0
+                        while (read < wanted) {
+                            val count = source.read(buffer, read, wanted - read)
+                            if (count < 0) return@withContext false
+                            if (count > 0) read += count
+                        }
+                        output.writeInt(read)
+                        output.writeLong(offset)
+                        output.write(buffer, 0, read)
+                        output.flush()
+                        if (!input.readBoolean()) return@withContext false
+                        val nextOffset = input.readLong()
+                        if (nextOffset != offset + read) return@withContext false
+                        offset = nextOffset
+                        onProgress(offset)
+                    }
+                }
+                output.writeInt(0)
+                output.flush()
+                input.readBoolean()
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        } finally {
+            finished.set(true)
+            watchdog.cancel()
+            runCatching { socket.close() }
+            activeMediaSockets.remove(socket)
+        }
     }
 
     private fun hasRequiredPermissions(): Boolean {
@@ -229,7 +332,12 @@ class WifiDirectManager(
             WifiP2pDnsSdServiceInfo.newInstance(
                 "neyra",
                 "_neyra._tcp",
-                mapOf("v" to MeshPacketCodec.PROTOCOL_VERSION.toString())
+                mapOf(
+                    "v" to MeshPacketCodec.PROTOCOL_VERSION.toString(),
+                    // A per-process tie-breaker elects one phone to initiate P2P
+                    // negotiation, avoiding both phones connecting simultaneously.
+                    "r" to discoveryToken
+                )
             )
         }.getOrNull() ?: run {
             serviceSetupInProgress.set(false)
@@ -267,13 +375,23 @@ class WifiDirectManager(
                     // is exchanged over the socket HELLO after the P2P group forms.
                     if (device != null) {
                         val key = device.deviceAddress.lowercase()
-                        if (record?.get("v") == MeshPacketCodec.PROTOCOL_VERSION.toString()) {
+                        val txtRecord = record.orEmpty()
+                        if (txtRecord["v"] == MeshPacketCodec.PROTOCOL_VERSION.toString()) {
                             if (compatibleServiceAddresses.size >= MAX_DISCOVERED_SERVICE_DEVICES) {
                                 compatibleServiceAddresses.clear()
                                 advertisedServiceDevices.clear()
                             }
-                            compatibleServiceAddresses.add(key)
-                            advertisedServiceDevices[key]?.let { if (started && !groupFormed) connectToService(it) }
+                            val remoteToken = txtRecord["r"]
+                            // New Neyra peers use a deterministic tie-breaker so
+                            // exactly one side requests a connection. Peers using
+                            // the earlier record format remain interoperable.
+                            val shouldInitiate = remoteToken == null || discoveryToken < remoteToken
+                            if (shouldInitiate) {
+                                compatibleServiceAddresses.add(key)
+                                advertisedServiceDevices[key]?.let { if (started && !groupFormed) connectToService(it) }
+                            } else {
+                                compatibleServiceAddresses.remove(key)
+                            }
                         } else {
                             compatibleServiceAddresses.remove(key)
                         }
@@ -319,6 +437,10 @@ class WifiDirectManager(
         serviceSetupGeneration.incrementAndGet()
         serviceSetupInProgress.set(false)
         serviceRetryJob?.cancel(); serviceRetryJob = null
+        discoveryRetryJob?.cancel(); discoveryRetryJob = null
+        discoveryRequestInProgress.set(false)
+        serviceDiscoveryActive = false
+        discoveryRetryAttempt = 0
         localService = null
         serviceRequest = null
         advertisedServiceDevices.clear()
@@ -343,9 +465,15 @@ class WifiDirectManager(
         groupFormed = false
         groupOwner = false
         groupOwnerAddress = null
-        discoveryJob?.cancel(); discoveryJob = null
+        discoveryRetryJob?.cancel(); discoveryRetryJob = null
+        discoveryRequestInProgress.set(false)
+        serviceDiscoveryActive = false
+        connectionAttemptInProgress.set(false)
+        connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
         clientJob?.cancel(); clientJob = null
         closeServer()
+        closeMediaServer()
+        closeActiveMediaSockets()
         closeAllSessions()
         connectAttempts.clear()
         if (clearChannel) {
@@ -384,16 +512,55 @@ class WifiDirectManager(
 
     @SuppressLint("MissingPermission")
     private fun beginDiscovery() {
-        if (!started || groupFormed || !hasRequiredPermissions()) return
-        discoveryJob?.cancel()
-        discoveryJob = scope.launch {
-            while (isActive && started && !groupFormed) {
-                val current = channel
-                if (current != null) {
-                    manager?.discoverServices(current, actionListener { })
+        if (!started || groupFormed || connectionAttemptInProgress.get() || !hasRequiredPermissions()) return
+        if (serviceDiscoveryActive || !discoveryRequestInProgress.compareAndSet(false, true)) return
+        val current = channel
+        val p2pManager = manager
+        if (current == null || p2pManager == null) {
+            discoveryRequestInProgress.set(false)
+            scheduleDiscoveryRetry()
+            return
+        }
+
+        try {
+            // Android keeps service discovery active after a successful request
+            // until a connection starts or a P2P group forms. Reissuing this call
+            // on a timer only invites BUSY failures and does not speed up scanning.
+            p2pManager.discoverServices(current, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    discoveryRequestInProgress.set(false)
+                    if (started && channel === current && !groupFormed) {
+                        serviceDiscoveryActive = true
+                        discoveryRetryAttempt = 0
+                        discoveryRetryJob?.cancel()
+                        discoveryRetryJob = null
+                    }
                 }
-                delay(DISCOVERY_INTERVAL_MS)
-            }
+
+                override fun onFailure(reason: Int) {
+                    discoveryRequestInProgress.set(false)
+                    if (started && channel === current && !groupFormed) {
+                        serviceDiscoveryActive = false
+                        scheduleDiscoveryRetry()
+                    }
+                }
+            })
+        } catch (_: Exception) {
+            discoveryRequestInProgress.set(false)
+            serviceDiscoveryActive = false
+            scheduleDiscoveryRetry()
+        }
+    }
+
+    private fun scheduleDiscoveryRetry() {
+        if (!started || groupFormed || connectionAttemptInProgress.get() || discoveryRetryJob?.isActive == true) return
+        val shift = discoveryRetryAttempt.coerceAtMost(4)
+        val delayMs = (DISCOVERY_RETRY_BASE_MS * (1L shl shift)).coerceAtMost(DISCOVERY_RETRY_MAX_MS)
+        discoveryRetryAttempt = (discoveryRetryAttempt + 1).coerceAtMost(5)
+        discoveryRetryJob = scope.launch {
+            delay(delayMs)
+            discoveryRetryJob = null
+            if (started && !groupFormed) beginDiscovery()
         }
     }
 
@@ -401,26 +568,63 @@ class WifiDirectManager(
     private fun connectToService(device: WifiP2pDevice) {
         if (!started || groupFormed || !hasRequiredPermissions()) return
         val key = device.deviceAddress?.lowercase() ?: return
-        if (!connectAttempts.add(key)) return
+        if (!connectionAttemptInProgress.compareAndSet(false, true)) return
+        if (!connectAttempts.add(key)) {
+            connectionAttemptInProgress.set(false)
+            return
+        }
         val config = WifiP2pConfig().apply {
             deviceAddress = device.deviceAddress
             wps.setup = WpsInfo.PBC
             groupOwnerIntent = (identityStore.getIdentity().nodeId.hashCode().ushr(1) % 16)
         }
-        val current = channel ?: run { connectAttempts.remove(key); return }
-        manager?.connect(current, config, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() {
-                // Keep this peer debounced until group formation. If negotiation
-                // stalls without a broadcast, allow a later discovery cycle to retry.
-                scope.launch {
-                    delay(CONNECT_NEGOTIATION_TIMEOUT_MS)
-                    if (!groupFormed) connectAttempts.remove(key)
+        val current = channel ?: run {
+            connectAttempts.remove(key)
+            connectionAttemptInProgress.set(false)
+            return
+        }
+        val p2pManager = manager ?: run {
+            connectAttempts.remove(key)
+            connectionAttemptInProgress.set(false)
+            return
+        }
+        try {
+            p2pManager.connect(current, config, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    serviceDiscoveryActive = false
+                    connectionTimeoutJob?.cancel()
+                    connectionTimeoutJob = scope.launch {
+                        delay(CONNECT_NEGOTIATION_TIMEOUT_MS)
+                        if (started && !groupFormed && connectionAttemptInProgress.get()) {
+                            connectAttempts.remove(key)
+                            connectionAttemptInProgress.set(false)
+                            val activeChannel = channel
+                            if (activeChannel == null) {
+                                scheduleDiscoveryRetry()
+                            } else {
+                                manager?.cancelConnect(activeChannel, object : WifiP2pManager.ActionListener {
+                                    override fun onSuccess() = scheduleDiscoveryRetry()
+                                    override fun onFailure(reason: Int) = scheduleDiscoveryRetry()
+                                }) ?: scheduleDiscoveryRetry()
+                            }
+                        }
+                    }
                 }
-            }
-            override fun onFailure(reason: Int) {
+                override fun onFailure(reason: Int) {
+                    connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+                    connectAttempts.remove(key)
+                    connectionAttemptInProgress.set(false)
+                    serviceDiscoveryActive = false
+                    scheduleDiscoveryRetry()
+                }
+            })
+        } catch (_: Exception) {
+                connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
                 connectAttempts.remove(key)
-            }
-        })
+                connectionAttemptInProgress.set(false)
+                serviceDiscoveryActive = false
+                scheduleDiscoveryRetry()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -431,7 +635,14 @@ class WifiDirectManager(
             if (!started) return@connectionInfoCallback
             val ownerAddress = info.groupOwnerAddress
             if (!info.groupFormed || ownerAddress == null) {
+                // A connection request can take several seconds to form its group.
+                // Do not restart discovery just because an early connection-info
+                // callback still reports the pre-group state.
+                if (connectionAttemptInProgress.get()) return@connectionInfoCallback
+                connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
                 connectAttempts.clear()
+                connectionAttemptInProgress.set(false)
+                serviceDiscoveryActive = false
                 groupFormed = false
                 groupOwner = false
                 groupOwnerAddress = null
@@ -443,10 +654,14 @@ class WifiDirectManager(
             }
 
             connectAttempts.clear()
+            connectionAttemptInProgress.set(false)
+            connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+            serviceDiscoveryActive = false
+            discoveryRetryJob?.cancel(); discoveryRetryJob = null
             groupFormed = true
             groupOwner = info.isGroupOwner
             groupOwnerAddress = ownerAddress
-            discoveryJob?.cancel(); discoveryJob = null
+            startMediaServer()
             if (info.isGroupOwner) {
                 startServer()
             } else {
@@ -461,7 +676,11 @@ class WifiDirectManager(
         if (clientJob?.isActive == true) return
         clientJob = scope.launch {
             var attempt = 0
-            while (isActive && started && groupFormed && !groupOwner && sessions.isEmpty() && attempt < CLIENT_CONNECT_ATTEMPTS) {
+            // The group owner can finish bringing up its TCP listener just after
+            // Android reports the P2P group. Keep retrying while this group exists,
+            // with a capped delay, rather than giving up after six attempts and
+            // waiting for a connection broadcast that may never be sent again.
+            while (isActive && started && groupFormed && !groupOwner && sessions.isEmpty()) {
                 attempt++
                 val socket = runCatching {
                     Socket().apply {
@@ -472,7 +691,7 @@ class WifiDirectManager(
                 }.getOrNull()
                 if (socket != null && establishSession(socket)) return@launch
                 runCatching { socket?.close() }
-                delay(CLIENT_RETRY_DELAY_MS)
+                delay(if (attempt <= CLIENT_FAST_RETRY_COUNT) CLIENT_RETRY_DELAY_MS else CLIENT_RETRY_MAX_DELAY_MS)
             }
         }
     }
@@ -502,6 +721,7 @@ class WifiDirectManager(
                     }
                     if (!handshakeSlots.tryAcquire()) {
                         runCatching { socket.close() }
+                        activeMediaSockets.remove(socket)
                     } else {
                         launch {
                             try { establishSession(socket) } finally { handshakeSlots.release() }
@@ -514,6 +734,109 @@ class WifiDirectManager(
                 runCatching { activeServer.close() }
                 if (serverSocket === activeServer) serverSocket = null
             }
+        }
+    }
+
+    private fun startMediaServer() {
+        if (mediaServerJob?.isActive == true) return
+        mediaServerJob = scope.launch {
+            val activeServer = runCatching {
+                ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress("0.0.0.0", MEDIA_TCP_PORT), 2)
+                }
+            }.getOrNull() ?: return@launch
+            mediaServerSocket = activeServer
+            try {
+                while (isActive && started && groupFormed) {
+                    val socket = activeServer.accept().apply {
+                        tcpNoDelay = true
+                        keepAlive = true
+                        soTimeout = MEDIA_ACK_TIMEOUT_MS.toInt()
+                    }
+                    activeMediaSockets.add(socket)
+                    if (!handshakeSlots.tryAcquire()) {
+                        runCatching { socket.close() }
+                        activeMediaSockets.remove(socket)
+                    } else {
+                        launch {
+                            try {
+                                receiveAttachment(socket)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                // A malformed or interrupted media socket is isolated to this transfer.
+                            } finally {
+                                activeMediaSockets.remove(socket)
+                                handshakeSlots.release()
+                            }
+                        }
+                    }
+                }
+            } catch (_: IOException) {
+                // Socket closure is the regular shutdown path.
+            } finally {
+                runCatching { activeServer.close() }
+                if (mediaServerSocket === activeServer) mediaServerSocket = null
+            }
+        }
+    }
+
+    private suspend fun receiveAttachment(socket: Socket) = withContext(Dispatchers.IO) {
+        socket.use { active ->
+            val input = DataInputStream(BufferedInputStream(active.getInputStream()))
+            val output = DataOutputStream(BufferedOutputStream(active.getOutputStream()))
+            if (input.readInt() != MEDIA_MAGIC || input.readInt() != MEDIA_VERSION) throw IOException("Unsupported media transfer")
+            val senderNodeId = input.readUTF()
+            val manifest = readManifest(input)
+            val remotePeer = sessions[normalize(senderNodeId)]?.peer
+            val remoteHost = active.inetAddress.hostAddress
+            if (remotePeer == null || !remotePeer.nodeId.equals(senderNodeId, true) ||
+                !remotePeer.host.equals(remoteHost, true) ||
+                !manifest.senderNodeId.equals(senderNodeId, true) ||
+                !manifest.isValid()) {
+                output.writeBoolean(false); output.writeLong(0L); output.flush()
+                return@withContext
+            }
+            val resumeOffsetResult: Long? =
+                try {
+                    onAttachmentBegin(senderNodeId, manifest)
+                } catch (_: Exception) {
+                    null
+                }
+            if (resumeOffsetResult == null || resumeOffsetResult !in 0..manifest.sizeBytes) {
+                output.writeBoolean(false); output.writeLong(0L); output.flush()
+                return@withContext
+            }
+            val resumeOffset: Long = requireNotNull(resumeOffsetResult)
+            output.writeBoolean(true); output.writeLong(resumeOffset); output.flush()
+            var expectedOffset: Long = resumeOffset
+            while (true) {
+                val chunkSize = input.readInt()
+                if (chunkSize == 0) break
+                if (chunkSize !in 1..MEDIA_CHUNK_BYTES) throw IOException("Invalid media chunk")
+                val offset = input.readLong()
+                if (offset != expectedOffset || chunkSize.toLong() > manifest.sizeBytes - expectedOffset) {
+                    output.writeBoolean(false)
+                    output.writeLong(expectedOffset)
+                    output.flush()
+                    return@withContext
+                }
+                val bytes = ByteArray(chunkSize)
+                input.readFully(bytes)
+                val nextOffset: Long? =
+                    onAttachmentChunk(senderNodeId, manifest, offset, bytes)
+                val receivedEnd = expectedOffset + chunkSize.toLong()
+                val accepted = nextOffset != null && nextOffset == receivedEnd
+                output.writeBoolean(accepted)
+                output.writeLong(if (accepted) receivedEnd else expectedOffset)
+                output.flush()
+                if (!accepted) return@withContext
+                expectedOffset = receivedEnd
+            }
+            val complete = expectedOffset == manifest.sizeBytes && onAttachmentFinish(senderNodeId, manifest)
+            output.writeBoolean(complete)
+            output.flush()
         }
     }
 
@@ -580,7 +903,12 @@ class WifiDirectManager(
         // The capacity check and insertion must be one critical section: several
         // accepted sockets can complete HELLO concurrently.
         val admitted = synchronized(sessions) {
-            if (!sessions.containsKey(key) && sessions.size >= MAX_WIFI_SESSIONS) {
+            val existing = sessions[key]
+            if (existing == null && sessions.size >= MAX_WIFI_SESSIONS) {
+                false
+            } else if (existing != null && !existing.peer.host.equals(remote.host, true)) {
+                // A second socket must not be able to take over an active node ID
+                // from a different address in this P2P group.
                 false
             } else {
                 previous = sessions.put(key, session)
@@ -740,10 +1068,15 @@ class WifiDirectManager(
 
     private fun resetGroupConnections() {
         connectAttempts.clear()
+        connectionAttemptInProgress.set(false)
+        connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+        serviceDiscoveryActive = false
         groupFormed = false
         groupOwner = false
         groupOwnerAddress = null
         closeServer()
+        closeMediaServer()
+        closeActiveMediaSockets()
         clientJob?.cancel(); clientJob = null
         closeAllSessions()
         if (started && hasRequiredPermissions()) {
@@ -758,9 +1091,45 @@ class WifiDirectManager(
         serverSocket = null
     }
 
+    private fun closeMediaServer() {
+        mediaServerJob?.cancel(); mediaServerJob = null
+        runCatching { mediaServerSocket?.close() }
+        mediaServerSocket = null
+    }
+
+    private fun closeActiveMediaSockets() {
+        activeMediaSockets.toList().forEach { socket -> runCatching { socket.close() } }
+        activeMediaSockets.clear()
+    }
+
     private fun closeAllSessions() {
         sessions.values.toList().forEach { it.close(notify = true) }
     }
+
+    private fun writeManifest(output: DataOutputStream, manifest: AttachmentTransferManifest) {
+        output.writeUTF(manifest.messageId)
+        output.writeUTF(manifest.senderNodeId)
+        output.writeUTF(manifest.recipientNodeId)
+        output.writeUTF(manifest.mimeType)
+        output.writeUTF(manifest.displayName)
+        output.writeLong(manifest.sizeBytes)
+        output.writeUTF(manifest.sha256)
+        output.writeLong(manifest.createdAt)
+        output.writeInt(manifest.hopCount)
+    }
+
+    private fun readManifest(input: DataInputStream): AttachmentTransferManifest =
+        AttachmentTransferManifest(
+            messageId = input.readUTF(),
+            senderNodeId = input.readUTF(),
+            recipientNodeId = input.readUTF(),
+            mimeType = input.readUTF(),
+            displayName = input.readUTF(),
+            sizeBytes = input.readLong(),
+            sha256 = input.readUTF(),
+            createdAt = input.readLong(),
+            hopCount = input.readInt()
+        )
 
     private fun normalize(nodeId: String): String = nodeId.trim().lowercase()
 
@@ -772,17 +1141,25 @@ class WifiDirectManager(
 
     companion object {
         const val TCP_PORT = 38_991
-        private const val DISCOVERY_INTERVAL_MS = 15_000L
+        private const val MEDIA_TCP_PORT = TCP_PORT + 1
+        private const val MEDIA_MAGIC = 0x4E594D31 // NYM1
+        private const val MEDIA_VERSION = 1
+        private const val MEDIA_CHUNK_BYTES = 64 * 1024
+        private const val MEDIA_ACK_TIMEOUT_MS = 60_000L
+        private const val MEDIA_TRANSFER_TIMEOUT_MS = 15 * 60 * 1000L
+        private const val DISCOVERY_RETRY_BASE_MS = 3_000L
+        private const val DISCOVERY_RETRY_MAX_MS = 30_000L
         private const val SERVICE_SETUP_RETRY_MS = 4_000L
         private const val SOCKET_CONNECT_TIMEOUT_MS = 4_000
-        private const val CONNECT_NEGOTIATION_TIMEOUT_MS = 20_000L
+        private const val CONNECT_NEGOTIATION_TIMEOUT_MS = 30_000L
         private const val HANDSHAKE_TIMEOUT_MS = 6_000
         private const val TRANSPORT_ACK_TIMEOUT_MS = 8_000L
         private const val SEND_OPERATION_TIMEOUT_MS = 10_000L
         private const val ACK_WRITE_TIMEOUT_MS = 5_000L
         private const val MAX_CONCURRENT_SENDS_PER_SESSION = 2
         private const val CLIENT_RETRY_DELAY_MS = 800L
-        private const val CLIENT_CONNECT_ATTEMPTS = 6
+        private const val CLIENT_FAST_RETRY_COUNT = 6
+        private const val CLIENT_RETRY_MAX_DELAY_MS = 5_000L
         private const val CLIENT_RECONNECT_DELAY_MS = 750L
         private const val SERVER_BIND_ATTEMPTS = 5
         private const val SERVER_BIND_RETRY_MS = 500L
