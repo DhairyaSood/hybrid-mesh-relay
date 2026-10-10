@@ -58,6 +58,7 @@ import com.hybridmesh.relay.ui.theme.RelayBorder
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.components.NodeIdText
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 
 @Composable
@@ -115,7 +116,7 @@ fun MessagesScreen(
                 )
             }
 
-            if (selectedTab == 0) ChatList(chats, onConversationClick, ::copyNodeId)
+            if (selectedTab == 0) ChatList(chats, onConversationClick)
             else NearbyList(networkState, meshPeers, knownPeers, onConversationClick, onOpenDevices, ::copyNodeId)
         }
         if (selectedTab == 0) {
@@ -167,7 +168,7 @@ fun MessagesScreen(
 }
 
 @Composable
-private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> Unit, onCopyNodeId: (String) -> Unit) {
+private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> Unit) {
     if (chats.isEmpty()) {
         Box(
             Modifier
@@ -206,7 +207,7 @@ private fun ChatList(chats: List<ChatSummary>, onConversationClick: (String) -> 
         contentPadding = PaddingValues(18.dp, 14.dp, 18.dp, 104.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        items(chats, key = { it.peerNodeId }) { chat -> ChatRow(chat, onConversationClick, onCopyNodeId) }
+        items(chats, key = { it.peerNodeId }) { chat -> ChatRow(chat, onConversationClick) }
     }
 }
 
@@ -288,7 +289,7 @@ private fun PeerRow(name: String, nodeId: String, rssi: Int, transportLabel: Str
             Spacer(Modifier.size(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { onCopyNodeId(nodeId) })
+                NodeIdText(nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1, modifier = Modifier.fillMaxWidth())
             }
             Text("$rssi dBm", style = TechnicalTextStyle, color = RelayTextMuted)
         }
@@ -298,13 +299,21 @@ private fun PeerRow(name: String, nodeId: String, rssi: Int, transportLabel: Str
 }
 
 @Composable
-private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit, onCopyNodeId: (String) -> Unit) {
-    val status = when (chat.lastStatus) {
-        DeliveryStatus.DELIVERED -> "DELIVERED"
-        DeliveryStatus.QUEUED -> "QUEUED"
-        DeliveryStatus.IN_FLIGHT -> "SENDING"
-        DeliveryStatus.FAILED -> "FAILED"
-        null -> ""
+private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
+    val status = when (chat.attachmentStatus) {
+        "WAITING_WIFI", "QUEUED", "RELAY_QUEUED" -> "MEDIA WAITING"
+        "SENDING", "RECEIVING" -> "MEDIA TRANSFERRING"
+        "RELAYED" -> "MEDIA FORWARDED"
+        "DELIVERED" -> "MEDIA AVAILABLE"
+        "FAILED" -> "MEDIA FAILED"
+        null -> when (chat.lastStatus) {
+            DeliveryStatus.DELIVERED -> "DELIVERED"
+            DeliveryStatus.QUEUED -> "QUEUED"
+            DeliveryStatus.IN_FLIGHT -> "SENDING"
+            DeliveryStatus.FAILED -> "FAILED"
+            null -> ""
+        }
+        else -> ""
     }
 
     Row(
@@ -315,7 +324,6 @@ private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit, on
     ) {
         Column(Modifier.weight(1f)) {
             Text(chat.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-            Text(chat.peerNodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { onCopyNodeId(chat.peerNodeId) })
             val preview = chat.lastMessage?.replace('\n', ' ')?.takeIf { it.isNotBlank() }
                 ?: "New contact · messages wait until this node is nearby"
             Text(preview, style = MaterialTheme.typography.bodySmall, color = RelayTextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -33,6 +34,7 @@ import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MessageTraceEventEntity
 import com.hybridmesh.relay.messaging.mesh.MeshTransportKind
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
+import com.hybridmesh.relay.ui.components.NodeIdText
 import java.text.DateFormat
 import java.util.Date
 import android.widget.Toast
@@ -173,9 +175,14 @@ fun MessageDiagnosticsDialog(
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun DiagnosticRow(label: String, value: String, onValueClick: (() -> Unit)? = null) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
         Text(label, modifier = Modifier.weight(0.9f), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, modifier = Modifier.weight(1.1f).then(if (onValueClick != null) Modifier.clickable(onClick = onValueClick) else Modifier), style = MaterialTheme.typography.bodySmall)
+        if (onValueClick != null) {
+            NodeIdText(value, modifier = Modifier.weight(1.1f), style = MaterialTheme.typography.bodySmall, maxLines = 3)
+        } else {
+            Text(value, modifier = Modifier.weight(1.1f), style = MaterialTheme.typography.bodySmall)
+        }
     }
 }

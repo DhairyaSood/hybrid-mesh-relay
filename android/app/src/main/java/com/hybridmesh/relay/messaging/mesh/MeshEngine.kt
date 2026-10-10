@@ -89,6 +89,7 @@ class MeshEngine(context: Context) {
     private val transportSendSlots = Semaphore(MAX_CONCURRENT_TRANSPORT_SENDS)
     private val fanoutAttemptSlots = Semaphore(MAX_CONCURRENT_FANOUT_ATTEMPTS)
     private val activeFanoutJobs = ConcurrentHashMap.newKeySet<Job>()
+    private val attachmentStartedAt = ConcurrentHashMap<String, Long>()
 
     private val _snapshot = MutableStateFlow(MeshRuntimeSnapshot())
     val snapshot: StateFlow<MeshRuntimeSnapshot> = _snapshot.asStateFlow()
@@ -988,6 +989,8 @@ class MeshEngine(context: Context) {
                     manifest,
                     file,
                     onProgress = { sent ->
+                        val startedAt = attachmentStartedAt.getOrPut(attachment.messageId) { System.nanoTime() }
+                        publishAttachmentThroughput(sent, startedAt, active = sent < attachment.sizeBytes)
                         repository.updateAttachmentProgress(
                             attachment.messageId,
                             AttachmentTransferStatus.SENDING,
@@ -996,8 +999,14 @@ class MeshEngine(context: Context) {
                     }
                 )
                 if (forwarded) {
+                    publishAttachmentThroughput(attachment.sizeBytes, attachmentStartedAt.remove(attachment.messageId), active = false)
                     repository.markAttachmentForwarded(attachment, nextHop.nodeId.equals(attachment.recipientNodeId, true))
                 } else {
+                    publishAttachmentThroughput(
+                        attachment.transferredBytes,
+                        attachmentStartedAt.remove(attachment.messageId),
+                        active = false
+                    )
                     repository.updateAttachmentProgress(
                         attachment.messageId,
                         if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
@@ -1043,6 +1052,8 @@ class MeshEngine(context: Context) {
             AttachmentTransferStatus.RECEIVING,
             nextOffset
         )
+        val startedAt = attachmentStartedAt.getOrPut(manifest.messageId) { System.nanoTime() }
+        publishAttachmentThroughput(nextOffset, startedAt, active = nextOffset < manifest.sizeBytes)
         return nextOffset
     }
 
@@ -1053,6 +1064,7 @@ class MeshEngine(context: Context) {
         val completedFile = AttachmentFileStore.finishReceive(appContext, manifest) ?: return false
         val completed = repository.completeIncomingAttachment(manifest, completedFile.absolutePath, sourceNodeId, localCanRelay = true)
         if (completed) {
+            publishAttachmentThroughput(manifest.sizeBytes, attachmentStartedAt.remove(manifest.messageId), active = false)
             repository.recordTraceEvent(
                 messageId = manifest.messageId,
                 eventType = if (manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)) "ATTACHMENT_DELIVERED" else "ATTACHMENT_STORED_FOR_RELAY",
@@ -1062,6 +1074,19 @@ class MeshEngine(context: Context) {
             )
         }
         return completed
+    }
+
+    private fun publishAttachmentThroughput(bytes: Long, startedAt: Long?, active: Boolean) {
+        if (startedAt == null || bytes <= 0L) return
+        val elapsedSeconds = ((System.nanoTime() - startedAt).coerceAtLeast(1L)) / 1_000_000_000.0
+        val mbps = (bytes * 8.0 / elapsedSeconds) / 1_000_000.0
+        _snapshot.value = _snapshot.value.copy(
+            currentAttachmentThroughputMbps = if (active) mbps else null,
+            lastAttachmentThroughputMbps = if (active) _snapshot.value.lastAttachmentThroughputMbps else mbps,
+            attachmentTransferActive = active,
+            attachmentTransport = "WIFI_DIRECT",
+            updatedAt = System.currentTimeMillis()
+        )
     }
 
     private suspend fun maintenanceLoop() {
@@ -1082,6 +1107,8 @@ class MeshEngine(context: Context) {
                 availableTransports = meshTransports.filter { it.isAvailable() }.map { it.kind.name },
                 wifiDirectDiscoveryActive = wifiDirectManager.isDiscoveryActive(),
                 connectedWifiPeers = wifiDirectManager.connectedPeerCount(),
+                wifiDirectStage = wifiDirectManager.runtimeState.value.stage.name,
+                wifiDirectLastError = wifiDirectManager.runtimeState.value.lastError,
                 updatedAt = now
             )
             delay(SNAPSHOT_INTERVAL_MS)

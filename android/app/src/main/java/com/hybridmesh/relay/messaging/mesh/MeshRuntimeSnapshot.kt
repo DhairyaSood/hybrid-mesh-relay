@@ -10,8 +10,14 @@ data class MeshRuntimeSnapshot(
     val lastForwardQueueDelayMs: Long? = null,
     /** Time to first peer acceptance (or all-peer failure) for the most recent fan-out. */
     val lastTransportSendDurationMs: Long? = null,
+    val currentAttachmentThroughputMbps: Double? = null,
+    val lastAttachmentThroughputMbps: Double? = null,
+    val attachmentTransferActive: Boolean = false,
+    val attachmentTransport: String? = null,
     val availableTransports: List<String> = emptyList(),
     val wifiDirectDiscoveryActive: Boolean = false,
     val connectedWifiPeers: Int = 0,
+    val wifiDirectStage: String = "STOPPED",
+    val wifiDirectLastError: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 )

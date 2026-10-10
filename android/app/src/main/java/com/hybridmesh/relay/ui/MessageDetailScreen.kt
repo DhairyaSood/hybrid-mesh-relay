@@ -31,6 +31,7 @@ import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.components.NodeIdText
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 
 @Composable
@@ -102,18 +103,12 @@ private fun ActualMessageDetail(
 
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text("To", style = MaterialTheme.typography.titleLarge)
-                Text(message.recipientNodeId, style = MaterialTheme.typography.titleLarge, modifier = Modifier.clickable {
-                    clipboard.setText(AnnotatedString(message.recipientNodeId))
-                    Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
-                })
+                NodeIdText(message.recipientNodeId, style = MaterialTheme.typography.titleLarge)
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text("From", color = RelayTextMuted, style = TechnicalTextStyle)
-                Text(message.senderNodeId, color = RelayTextMuted, style = TechnicalTextStyle, modifier = Modifier.clickable {
-                    clipboard.setText(AnnotatedString(message.senderNodeId))
-                    Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
-                })
+                NodeIdText(message.senderNodeId, color = RelayTextMuted, style = TechnicalTextStyle)
             }
         }
 

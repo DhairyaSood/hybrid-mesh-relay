@@ -78,6 +78,7 @@ import com.hybridmesh.relay.location.LocationManager
 import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
+import com.hybridmesh.relay.ui.components.NodeIdText
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.network.BleRuntimeState
@@ -225,14 +226,10 @@ fun ConversationScreen(peerNodeId: String) {
                     }
                 }
 
-                Text(
+                NodeIdText(
                     peerNodeId,
                     style = MaterialTheme.typography.labelSmall,
                     color = RelayAccent,
-                    modifier = Modifier.clickable {
-                        clipboard.setText(AnnotatedString(peerNodeId))
-                        android.widget.Toast.makeText(context, "Node ID copied", android.widget.Toast.LENGTH_SHORT).show()
-                    }
                 )
 
                 if (meshRuntime.availableTransports.isEmpty()) {
