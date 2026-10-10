@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,7 +23,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -39,6 +37,7 @@ import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.viewmodel.ProfileViewModel
+import com.hybridmesh.relay.ui.components.NodeIdText
 
 @Composable
 fun ProfileScreen() {
@@ -46,7 +45,6 @@ fun ProfileScreen() {
     val viewModel: ProfileViewModel = viewModel()
     val identity by viewModel.identity.collectAsStateWithLifecycle()
     var deviceName by remember(identity.deviceName) { mutableStateOf(identity.deviceName) }
-    val clipboard = LocalClipboardManager.current
     val cleanedUsername = NicknamePolicy.clean(deviceName)
     val validationError = NicknamePolicy.errorMessage(deviceName)
     val dirty = cleanedUsername != identity.deviceName && NicknamePolicy.isValid(cleanedUsername)
@@ -85,10 +83,7 @@ fun ProfileScreen() {
             }
         }
         item {
-            InfoRow(label = "Node ID", value = identity.nodeId) {
-                clipboard.setText(AnnotatedString(identity.nodeId))
-                Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
-            }
+            InfoRow(label = "Node ID", value = identity.nodeId)
         }
         item { InfoRow("Device type", identity.deviceType.name) }
         item { InfoRow("App version", viewModel.appVersion) }
@@ -104,7 +99,7 @@ fun ProfileScreen() {
 }
 
 @Composable
-private fun InfoRow(label: String, value: String, onAction: (() -> Unit)? = null) {
+private fun InfoRow(label: String, value: String) {
     Row(
         Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.medium).border(1.dp, RelayBorder, MaterialTheme.shapes.medium).padding(14.dp),
         horizontalArrangement = Arrangement.SpaceBetween
@@ -112,10 +107,8 @@ private fun InfoRow(label: String, value: String, onAction: (() -> Unit)? = null
         Column(Modifier.weight(1f)) {
             Text(label, color = RelayTextMuted)
             Spacer(Modifier.height(3.dp))
-            Text(value, style = TechnicalTextStyle, color = RelayAccent, maxLines = 3)
-        }
-        if (onAction != null) {
-            OutlinedButton(onClick = onAction) { Text("COPY") }
+            if (label == "Node ID") NodeIdText(value, style = TechnicalTextStyle, color = RelayAccent, maxLines = 3)
+            else Text(value, style = TechnicalTextStyle, color = RelayAccent, maxLines = 3)
         }
     }
 }
