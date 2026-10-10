@@ -48,6 +48,7 @@ import com.hybridmesh.relay.ui.theme.RelayBorder
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.components.NodeIdText
 import com.hybridmesh.relay.ui.viewmodel.DevicesViewModel
 
 @Composable
@@ -114,10 +115,7 @@ fun DevicesScreen() {
             Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("LOCAL DEVICE", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
                 Text(identity.deviceName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(identity.nodeId, style = TechnicalTextStyle, color = RelayAccent, modifier = Modifier.clickable {
-                    clipboard.setText(AnnotatedString(identity.nodeId))
-                    Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
-                })
+                NodeIdText(identity.nodeId, style = TechnicalTextStyle, color = RelayAccent)
                 Text("The mesh service continues independently when this screen is closed.", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
             }
         }
@@ -230,7 +228,7 @@ private fun KnownPeerRow(peer: PeerEntity, live: com.hybridmesh.relay.ble.BlePee
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(peer.displayName.takeIf { it.isNotBlank() && !it.equals(peer.nodeId, true) } ?: peer.nodeId, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-                Text(peer.nodeId, style = TechnicalTextStyle, color = RelayAccent, modifier = Modifier.clickable(onClick = onCopyNodeId))
+                NodeIdText(peer.nodeId, style = TechnicalTextStyle, color = RelayAccent)
             }
             Text(if (inRange) "IN RANGE" else "KNOWN", style = TechnicalTextStyle, color = if (inRange) RelayAccent else RelayTextMuted)
         }

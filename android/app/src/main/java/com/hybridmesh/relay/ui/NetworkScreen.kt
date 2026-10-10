@@ -73,12 +73,22 @@ private fun Overview(state: NetworkState, mesh: com.hybridmesh.relay.messaging.m
                 mesh.connectedWifiPeers > 0 -> "CONNECTED"
                 else -> "STARTING / UNAVAILABLE"
             }
-            MetricCard("WI-FI DIRECT", wifiState, "${mesh.connectedWifiPeers} established peer sessions")
+            MetricCard("WI-FI DIRECT", mesh.wifiDirectStage, "$wifiState · ${mesh.connectedWifiPeers} established peer sessions${mesh.wifiDirectLastError?.let { " · $it" } ?: ""}")
         }
         item { MetricCard("MESH FORWARDING", if (mesh.running) "READY" else "STOPPED", "relay ${if (mesh.relayEnabled) "enabled" else "disabled"} • forwarding ${mesh.pendingForwarding}") }
         item { MetricCard("AVAILABLE BEARERS", mesh.availableTransports.ifEmpty { listOf("NONE") }.joinToString(" • "), "Transport paths currently able to send to discovered peers") }
         item { MetricCard("FORWARDING DELAY", mesh.lastForwardQueueDelayMs?.let { "$it ms" } ?: "—", "receive to forwarding send start; includes suppression window") }
         item { MetricCard("LAST SEND", mesh.lastTransportSendDurationMs?.let { "$it ms" } ?: "—", "bounded fan-out duration including transport acceptance") }
+        item {
+            MetricCard(
+                "ATTACHMENT THROUGHPUT",
+                mesh.currentAttachmentThroughputMbps?.let { "%.2f Mbps".format(it) }
+                    ?: mesh.lastAttachmentThroughputMbps?.let { "%.2f Mbps".format(it) }
+                    ?: "—",
+                if (mesh.attachmentTransferActive) "live verified payload rate · ${mesh.attachmentTransport}"
+                else "last verified payload rate · ${mesh.attachmentTransport ?: "—"}"
+            )
+        }
         item { MetricCard("MESH CACHE", mesh.cachedPackets.toString(), "active packet identities") }
     }
 }
@@ -102,8 +112,19 @@ private fun Advanced(state: NetworkState, transport: com.hybridmesh.relay.messag
         item { MetricCard("FORWARD QUEUE", mesh.pendingForwarding.toString(), "durable transit packets") }
         item { MetricCard("AVAILABLE BEARERS", mesh.availableTransports.ifEmpty { listOf("NONE") }.joinToString(" • "), "currently usable next-hop transports") }
         item { MetricCard("WI-FI PEERS", mesh.connectedWifiPeers.toString(), "established socket sessions") }
+        item { MetricCard("WI-FI DIRECT STAGE", mesh.wifiDirectStage, mesh.wifiDirectLastError ?: "lifecycle supervisor state") }
         item { MetricCard("FORWARD QUEUE DELAY", mesh.lastForwardQueueDelayMs?.let { "$it ms" } ?: "—", "receive to send start, includes suppression") }
         item { MetricCard("LAST SEND DURATION", mesh.lastTransportSendDurationMs?.let { "$it ms" } ?: "—", "fan-out including transport ACK") }
+        item {
+            MetricCard(
+                "ATTACHMENT THROUGHPUT",
+                mesh.currentAttachmentThroughputMbps?.let { "%.2f Mbps".format(it) }
+                    ?: mesh.lastAttachmentThroughputMbps?.let { "%.2f Mbps".format(it) }
+                    ?: "—",
+                if (mesh.attachmentTransferActive) "live verified payload rate · ${mesh.attachmentTransport}"
+                else "last verified payload rate · ${mesh.attachmentTransport ?: "—"}"
+            )
+        }
         item { MetricCard("SEEN CACHE", mesh.cachedPackets.toString(), "duplicate suppression entries") }
         mesh.lastDeliveredHopCount?.let { item { MetricCard("LAST DELIVERY", "$it hops", "destination-confirmed") } }
     }

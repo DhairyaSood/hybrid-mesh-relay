@@ -5,5 +5,6 @@ data class ChatSummary(
     val displayName: String,
     val lastMessage: String?,
     val lastActivity: Long,
-    val lastStatus: DeliveryStatus?
+    val lastStatus: DeliveryStatus?,
+    val attachmentStatus: String? = null
 )

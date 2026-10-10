@@ -59,9 +59,16 @@ class MessagesViewModel(
             emptyList()
         )
 
+    val attachments: StateFlow<List<AttachmentRecordEntity>> =
+        repository.observeAllAttachments().stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000L),
+            emptyList()
+        )
+
     val chats: StateFlow<List<ChatSummary>> =
-        combine(messages, knownPeers, identity) { rows, peers, localIdentity ->
-            buildChats(rows, peers, localIdentity.nodeId)
+        combine(messages, knownPeers, identity, attachments) { rows, peers, localIdentity, attachmentRows ->
+            buildChats(rows, peers, attachmentRows, localIdentity.nodeId)
         }.stateIn(
             viewModelScope,
             SharingStarted.WhileSubscribed(5_000L),
@@ -260,6 +267,7 @@ class MessagesViewModel(
     private fun buildChats(
         messageRows: List<MessageRecordEntity>,
         peerRows: List<PeerEntity>,
+        attachmentRows: List<AttachmentRecordEntity>,
         localNodeId: String
     ): List<ChatSummary> {
         val peerMap = peerRows.associateBy {
@@ -316,7 +324,10 @@ class MessagesViewModel(
                         DeliveryStatus.entries.firstOrNull {
                             it.name == message.status
                         }
-                    }
+                    },
+                    attachmentStatus = last
+                        ?.takeIf { it.messageType == MessageType.ATTACHMENT.name }
+                        ?.let { message -> attachmentRows.firstOrNull { it.messageId == message.messageId }?.status }
                 )
             }
             .sortedByDescending { it.lastActivity }

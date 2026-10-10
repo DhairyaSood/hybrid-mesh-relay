@@ -49,6 +49,7 @@ import com.hybridmesh.relay.ui.theme.RelayNode
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
+import com.hybridmesh.relay.ui.components.NodeIdText
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -73,7 +74,7 @@ fun HomeScreen(onNetworkClick: () -> Unit) {
             Column(Modifier.fillMaxWidth()) {
                 Text("NEYRA", style = MaterialTheme.typography.displaySmall, maxLines = 1)
                 Text(identity.deviceName, style = MaterialTheme.typography.titleSmall, color = RelayAccent, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
-                Text(identity.nodeId, style = TechnicalTextStyle, color = RelayTextMuted, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
+                NodeIdText(identity.nodeId, style = TechnicalTextStyle, color = RelayTextMuted, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
             }
         }
         item {
