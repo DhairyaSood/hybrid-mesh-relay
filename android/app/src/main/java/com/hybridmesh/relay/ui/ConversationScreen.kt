@@ -7,6 +7,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.widget.VideoView
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -34,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Pause
@@ -80,6 +82,9 @@ import com.hybridmesh.relay.location.LocationActions
 import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
+import com.hybridmesh.relay.messaging.attachment.AttachmentExport
+import com.hybridmesh.relay.messaging.attachment.AttachmentExportResult
+import com.hybridmesh.relay.messaging.attachment.AttachmentExportSource
 import com.hybridmesh.relay.ui.components.NodeIdText
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
@@ -126,8 +131,10 @@ fun ConversationScreen(peerNodeId: String) {
     var showDeleteChat by remember { mutableStateOf(false) }
     var locationError by remember { mutableStateOf<String?>(null) }
     var attachmentError by remember { mutableStateOf<String?>(null) }
-    var selectedVideoPath by remember { mutableStateOf<String?>(null) }
-    var selectedImagePath by remember { mutableStateOf<String?>(null) }
+    var selectedVideo by remember { mutableStateOf<AttachmentExportSource?>(null) }
+    var selectedImage by remember { mutableStateOf<AttachmentExportSource?>(null) }
+    var pendingLegacyExport by remember { mutableStateOf<AttachmentExportSource?>(null) }
+    var exportingAttachmentPath by remember { mutableStateOf<String?>(null) }
     var selectedLocation by remember { mutableStateOf<LocationPayload?>(null) }
     var locationActionError by remember { mutableStateOf<String?>(null) }
 
@@ -137,6 +144,49 @@ fun ConversationScreen(peerNodeId: String) {
             viewModel.sendAttachment(peerNodeId, uri) { success, error ->
                 if (!success) attachmentError = error ?: "Could not add this attachment."
             }
+        }
+    }
+
+    val legacyExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri: Uri? ->
+        val source = pendingLegacyExport
+        pendingLegacyExport = null
+        if (uri == null || source == null) return@rememberLauncherForActivityResult
+        exportingAttachmentPath = source.file.absolutePath
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AttachmentExport.exportToUri(context, source, uri)
+            }
+            exportingAttachmentPath = null
+            when (result) {
+                is AttachmentExportResult.Success ->
+                    Toast.makeText(context, "Saved ${result.displayName}", Toast.LENGTH_LONG).show()
+                is AttachmentExportResult.Failure ->
+                    Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun exportAttachment(source: AttachmentExportSource) {
+        if (exportingAttachmentPath != null) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            exportingAttachmentPath = source.file.absolutePath
+            scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    AttachmentExport.exportToDownloads(context, source)
+                }
+                exportingAttachmentPath = null
+                when (result) {
+                    is AttachmentExportResult.Success ->
+                        Toast.makeText(context, "Saved ${result.displayName} to Downloads/Neyra", Toast.LENGTH_LONG).show()
+                    is AttachmentExportResult.Failure ->
+                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                }
+            }
+        } else {
+            pendingLegacyExport = source
+            legacyExportLauncher.launch(AttachmentExport.suggestedFileName(source))
         }
     }
 
@@ -285,8 +335,8 @@ fun ConversationScreen(peerNodeId: String) {
                                         diagnosticsMessageId = message.messageId
                                     }
                                 },
-                                onOpenVideo = { selectedVideoPath = it },
-                                onOpenImage = { selectedImagePath = it }
+                                onOpenVideo = { selectedVideo = it },
+                                onOpenImage = { selectedImage = it }
                             )
                         }
                     }
@@ -461,11 +511,17 @@ fun ConversationScreen(peerNodeId: String) {
         )
     }
 
-    selectedImagePath?.let { path ->
-        AttachmentImageViewer(path, onDismiss = { selectedImagePath = null })
+    selectedImage?.let { source ->
+        AttachmentImageViewer(
+            source = source,
+            exporting = exportingAttachmentPath == source.file.absolutePath,
+            onDownload = { exportAttachment(source) },
+            onDismiss = { selectedImage = null }
+        )
     }
 
-    selectedVideoPath?.let { path ->
+    selectedVideo?.let { source ->
+        val path = source.file.absolutePath
         var player by remember(path) { mutableStateOf<VideoView?>(null) }
         var prepared by remember(path) { mutableStateOf(false) }
         var playing by remember(path) { mutableStateOf(false) }
@@ -492,7 +548,7 @@ fun ConversationScreen(peerNodeId: String) {
             }
         }
         Dialog(
-            onDismissRequest = { selectedVideoPath = null },
+            onDismissRequest = { selectedVideo = null },
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
             Surface(Modifier.fillMaxSize(), color = Color.Black) {
@@ -577,10 +633,23 @@ fun ConversationScreen(peerNodeId: String) {
                                     style = MaterialTheme.typography.labelSmall
                                 )
                             }
+                            IconButton(
+                                onClick = { exportAttachment(source) },
+                                enabled = exportingAttachmentPath != path,
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Download,
+                                    contentDescription = "Download video",
+                                    tint = Color.White.copy(
+                                        alpha = if (exportingAttachmentPath == path) 0.45f else 1f
+                                    )
+                                )
+                            }
                         }
                     }
                     TextButton(
-                        onClick = { selectedVideoPath = null },
+                        onClick = { selectedVideo = null },
                         modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
                     ) { Text("CLOSE", color = Color.White) }
                 }
@@ -639,8 +708,8 @@ private fun MessageBubble(
     incoming: Boolean,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
-    onOpenVideo: (String) -> Unit,
-    onOpenImage: (String) -> Unit
+    onOpenVideo: (AttachmentExportSource) -> Unit,
+    onOpenImage: (AttachmentExportSource) -> Unit
 ) {
     val shape = RoundedCornerShape(16.dp)
     val payload = if (message.messageType == MessageType.LOCATION.name) LocationPayload.decode(message.content) else null
@@ -656,10 +725,16 @@ private fun MessageBubble(
                 val isVideo = descriptor.mimeType.startsWith("video/")
                 val localPath = attachment?.localPath?.takeIf { java.io.File(it).isFile }
                 if (localPath != null) {
+                    val exportSource = AttachmentExportSource(
+                        file = java.io.File(localPath),
+                        mimeType = descriptor.mimeType,
+                        displayName = attachment?.displayName ?: descriptor.displayName,
+                        sizeBytes = descriptor.sizeBytes
+                    )
                     if (isVideo) {
-                        AttachmentVideoPreview(localPath, onClick = { onOpenVideo(localPath) })
+                        AttachmentVideoPreview(localPath, onClick = { onOpenVideo(exportSource) })
                     } else {
-                        AttachmentImagePreview(localPath, onClick = { onOpenImage(localPath) })
+                        AttachmentImagePreview(localPath, onClick = { onOpenImage(exportSource) })
                     }
                 }
                 if (!isVideo || localPath == null) {
@@ -817,7 +892,13 @@ private fun decodeAttachmentBitmap(path: String, maxDimension: Int): Bitmap? = r
 }.getOrNull()
 
 @Composable
-private fun AttachmentImageViewer(path: String, onDismiss: () -> Unit) {
+private fun AttachmentImageViewer(
+    source: AttachmentExportSource,
+    exporting: Boolean,
+    onDownload: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val path = source.file.absolutePath
     var bitmap by remember(path) { mutableStateOf<Bitmap?>(null) }
     var scale by remember(path) { mutableStateOf(1f) }
     var translation by remember(path) { mutableStateOf(Offset.Zero) }
@@ -853,13 +934,25 @@ private fun AttachmentImageViewer(path: String, onDismiss: () -> Unit) {
                 TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) {
                     Text("CLOSE", color = Color.White)
                 }
-                if (scale > 1f) {
-                    TextButton(
-                        onClick = { scale = 1f; translation = Offset.Zero },
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
-                    ) { Text("RESET ZOOM", color = Color.White) }
-                } else {
-                    Text("PINCH TO ZOOM · DRAG TO MOVE", color = Color.White, modifier = Modifier.align(Alignment.BottomCenter).padding(18.dp))
+                Row(
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDownload, enabled = !exporting) {
+                        Icon(
+                            imageVector = Icons.Filled.Download,
+                            contentDescription = "Download photo",
+                            tint = Color.White.copy(alpha = if (exporting) 0.45f else 1f)
+                        )
+                    }
+                    if (scale > 1f) {
+                        TextButton(onClick = { scale = 1f; translation = Offset.Zero }) {
+                            Text("RESET ZOOM", color = Color.White)
+                        }
+                    } else {
+                        Text("PINCH TO ZOOM · DRAG TO MOVE", color = Color.White)
+                    }
                 }
             }
         }
