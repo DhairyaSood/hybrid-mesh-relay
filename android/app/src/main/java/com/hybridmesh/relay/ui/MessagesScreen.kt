@@ -43,6 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hybridmesh.relay.ble.BleOperationState
@@ -51,6 +52,9 @@ import com.hybridmesh.relay.messaging.data.PeerEntity
 import com.hybridmesh.relay.messaging.model.ChatSummary
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.messaging.mesh.MeshPeer
+import com.hybridmesh.relay.network.NetworkDiagnosticsSnapshot
+import com.hybridmesh.relay.network.ConnectionQuality
+import com.hybridmesh.relay.network.connectionQuality
 import com.hybridmesh.relay.network.NetworkState
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
@@ -75,6 +79,7 @@ fun MessagesScreen(
     val networkState by viewModel.networkState.collectAsStateWithLifecycle()
     val meshPeers by viewModel.meshPeers.collectAsStateWithLifecycle()
     val knownPeers by viewModel.knownPeers.collectAsStateWithLifecycle()
+    val diagnostics by viewModel.networkDiagnostics.collectAsStateWithLifecycle()
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var nodeIdInput by rememberSaveable { mutableStateOf("") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
@@ -117,7 +122,7 @@ fun MessagesScreen(
             }
 
             if (selectedTab == 0) ChatList(chats, onConversationClick)
-            else NearbyList(networkState, meshPeers, knownPeers, onConversationClick, onOpenDevices, ::copyNodeId)
+            else NearbyList(networkState, meshPeers, knownPeers, diagnostics, onConversationClick, onOpenDevices, ::copyNodeId)
         }
         if (selectedTab == 0) {
             FloatingActionButton(
@@ -216,6 +221,7 @@ private fun NearbyList(
     networkState: NetworkState,
     meshPeers: List<MeshPeer>,
     knownPeers: List<PeerEntity>,
+    diagnostics: NetworkDiagnosticsSnapshot,
     onConversationClick: (String) -> Unit,
     onOpenDevices: () -> Unit,
     onCopyNodeId: (String) -> Unit
@@ -237,7 +243,15 @@ private fun NearbyList(
         NearbyPeerItem(
             nodeId = meshPeer.nodeId,
             name = displayName,
-            rssi = blePeer?.rssi ?: meshPeer.rssi,
+            rssi = blePeer?.rssi,
+            quality = connectionQuality(
+                bleRssi = blePeer?.rssi,
+                wifiHealth = if (!meshPeer.wifiHost.isNullOrBlank()) {
+                    diagnostics.peerHealth(meshPeer.nodeId, "WIFI_DIRECT")
+                } else {
+                    null
+                }
+            ),
             transportLabel = transports.ifBlank { "NEARBY" }
         )
     }.sortedBy { it.name.lowercase() }
@@ -266,6 +280,7 @@ private fun NearbyList(
                     name = peer.name,
                     nodeId = peer.nodeId,
                     rssi = peer.rssi,
+                    quality = peer.quality,
                     transportLabel = peer.transportLabel,
                     onCopyNodeId = onCopyNodeId
                 ) {
@@ -276,10 +291,24 @@ private fun NearbyList(
     }
 }
 
-private data class NearbyPeerItem(val nodeId: String, val name: String, val rssi: Int, val transportLabel: String)
+private data class NearbyPeerItem(
+    val nodeId: String,
+    val name: String,
+    val rssi: Int?,
+    val quality: ConnectionQuality?,
+    val transportLabel: String
+)
 
 @Composable
-private fun PeerRow(name: String, nodeId: String, rssi: Int, transportLabel: String, onCopyNodeId: (String) -> Unit, onClick: () -> Unit) {
+private fun PeerRow(
+    name: String,
+    nodeId: String,
+    rssi: Int?,
+    quality: ConnectionQuality?,
+    transportLabel: String,
+    onCopyNodeId: (String) -> Unit,
+    onClick: () -> Unit
+) {
     Column(
         Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large).background(RelaySurface)
             .border(1.dp, RelayBorder, MaterialTheme.shapes.large).clickable(onClick = onClick).padding(16.dp)
@@ -291,10 +320,23 @@ private fun PeerRow(name: String, nodeId: String, rssi: Int, transportLabel: Str
                 Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 NodeIdText(nodeId, style = TechnicalTextStyle, color = RelayAccent, maxLines = 1, modifier = Modifier.fillMaxWidth())
             }
-            Text("$rssi dBm", style = TechnicalTextStyle, color = RelayTextMuted)
+            when {
+                rssi != null && quality?.detail == "$rssi dBm" -> Text("$rssi dBm", style = TechnicalTextStyle, color = RelayTextMuted)
+                quality != null -> Text(quality.label, style = TechnicalTextStyle, color = RelayTextMuted)
+                else -> Text("—", style = TechnicalTextStyle, color = RelayTextMuted)
+            }
         }
 
-        Text("IN RANGE • $transportLabel", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.padding(top = 8.dp))
+        Text(
+            if (quality != null) {
+                "IN RANGE • $transportLabel · ${quality.detail}"
+            } else {
+                "IN RANGE • $transportLabel"
+            },
+            style = TechnicalTextStyle,
+            color = RelayTextMuted,
+            modifier = Modifier.padding(top = 8.dp)
+        )
     }
 }
 
@@ -323,12 +365,16 @@ private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(chat.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-            val preview = chat.lastMessage?.replace('\n', ' ')?.takeIf { it.isNotBlank() }
-                ?: "New contact · messages wait until this node is nearby"
-            Text(preview, style = MaterialTheme.typography.bodySmall, color = RelayTextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                chat.displayName,
+                style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp),
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
         }
-        if (status.isNotBlank()) Text(status, style = TechnicalTextStyle, color = RelayTextMuted)
+        if (status.isNotBlank()) {
+            Text(status, style = MaterialTheme.typography.labelSmall, color = RelayTextMuted)
+        }
     }
 }
 

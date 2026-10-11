@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
@@ -45,7 +47,12 @@ import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 import java.util.Locale
 
-private const val WINDOW_MS = 5 * 60 * 1_000L
+private val OVERVIEW_WINDOWS = listOf(
+    null to "ALL",
+    5 * 60 * 1_000L to "5 MIN",
+    15 * 60 * 1_000L to "15 MIN",
+    60 * 60 * 1_000L to "1 HOUR"
+)
 
 @Composable
 fun NetworkScreen() {
@@ -57,6 +64,7 @@ fun NetworkScreen() {
     val transport by messagingManager.transport.collectAsStateWithLifecycle()
     val mesh by messagingManager.mesh.collectAsStateWithLifecycle()
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var overviewWindowIndex by rememberSaveable { mutableIntStateOf(1) }
 
     Column(Modifier.fillMaxSize().background(RelayBackground)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
@@ -74,7 +82,15 @@ fun NetworkScreen() {
             }
         }
         when (selectedTab) {
-            0 -> Overview(state, mesh, meshPeers.size, diagnostics)
+            0 -> Overview(
+                state,
+                mesh,
+                meshPeers.size,
+                diagnostics,
+                OVERVIEW_WINDOWS[overviewWindowIndex].first,
+                OVERVIEW_WINDOWS[overviewWindowIndex].second,
+                onWindowChange = { overviewWindowIndex = it }
+            )
             1 -> Activity(diagnostics)
             else -> Advanced(state, transport, mesh, diagnostics)
         }
@@ -86,11 +102,14 @@ private fun Overview(
     state: NetworkState,
     mesh: MeshRuntimeSnapshot,
     nearbyNodeCount: Int,
-    diagnostics: NetworkDiagnosticsSnapshot
+    diagnostics: NetworkDiagnosticsSnapshot,
+    windowMs: Long?,
+    windowLabel: String,
+    onWindowChange: (Int) -> Unit
 ) {
     val now = System.currentTimeMillis()
-    val events = diagnostics.inWindow(now, WINDOW_MS)
-    val requests = diagnostics.requests(now, WINDOW_MS)
+    val events = windowMs?.let { diagnostics.inWindow(now, it) } ?: diagnostics.events
+    val requests = windowMs?.let { diagnostics.requests(now, it) } ?: diagnostics.requests(Long.MAX_VALUE, Long.MAX_VALUE)
     val successful = requests.count { it.kind == NetworkEventKind.REQUEST_SUCCEEDED }
     val failures = requests.count {
         it.kind == NetworkEventKind.REQUEST_FAILED || it.kind == NetworkEventKind.REQUEST_UNAVAILABLE
@@ -111,7 +130,14 @@ private fun Overview(
         item {
             SectionCard("CONNECTION HEALTH") {
                 MetricLine("STATE", health, "BLE ${state.bleRuntimeState.name} · mesh ${if (mesh.running) "running" else "stopped"}")
-                MetricLine("WINDOW", "LAST 5 MIN", "measured transport events retained: ${events.size}")
+                MetricLine("WINDOW", windowLabel, "measured transport events retained: ${events.size}")
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    OVERVIEW_WINDOWS.forEachIndexed { index, (_, label) ->
+                        TextButton(onClick = { onWindowChange(index) }) {
+                            Text(label, color = if (index == OVERVIEW_WINDOWS.indexOfFirst { it.second == windowLabel }) RelayAccent else RelayTextMuted)
+                        }
+                    }
+                }
             }
         }
         item {
@@ -198,12 +224,23 @@ private fun Activity(diagnostics: NetworkDiagnosticsSnapshot) {
             onDismissRequest = { selected = null },
             title = { Text("REQUEST DETAIL") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                    MetricLine("OPERATION", event.operation, event.kind.name)
-                    MetricLine("TIME", java.text.DateFormat.getTimeInstance().format(java.util.Date(event.timestamp)), event.transport ?: "transport unavailable")
-                    MetricLine("PEER", event.peerNodeId ?: "—", "attempt ${event.attempt ?: 1}")
-                    MetricLine("DURATION", event.durationMs?.let { "$it ms" } ?: "—", "bytes ${formatBytes(event.bytes)}")
-                    MetricLine("RESULT", event.result ?: "—", "event ${event.id}")
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    DetailLine("OPERATION", event.operation, event.kind.name)
+                    DetailLine(
+                        "TIME",
+                        java.text.DateFormat.getTimeInstance().format(java.util.Date(event.timestamp)),
+                        event.transport ?: "transport unavailable"
+                    )
+                    DetailLine("PEER", event.peerNodeId ?: "—", "attempt ${event.attempt ?: 1}")
+                    DetailLine(
+                        "DURATION",
+                        event.durationMs?.let { "$it ms" } ?: "—",
+                        "bytes ${formatBytes(event.bytes)}"
+                    )
+                    DetailLine("RESULT", event.result ?: "—", "event ${event.id}")
                 }
             },
             confirmButton = { TextButton(onClick = { selected = null }) { Text("CLOSE") } }
@@ -307,6 +344,15 @@ private fun MetricLine(label: String, value: String, detail: String) {
             Text(detail, color = RelayTextMuted, style = MaterialTheme.typography.labelSmall)
         }
         Text(value, color = RelayAccent, style = TechnicalTextStyle, modifier = Modifier.padding(start = 10.dp))
+    }
+}
+
+@Composable
+private fun DetailLine(label: String, value: String, detail: String) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, color = RelayTextMuted, style = MaterialTheme.typography.labelSmall)
+        Text(value, color = RelayAccent, style = TechnicalTextStyle)
+        Text(detail, color = RelayTextMuted, style = MaterialTheme.typography.labelSmall)
     }
 }
 

@@ -89,6 +89,7 @@ import com.hybridmesh.relay.ui.components.NodeIdText
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.network.BleRuntimeState
+import com.hybridmesh.relay.network.connectionQuality
 import com.hybridmesh.relay.notifications.MessagingNotificationCoordinator
 import com.hybridmesh.relay.permissions.LocationPermissionLevel
 import com.hybridmesh.relay.permissions.PermissionManager
@@ -117,6 +118,7 @@ fun ConversationScreen(peerNodeId: String) {
     val peers by viewModel.knownPeers.collectAsStateWithLifecycle()
     val networkState by viewModel.networkState.collectAsStateWithLifecycle()
     val meshPeers by viewModel.meshPeers.collectAsStateWithLifecycle()
+    val diagnostics by viewModel.networkDiagnostics.collectAsStateWithLifecycle()
     val meshRuntime by viewModel.meshRuntime.collectAsStateWithLifecycle()
     val messages by viewModel.observeConversation(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
     val attachments by viewModel.observeConversationAttachments(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
@@ -194,6 +196,13 @@ fun ConversationScreen(peerNodeId: String) {
     val displayName = peer?.displayName?.takeIf { it.isNotBlank() && !it.equals(peerNodeId, true) } ?: "Unknown node"
     val nearbyPeer = meshPeers.firstOrNull { it.nodeId.equals(peerNodeId, true) }
     val inRange = nearbyPeer?.hasAnyEndpoint() == true
+    val wifiHealth = nearbyPeer
+        ?.takeIf { !it.wifiHost.isNullOrBlank() }
+        ?.let { diagnostics.peerHealth(it.nodeId, "WIFI_DIRECT") }
+    val connectionQuality = connectionQuality(
+        bleRssi = networkState.peers.firstOrNull { it.nodeId.equals(peerNodeId, true) }?.rssi,
+        wifiHealth = wifiHealth
+    )
 
     LaunchedEffect(peerNodeId, messages.size) {
         if (messages.isNotEmpty()) {
@@ -286,6 +295,22 @@ fun ConversationScreen(peerNodeId: String) {
                     style = MaterialTheme.typography.labelSmall,
                     color = RelayAccent,
                 )
+
+                connectionQuality?.let { quality ->
+                    val hasBle = networkState.peers.any { it.nodeId.equals(peerNodeId, true) }
+                    val hasWifi = !nearbyPeer?.wifiHost.isNullOrBlank()
+                    val sourceLabel = when {
+                        hasBle && hasWifi -> "CONNECTION"
+                        hasWifi -> "WI-FI DIRECT"
+                        else -> "BLE"
+                    }
+                    Text(
+                        "$sourceLabel · ${quality.label}${if (!hasBle || !hasWifi) " · ${quality.detail}" else ""}",
+                        color = RelayTextMuted,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
 
                 if (meshRuntime.availableTransports.isEmpty()) {
                     Text(

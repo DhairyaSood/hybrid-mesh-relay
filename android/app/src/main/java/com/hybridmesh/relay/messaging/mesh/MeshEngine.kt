@@ -76,6 +76,7 @@ class MeshEngine(context: Context) {
         onPeerConnected = ::onWifiPeerConnected,
         onPacket = ::onWifiTransportPacket,
         onPeerDisconnected = ::removeWifiPeer,
+        onPeerHealthSample = ::onWifiPeerHealthSample,
         onAttachmentBegin = ::onAttachmentBegin,
         onAttachmentChunk = ::onAttachmentChunk,
         onAttachmentFinish = ::onAttachmentFinish
@@ -241,6 +242,17 @@ class MeshEngine(context: Context) {
             )
         }
         wakeChannel.trySend(Unit)
+    }
+
+    private fun onWifiPeerHealthSample(nodeId: String, durationMs: Long, success: Boolean) {
+        networkDiagnostics.record(
+            kind = if (success) NetworkEventKind.HEALTH_PROBE_SUCCEEDED else NetworkEventKind.HEALTH_PROBE_FAILED,
+            operation = "wifi.health_probe",
+            transport = MeshTransportKind.WIFI_DIRECT.persistedName,
+            peerNodeId = nodeId,
+            durationMs = durationMs,
+            result = if (success) "ACK" else "TIMEOUT"
+        )
     }
 
     fun removeWifiPeer(nodeId: String) {

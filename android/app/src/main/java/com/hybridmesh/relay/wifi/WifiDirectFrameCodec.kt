@@ -10,6 +10,7 @@ internal object WifiDirectFrameCodec {
     private const val HELLO_MAGIC = 0x4E595231 // NYR1
     private const val FRAME_DATA: Byte = 1
     private const val FRAME_ACK: Byte = 2
+    private const val FRAME_PROBE: Byte = 3
     private const val FRAME_HEADER_BYTES = 1 + java.lang.Long.BYTES
     private const val MIN_FRAME_BYTES = FRAME_HEADER_BYTES + 1
     private const val MAX_FRAME_BYTES = MeshPacketCodec.MAX_PACKET_BYTES + FRAME_HEADER_BYTES
@@ -26,6 +27,7 @@ internal object WifiDirectFrameCodec {
         val transferId: Long
         data class Data(override val transferId: Long, val payload: ByteArray) : Frame
         data class Ack(override val transferId: Long, val accepted: Boolean) : Frame
+        data class Probe(override val transferId: Long) : Frame
     }
 
     fun writeHello(output: DataOutputStream, hello: Hello) {
@@ -58,6 +60,10 @@ internal object WifiDirectFrameCodec {
         writeFrame(output, FRAME_ACK, transferId, byteArrayOf(if (accepted) 1 else 0))
     }
 
+    fun writeProbe(output: DataOutputStream, transferId: Long) {
+        writeFrame(output, FRAME_PROBE, transferId, byteArrayOf(1))
+    }
+
     fun readFrame(input: DataInputStream): Frame {
         val length = input.readInt()
         if (length !in MIN_FRAME_BYTES..MAX_FRAME_BYTES) throw IOException("Invalid frame length")
@@ -78,6 +84,12 @@ internal object WifiDirectFrameCodec {
                     throw IOException("Invalid transport ACK")
                 }
                 Frame.Ack(transferId, payload[0].toInt() == 1)
+            }
+            FRAME_PROBE -> {
+                if (payload.size != 1 || payload[0].toInt() != 1) {
+                    throw IOException("Invalid health probe")
+                }
+                Frame.Probe(transferId)
             }
             else -> throw IOException("Unknown frame type")
         }

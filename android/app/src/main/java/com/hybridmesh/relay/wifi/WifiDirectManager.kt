@@ -36,6 +36,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -75,6 +76,7 @@ class WifiDirectManager(
     private val onPeerConnected: (WifiPeerSessionInfo) -> Unit,
     private val onPacket: suspend (sourceNodeId: String, payload: ByteArray) -> Boolean,
     private val onPeerDisconnected: (nodeId: String) -> Unit,
+    private val onPeerHealthSample: (nodeId: String, durationMs: Long, success: Boolean) -> Unit,
     private val onAttachmentBegin: suspend (sourceNodeId: String, manifest: AttachmentTransferManifest) -> Long?,
     private val onAttachmentChunk: suspend (sourceNodeId: String, manifest: AttachmentTransferManifest, offset: Long, bytes: ByteArray) -> Long?,
     private val onAttachmentFinish: suspend (sourceNodeId: String, manifest: AttachmentTransferManifest) -> Boolean
@@ -90,6 +92,7 @@ class WifiDirectManager(
     private val advertisedServiceDevices = ConcurrentHashMap<String, WifiP2pDevice>()
     private val compatibleServiceAddresses = ConcurrentHashMap.newKeySet<String>()
     private val transferIds = AtomicLong(System.nanoTime())
+    private val healthProbeJob = AtomicReference<Job?>(null)
     private val serviceSetupInProgress = AtomicBoolean(false)
     private val serviceSetupGeneration = AtomicLong(0L)
     private val discoveryRequestInProgress = AtomicBoolean(false)
@@ -205,6 +208,7 @@ class WifiDirectManager(
     fun stop() {
         if (!started && !receiverRegistered) return
         started = false
+        healthProbeJob.getAndSet(null)?.cancel()
         groupFormed = false
         groupOwner = false
         groupOwnerAddress = null
@@ -1026,7 +1030,31 @@ class WifiDirectManager(
         onPeerConnected(remote)
         publishRuntimeState(WifiDirectStage.SESSION_READY)
         session.startReader()
+        ensureHealthProbeLoop()
         return true
+    }
+
+    @Synchronized
+    private fun ensureHealthProbeLoop() {
+        if (healthProbeJob.get() != null) return
+        healthProbeJob.set(scope.launch {
+            try {
+                while (started) {
+                    sessions.values.toList().forEach { peerSession ->
+                        val startedAt = System.nanoTime()
+                        val success = peerSession.probe()
+                        onPeerHealthSample(
+                            peerSession.peer.nodeId,
+                            ((System.nanoTime() - startedAt) / 1_000_000L).coerceAtLeast(0L),
+                            success
+                        )
+                    }
+                    delay(10_000L)
+                }
+            } finally {
+                healthProbeJob.compareAndSet(coroutineContext[Job], null)
+            }
+        })
     }
 
     private inner class PeerSession(
@@ -1050,6 +1078,7 @@ class WifiDirectManager(
                             is WifiDirectFrameCodec.Frame.Ack -> {
                                 pendingAcks.remove(frame.transferId)?.complete(frame.accepted)
                             }
+                            is WifiDirectFrameCodec.Frame.Probe -> writeAck(frame.transferId, true)
                             is WifiDirectFrameCodec.Frame.Data -> {
                                 if (!packetWorkers.tryAcquire()) {
                                     writeAck(frame.transferId, false)
@@ -1063,6 +1092,7 @@ class WifiDirectManager(
                                             } catch (_: Exception) {
                                                 false
                                             }
+
                                             writeAck(frame.transferId, accepted)
                                         } finally {
                                             packetWorkers.release()
@@ -1077,6 +1107,28 @@ class WifiDirectManager(
                 } finally {
                     close(notify = true)
                 }
+            }
+        }
+
+        suspend fun probe(): Boolean {
+            if (closed.get()) return false
+            val transferId = transferIds.incrementAndGet()
+            val deferred = CompletableDeferred<Boolean>()
+            if (pendingAcks.putIfAbsent(transferId, deferred) != null) return false
+            return try {
+                withContext(Dispatchers.IO) {
+                    synchronized(writeLock) {
+                        if (closed.get()) throw IOException("Session closed")
+                        WifiDirectFrameCodec.writeProbe(output, transferId)
+                    }
+                }
+                withTimeoutOrNull(1_500L) { deferred.await() } == true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            } finally {
+                pendingAcks.remove(transferId)
             }
         }
 
