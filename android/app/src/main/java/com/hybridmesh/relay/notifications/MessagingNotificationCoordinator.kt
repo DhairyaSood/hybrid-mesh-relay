@@ -1,5 +1,6 @@
 package com.hybridmesh.relay.notifications
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -47,7 +48,7 @@ class MessagingNotificationCoordinator private constructor(context: Context) {
             .setGroup("neyra_messages")
             .build()
 
-        NotificationManagerCompat.from(appContext).notify(notificationId(key), notification)
+        postNotification(notificationId(key), notification)
     }
 
     fun clearConversation(peerNodeId: String) {
@@ -59,6 +60,14 @@ class MessagingNotificationCoordinator private constructor(context: Context) {
     private fun canPostNotifications(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    @SuppressLint("MissingPermission")
+    private fun postNotification(id: Int, notification: android.app.Notification) {
+        if (!canPostNotifications()) return
+        runCatching {
+            NotificationManagerCompat.from(appContext).notify(id, notification)
+        }
+    }
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return

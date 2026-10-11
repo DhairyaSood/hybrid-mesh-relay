@@ -6,7 +6,6 @@ import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
-import android.widget.MediaController
 import android.widget.VideoView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -37,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.Image
 import androidx.compose.material3.Icon
@@ -44,6 +44,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -75,6 +76,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hybridmesh.relay.messaging.data.AttachmentRecordEntity
 import com.hybridmesh.relay.location.LocationManager
+import com.hybridmesh.relay.location.LocationActions
 import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
@@ -89,6 +91,7 @@ import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBorder
 import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
+import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -125,6 +128,8 @@ fun ConversationScreen(peerNodeId: String) {
     var attachmentError by remember { mutableStateOf<String?>(null) }
     var selectedVideoPath by remember { mutableStateOf<String?>(null) }
     var selectedImagePath by remember { mutableStateOf<String?>(null) }
+    var selectedLocation by remember { mutableStateOf<LocationPayload?>(null) }
+    var locationActionError by remember { mutableStateOf<String?>(null) }
 
     val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
@@ -272,7 +277,14 @@ fun ConversationScreen(peerNodeId: String) {
                                 attachment = attachments.firstOrNull { it.messageId == message.messageId },
                                 incoming = incoming,
                                 onClick = { deleteMessageId = message.messageId },
-                                onLongPress = { diagnosticsMessageId = message.messageId },
+                                onLongPress = {
+                                    val location = LocationPayload.decode(message.content)
+                                    if (message.messageType == MessageType.LOCATION.name && location != null) {
+                                        selectedLocation = location
+                                    } else {
+                                        diagnosticsMessageId = message.messageId
+                                    }
+                                },
                                 onOpenVideo = { selectedVideoPath = it },
                                 onOpenImage = { selectedImagePath = it }
                             )
@@ -396,14 +408,88 @@ fun ConversationScreen(peerNodeId: String) {
         )
     }
 
+    selectedLocation?.let { payload ->
+        AlertDialog(
+            onDismissRequest = { selectedLocation = null },
+            title = { Text("LOCATION ACTIONS") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "${LocationPayload.formatCoordinate(payload.latitude)}, " +
+                            LocationPayload.formatCoordinate(payload.longitude),
+                        style = TechnicalTextStyle
+                    )
+                    payload.accuracyMeters?.let {
+                        Text("Accuracy ±${it.toInt()} m", color = RelayTextMuted)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (!LocationActions.openInMaps(context, payload)) {
+                            locationActionError = "No browser or Google Maps app can open this location."
+                        }
+                        selectedLocation = null
+                    }
+                ) { Text("OPEN IN GOOGLE MAPS") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        clipboard.setText(
+                            AnnotatedString(
+                                "${payload.latitude},${payload.longitude}"
+                            )
+                        )
+                        selectedLocation = null
+                    }) { Text("COPY COORDINATES") }
+                    TextButton(onClick = { selectedLocation = null }) { Text("CANCEL") }
+                }
+            }
+        )
+    }
+
+    locationActionError?.let { error ->
+        AlertDialog(
+            onDismissRequest = { locationActionError = null },
+            title = { Text("LOCATION UNAVAILABLE") },
+            text = { Text(error) },
+            confirmButton = {
+                TextButton(onClick = { locationActionError = null }) { Text("OK") }
+            }
+        )
+    }
+
     selectedImagePath?.let { path ->
         AttachmentImageViewer(path, onDismiss = { selectedImagePath = null })
     }
 
     selectedVideoPath?.let { path ->
         var player by remember(path) { mutableStateOf<VideoView?>(null) }
+        var prepared by remember(path) { mutableStateOf(false) }
+        var playing by remember(path) { mutableStateOf(false) }
+        var durationMs by remember(path) { mutableStateOf(0) }
+        var positionMs by remember(path) { mutableStateOf(0) }
+        var bufferedPercent by remember(path) { mutableStateOf(0) }
+        var seekPosition by remember(path) { mutableStateOf<Float?>(null) }
+        var playbackError by remember(path) { mutableStateOf<String?>(null) }
         DisposableEffect(path) {
-            onDispose { player?.stopPlayback() }
+            onDispose {
+                player?.stopPlayback()
+                player = null
+            }
+        }
+        LaunchedEffect(path, player, prepared) {
+            while (player != null && prepared) {
+                val activePlayer = player ?: break
+                if (seekPosition == null) {
+                    positionMs = activePlayer.currentPosition.coerceAtLeast(0)
+                }
+                playing = activePlayer.isPlaying
+                bufferedPercent = activePlayer.bufferPercentage.coerceIn(0, 100)
+                kotlinx.coroutines.delay(250L)
+            }
         }
         Dialog(
             onDismissRequest = { selectedVideoPath = null },
@@ -416,24 +502,98 @@ fun ConversationScreen(peerNodeId: String) {
                         factory = { playerContext ->
                             VideoView(playerContext).apply {
                                 player = this
-                                val controller = MediaController(playerContext)
-                                controller.setAnchorView(this)
-                                setMediaController(controller)
                                 setVideoPath(path)
-                                setOnPreparedListener { it.start() }
+                                setOnPreparedListener { mediaPlayer ->
+                                    prepared = true
+                                    durationMs = mediaPlayer.duration.coerceAtLeast(0)
+                                    mediaPlayer.start()
+                                    playing = true
+                                }
+                                setOnCompletionListener { playing = false; positionMs = durationMs }
+                                setOnErrorListener { _, what, extra ->
+                                    playbackError = "Playback error $what/$extra"
+                                    prepared = false
+                                    playing = false
+                                    true
+                                }
                             }
                         }
                     )
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                        color = Color.Black.copy(alpha = 0.78f)
+                    ) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            if (playbackError != null) {
+                                Text(playbackError!!, color = MaterialTheme.colorScheme.error)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = {
+                                        val activePlayer = player ?: return@IconButton
+                                        if (activePlayer.isPlaying) {
+                                            activePlayer.pause()
+                                            playing = false
+                                        } else {
+                                            activePlayer.start()
+                                            playing = true
+                                        }
+                                    },
+                                    enabled = prepared
+                                ) {
+                                    Icon(
+                                        imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                        contentDescription = if (playing) "Pause video" else "Play video",
+                                        tint = Color.White
+                                    )
+                                }
+                                Slider(
+                                    value = seekPosition ?: positionMs.toFloat(),
+                                    onValueChange = { value ->
+                                        seekPosition = value
+                                        positionMs = value.toInt()
+                                    },
+                                    onValueChangeFinished = {
+                                        seekPosition?.let { player?.seekTo(it.toInt()) }
+                                        seekPosition = null
+                                    },
+                                    valueRange = 0f..durationMs.coerceAtLeast(1).toFloat(),
+                                    enabled = prepared && durationMs > 0,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(formatVideoTime(seekPosition?.toInt() ?: positionMs), color = Color.White, style = TechnicalTextStyle)
+                                Text(
+                                    if (prepared) "${bufferedPercent}% buffered · ${formatVideoTime(durationMs)}"
+                                    else "Preparing video…",
+                                    color = Color.White.copy(alpha = 0.7f),
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    }
                     TextButton(
                         onClick = { selectedVideoPath = null },
                         modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
                     ) { Text("CLOSE", color = Color.White) }
                 }
             }
+
         }
     }
 }
 
+private fun formatVideoTime(milliseconds: Int): String {
+    val totalSeconds = (milliseconds / 1_000).coerceAtLeast(0)
+    return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
+}
 
 private fun conversationDateKey(timestamp: Long): String =
     SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))

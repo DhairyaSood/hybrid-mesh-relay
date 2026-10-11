@@ -22,6 +22,8 @@ import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.network.NetworkManager
+import com.hybridmesh.relay.network.NetworkDiagnostics
+import com.hybridmesh.relay.network.NetworkEventKind
 import com.hybridmesh.relay.notifications.MessagingNotificationCoordinator
 import com.hybridmesh.relay.wifi.WifiDirectManager
 import com.hybridmesh.relay.wifi.WifiPeerSessionInfo
@@ -55,6 +57,7 @@ import kotlinx.coroutines.sync.withPermit
 class MeshEngine(context: Context) {
     private val appContext = context.applicationContext
     private val networkManager = NetworkManager.getInstance(appContext)
+    private val networkDiagnostics = NetworkDiagnostics.getInstance()
     private val repository = MessagingRepository.getInstance(appContext)
     private val identityStore = IdentityStore.getInstance(appContext)
     private val peerDirectory = MeshPeerDirectory()
@@ -858,6 +861,15 @@ class MeshEngine(context: Context) {
                 )
             }
             val startedAt = System.nanoTime()
+            networkDiagnostics.record(
+                kind = NetworkEventKind.REQUEST_STARTED,
+                operation = "mesh.send",
+                correlationId = packet.messageId,
+                transport = transport.kind.persistedName,
+                peerNodeId = peer.nodeId,
+                bytes = bytes.size.toLong(),
+                attempt = attempt
+            )
             repository.recordTraceEvent(
                 messageId = packet.messageId,
                 packetId = packet.packetId,
@@ -886,20 +898,57 @@ class MeshEngine(context: Context) {
                         durationMs = durationMs,
                         resultCode = "ACCEPTED"
                     )
+                    networkDiagnostics.record(
+                        kind = NetworkEventKind.REQUEST_SUCCEEDED,
+                        operation = "mesh.send",
+                        correlationId = packet.messageId,
+                        transport = result.transport.persistedName,
+                        peerNodeId = peer.nodeId,
+                        durationMs = durationMs,
+                        bytes = bytes.size.toLong(),
+                        attempt = attempt,
+                        result = "ACCEPTED"
+                    )
                     return result.transport
                 }
-                is MeshTransportSendResult.Unavailable -> repository.recordTraceEvent(
-                    messageId = packet.messageId, packetId = packet.packetId,
-                    eventType = "SEND_ATTEMPT_FAILED", transport = transport.kind.persistedName,
-                    peerNodeId = peer.nodeId, attemptNumber = attempt, durationMs = durationMs,
-                    resultCode = "UNAVAILABLE", detail = result.reason
-                )
-                is MeshTransportSendResult.Failed -> repository.recordTraceEvent(
-                    messageId = packet.messageId, packetId = packet.packetId,
-                    eventType = "SEND_ATTEMPT_FAILED", transport = transport.kind.persistedName,
-                    peerNodeId = peer.nodeId, attemptNumber = attempt, durationMs = durationMs,
-                    resultCode = "FAILED", detail = result.reason
-                )
+                is MeshTransportSendResult.Unavailable -> {
+                    repository.recordTraceEvent(
+                        messageId = packet.messageId, packetId = packet.packetId,
+                        eventType = "SEND_ATTEMPT_FAILED", transport = transport.kind.persistedName,
+                        peerNodeId = peer.nodeId, attemptNumber = attempt, durationMs = durationMs,
+                        resultCode = "UNAVAILABLE", detail = result.reason
+                    )
+                    networkDiagnostics.record(
+                        kind = NetworkEventKind.REQUEST_UNAVAILABLE,
+                        operation = "mesh.send",
+                        correlationId = packet.messageId,
+                        transport = transport.kind.persistedName,
+                        peerNodeId = peer.nodeId,
+                        durationMs = durationMs,
+                        bytes = bytes.size.toLong(),
+                        attempt = attempt,
+                        result = result.reason
+                    )
+                }
+                is MeshTransportSendResult.Failed -> {
+                    repository.recordTraceEvent(
+                        messageId = packet.messageId, packetId = packet.packetId,
+                        eventType = "SEND_ATTEMPT_FAILED", transport = transport.kind.persistedName,
+                        peerNodeId = peer.nodeId, attemptNumber = attempt, durationMs = durationMs,
+                        resultCode = "FAILED", detail = result.reason
+                    )
+                    networkDiagnostics.record(
+                        kind = NetworkEventKind.REQUEST_FAILED,
+                        operation = "mesh.send",
+                        correlationId = packet.messageId,
+                        transport = transport.kind.persistedName,
+                        peerNodeId = peer.nodeId,
+                        durationMs = durationMs,
+                        bytes = bytes.size.toLong(),
+                        attempt = attempt,
+                        result = result.reason
+                    )
+                }
             }
         }
         return null

@@ -566,12 +566,22 @@ class NetworkManager private constructor(context: Context) {
     private fun markTransportUnavailable(event: BleRuntimeEvent) {
         if (!transportWasAvailable) return
         transportWasAvailable = false
+        NetworkDiagnostics.getInstance().record(
+            kind = NetworkEventKind.TRANSPORT_UNAVAILABLE,
+            operation = "ble.runtime",
+            result = event.name
+        )
         _runtimeEvents.tryEmit(event)
     }
 
     private fun markTransportAvailable() {
         if (transportWasAvailable) return
         transportWasAvailable = true
+        NetworkDiagnostics.getInstance().record(
+            kind = NetworkEventKind.TRANSPORT_AVAILABLE,
+            operation = "ble.runtime",
+            result = BleRuntimeEvent.TRANSPORT_AVAILABLE.name
+        )
         _runtimeEvents.tryEmit(BleRuntimeEvent.TRANSPORT_AVAILABLE)
     }
 

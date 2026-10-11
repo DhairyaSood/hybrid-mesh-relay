@@ -20,6 +20,8 @@ import com.hybridmesh.relay.messaging.model.ChatSummary
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.network.NetworkManager
+import com.hybridmesh.relay.network.NetworkDiagnostics
+import com.hybridmesh.relay.network.NetworkDiagnosticsSnapshot
 import com.hybridmesh.relay.network.NetworkState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
@@ -42,6 +44,8 @@ class MessagesViewModel(
     private val messagingManager = MessagingManager.getInstance(application)
     val identity = identityStore.identity
     val networkState: StateFlow<NetworkState> = networkManager.state
+    val networkDiagnostics: StateFlow<NetworkDiagnosticsSnapshot> =
+        NetworkDiagnostics.getInstance().snapshot
     val meshPeers: StateFlow<List<MeshPeer>> = messagingManager.meshPeers
     val meshRuntime: StateFlow<MeshRuntimeSnapshot> = messagingManager.mesh
 

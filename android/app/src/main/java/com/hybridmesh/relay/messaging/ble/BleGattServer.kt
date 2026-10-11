@@ -1,6 +1,7 @@
 package com.hybridmesh.relay.messaging.ble
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
@@ -12,7 +13,9 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
@@ -164,7 +167,7 @@ class BleGattServer(context: Context) {
         } catch (_: SecurityException) {
             readiness?.complete(false)
             readiness = null
-            runCatching { server?.close() }
+            closeServerSafely()
             server = null
             rxCharacteristic = null
             txCharacteristic = null
@@ -173,7 +176,7 @@ class BleGattServer(context: Context) {
         } catch (_: Exception) {
             readiness?.complete(false)
             readiness = null
-            runCatching { server?.close() }
+            closeServerSafely()
             server = null
             rxCharacteristic = null
             txCharacteristic = null
@@ -200,8 +203,10 @@ class BleGattServer(context: Context) {
         assemblyCleanupJob = null
         subscribedDevices.clear()
         lastAckDeliverySucceeded = null
-        runCatching { server?.clearServices() }
-        runCatching { server?.close() }
+        if (hasConnectPermission()) {
+            runCatching { server?.clearServices() }
+            closeServerSafely()
+        }
         server = null
         rxCharacteristic = null
         txCharacteristic = null
@@ -216,6 +221,33 @@ class BleGattServer(context: Context) {
                 val cutoff = System.currentTimeMillis() - ASSEMBLY_TIMEOUT_MS
                 assemblies.entries.removeIf { it.value.lastUpdatedAt < cutoff }
             }
+        }
+    }
+
+    private fun hasConnectPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+
+    @SuppressLint("MissingPermission")
+    private fun closeServerSafely() {
+        if (hasConnectPermission()) {
+            runCatching { server?.close() }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sendResponseSafely(
+        device: BluetoothDevice,
+        requestId: Int,
+        status: Int,
+        offset: Int,
+        value: ByteArray?
+    ) {
+        if (hasConnectPermission()) {
+            runCatching { server?.sendResponse(device, requestId, status, offset, value) }
         }
     }
 
@@ -235,7 +267,7 @@ class BleGattServer(context: Context) {
 
                 if (!success) {
                     readiness = null
-                    runCatching { server?.close() }
+                    closeServerSafely()
                     server = null
                     rxCharacteristic = null
                     txCharacteristic = null
@@ -294,7 +326,7 @@ class BleGattServer(context: Context) {
                 }
 
                 if (responseNeeded) {
-                    server?.sendResponse(
+                    sendResponseSafely(
                         device,
                         requestId,
                         status,
@@ -313,7 +345,7 @@ class BleGattServer(context: Context) {
                 if (callbackGeneration != serverGeneration) return
 
                 if (characteristic.uuid != BleGattConstants.IDENTITY_CHARACTERISTIC_UUID) {
-                    server?.sendResponse(
+                    sendResponseSafely(
                         device,
                         requestId,
                         BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED,
@@ -326,7 +358,7 @@ class BleGattServer(context: Context) {
                 val identityBytes = buildIdentityPayload()
 
                 if (offset < 0 || offset > identityBytes.size) {
-                    server?.sendResponse(
+                    sendResponseSafely(
                         device,
                         requestId,
                         BluetoothGatt.GATT_INVALID_OFFSET,
@@ -341,7 +373,7 @@ class BleGattServer(context: Context) {
                     offset + BleGattConstants.DEFAULT_ATT_PAYLOAD_BYTES
                 )
 
-                server?.sendResponse(
+                sendResponseSafely(
                     device,
                     requestId,
                     BluetoothGatt.GATT_SUCCESS,
@@ -368,7 +400,7 @@ class BleGattServer(context: Context) {
 
                 if (!supported) {
                     if (responseNeeded) {
-                        server?.sendResponse(
+                        sendResponseSafely(
                             device,
                             requestId,
                             BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED,
@@ -380,7 +412,7 @@ class BleGattServer(context: Context) {
                 }
 
                 if (responseNeeded) {
-                    server?.sendResponse(
+                    sendResponseSafely(
                         device,
                         requestId,
                         BluetoothGatt.GATT_SUCCESS,
