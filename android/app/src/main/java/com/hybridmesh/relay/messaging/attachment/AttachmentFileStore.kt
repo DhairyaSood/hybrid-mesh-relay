@@ -21,19 +21,35 @@ data class ImportedAttachment(
 object AttachmentFileStore {
     private const val CHUNK_BYTES = 64 * 1024
 
-    fun importPickedFile(context: Context, uri: Uri): ImportedAttachment {
+    fun importPickedFile(
+        context: Context,
+        uri: Uri,
+        transportLimitBytes: Long = AttachmentDescriptor.MAX_ATTACHMENT_BYTES
+    ): ImportedAttachment {
+        val effectiveLimit = transportLimitBytes.coerceIn(1L, AttachmentDescriptor.MAX_ATTACHMENT_BYTES)
         val resolver = context.contentResolver
         val mime = resolver.getType(uri)?.lowercase()
             ?: throw IllegalArgumentException("Could not determine whether this is an image or video.")
         if (!mime.startsWith("image/") && !mime.startsWith("video/")) {
             throw IllegalArgumentException("Choose an image or video.")
         }
-        val suppliedName = runCatching {
-            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) cursor.getString(0) else null
+        if (mime.toByteArray(Charsets.UTF_8).size > AttachmentTransferManifest.MAX_MIME_TYPE_UTF8_BYTES) {
+            throw IllegalArgumentException("The selected file has an unsupported media type.")
+        }
+        val suppliedMetadata = runCatching {
+            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                (nameIndex.takeIf { it >= 0 }?.let(cursor::getString)) to
+                    sizeIndex.takeIf { it >= 0 }?.let(cursor::getLong)?.takeIf { it >= 0L }
             }
         }.getOrNull()
-        val displayName = sanitizeName(suppliedName?.takeIf { it.isNotBlank() } ?: defaultName(mime))
+        val displayName = sanitizeName(suppliedMetadata?.first?.takeIf { it.isNotBlank() } ?: defaultName(mime))
+        suppliedMetadata?.second?.let { size ->
+            if (size > AttachmentDescriptor.MAX_ATTACHMENT_BYTES) throw IllegalArgumentException(globalSizeLimitMessage())
+            if (size > effectiveLimit) throw IllegalArgumentException(transportSizeLimitMessage())
+        }
         val dir = attachmentDirectory(context)
         val temp = File(dir, "${UUID.randomUUID()}.part")
         val target = File(dir, "${UUID.randomUUID()}.media")
@@ -49,9 +65,8 @@ object AttachmentFileStore {
                         if (count < 0) break
                         if (count == 0) continue
                         total += count
-                        if (total > AttachmentDescriptor.MAX_ATTACHMENT_BYTES) {
-                            throw IllegalArgumentException("The file is larger than 10 MB.")
-                        }
+                        if (total > AttachmentDescriptor.MAX_ATTACHMENT_BYTES) throw IllegalArgumentException(globalSizeLimitMessage())
+                        if (total > effectiveLimit) throw IllegalArgumentException(transportSizeLimitMessage())
                         digest.update(buffer, 0, count)
                         output.write(buffer, 0, count)
                     }
@@ -142,12 +157,28 @@ object AttachmentFileStore {
     private fun stableFileKey(value: String): String =
         MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).toHex()
 
-    private fun sanitizeName(name: String): String =
-        name.substringAfterLast('/').substringAfterLast('\\')
+    private fun sanitizeName(name: String): String {
+        val filtered = name.substringAfterLast('/').substringAfterLast('\\')
             .filter { it.isLetterOrDigit() || it in ". _-()" }
-            .trim().take(100).ifBlank { "attachment" }
+            .trim()
+        val result = StringBuilder()
+        var encodedBytes = 0
+        for (character in filtered) {
+            if (result.length >= 100) break
+            val charBytes = character.toString().toByteArray(Charsets.UTF_8).size
+            if (encodedBytes + charBytes > AttachmentTransferManifest.MAX_DISPLAY_NAME_UTF8_BYTES) break
+            result.append(character)
+            encodedBytes += charBytes
+        }
+        return result.toString().trim().ifBlank { "attachment" }
+    }
 
     private fun defaultName(mime: String): String = if (mime.startsWith("video/")) "video" else "image"
+
+    private fun globalSizeLimitMessage(): String = "This file exceeds Neyra’s 10 MB image and video limit."
+
+    private fun transportSizeLimitMessage(): String =
+        "This file is over 5 MB. Connect a Wi‑Fi Direct peer to send files up to 10 MB; BLE is limited to 5 MB."
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 

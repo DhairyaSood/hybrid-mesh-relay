@@ -68,6 +68,9 @@ class MessagingManager private constructor(context: Context) {
         gattServer.setPacketReceiver { device, payload ->
             meshEngine.onBleTransportPacket(device, payload)
         }
+        gattServer.setAttachmentReceiver { device, payload ->
+            meshEngine.onBleAttachmentFrame(device, payload)
+        }
 
         jobs += scope.launch {
             var success = false
@@ -160,6 +163,7 @@ class MessagingManager private constructor(context: Context) {
         jobs.forEach(Job::cancel)
         jobs.clear()
         gattServer.setPacketReceiver(null)
+        gattServer.setAttachmentReceiver(null)
         gattServer.stop()
         meshEngine.stop()
         networkManager.setGattServerReady(false)

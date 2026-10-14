@@ -82,6 +82,7 @@ import com.hybridmesh.relay.location.LocationActions
 import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferError
 import com.hybridmesh.relay.messaging.attachment.AttachmentExport
 import com.hybridmesh.relay.messaging.attachment.AttachmentExportResult
 import com.hybridmesh.relay.messaging.attachment.AttachmentExportSource
@@ -438,10 +439,6 @@ fun ConversationScreen(peerNodeId: String) {
                 if (locationError != null) {
                     Text(locationError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 46.dp, top = 4.dp))
                 }
-                if (attachmentError != null) {
-                    Text(attachmentError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 46.dp, top = 4.dp))
-                }
-
             }
         }
     }
@@ -532,6 +529,17 @@ fun ConversationScreen(peerNodeId: String) {
             text = { Text(error) },
             confirmButton = {
                 TextButton(onClick = { locationActionError = null }) { Text("OK") }
+            }
+        )
+    }
+
+    attachmentError?.let { error ->
+        AlertDialog(
+            onDismissRequest = { attachmentError = null },
+            title = { Text("CAN’T SEND THIS FILE") },
+            text = { Text(error) },
+            confirmButton = {
+                TextButton(onClick = { attachmentError = null }) { Text("OK") }
             }
         )
     }
@@ -769,21 +777,35 @@ private fun MessageBubble(
                 Text(formatAttachmentSize(descriptor.sizeBytes), style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
                 val state = attachment?.status ?: AttachmentTransferStatus.WAITING_WIFI
                 val progress = attachment?.transferredBytes ?: 0L
+                val needsWifiForLargeFile = attachment?.lastError ==
+                    AttachmentTransferError.WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT
                 Text(
-                    when (state) {
-                        AttachmentTransferStatus.DELIVERED -> if (attachment?.localPath != null) "AVAILABLE" else "DELIVERED"
-                        AttachmentTransferStatus.SENDING -> "SENDING · ${formatAttachmentSize(progress)}"
-                        AttachmentTransferStatus.RECEIVING -> "RECEIVING · ${formatAttachmentSize(progress)}"
-                        AttachmentTransferStatus.RELAYED -> "FORWARDED · AWAITING RECIPIENT"
-                        AttachmentTransferStatus.RELAY_QUEUED -> "WAITING FOR WI-FI RELAY"
-                        AttachmentTransferStatus.FAILED -> "TRANSFER FAILED"
-                        AttachmentTransferStatus.QUEUED,
-                        AttachmentTransferStatus.WAITING_WIFI -> "WAITING FOR WI-FI DIRECT"
-                        else -> "WAITING FOR WI-FI DIRECT"
+                    when {
+                        needsWifiForLargeFile && state == AttachmentTransferStatus.WAITING_WIFI -> "WAITING · WI-FI DIRECT REQUIRED"
+                        needsWifiForLargeFile -> "NOT SENT · WI-FI DIRECT REQUIRED"
+                        state == AttachmentTransferStatus.DELIVERED -> if (attachment?.localPath != null) "AVAILABLE" else "DELIVERED"
+                        state == AttachmentTransferStatus.SENDING -> "SENDING · ${formatAttachmentSize(progress)}"
+                        state == AttachmentTransferStatus.RECEIVING -> "RECEIVING · ${formatAttachmentSize(progress)}"
+                        state == AttachmentTransferStatus.RELAYED -> "FORWARDED · AWAITING RECIPIENT"
+                        state == AttachmentTransferStatus.RELAY_QUEUED -> "WAITING FOR RELAY LINK"
+                        state == AttachmentTransferStatus.FAILED -> "TRANSFER FAILED"
+                        state == AttachmentTransferStatus.QUEUED || state == AttachmentTransferStatus.WAITING_WIFI -> "WAITING FOR A COMPATIBLE LINK"
+                        else -> "WAITING FOR A COMPATIBLE LINK"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color = if (state == AttachmentTransferStatus.FAILED) MaterialTheme.colorScheme.error else RelayTextMuted
                 )
+                if (needsWifiForLargeFile) {
+                    Text(
+                        if (state == AttachmentTransferStatus.WAITING_WIFI) {
+                            "Connect a Wi-Fi Direct peer; this queued transfer will resume automatically. BLE supports files up to 5 MB."
+                        } else {
+                            "Connect a Wi-Fi Direct peer, then select the file again. BLE supports files up to 5 MB."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             } else if (payload != null) {
                 Text("LOCATION", style = MaterialTheme.typography.labelSmall, color = RelayAccent, fontWeight = FontWeight.Bold)
                 Text("${LocationPayload.formatCoordinate(payload.latitude)}, ${LocationPayload.formatCoordinate(payload.longitude)}", color = MaterialTheme.colorScheme.onSurface)

@@ -40,6 +40,7 @@ class NetworkManager private constructor(context: Context) {
     private val bluetoothManager = appContext.getSystemService(BluetoothManager::class.java)
     private val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
     private val identityStore = IdentityStore.getInstance(appContext)
+    private val transportPreferences = MeshTransportPreferences.getInstance(appContext)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val recoveryMutex = Mutex()
 
@@ -50,6 +51,7 @@ class NetworkManager private constructor(context: Context) {
     private val _initializationState = MutableStateFlow(InitializationState.BOOTSTRAPPING)
     private val _internetAvailable = MutableStateFlow(detectInternetAvailability())
     private val _blePermissions = MutableStateFlow(PermissionManager.ble(appContext))
+    private val _bleEnabled = MutableStateFlow(transportPreferences.selection.value.bleEnabled)
     private val _networkEnabled = MutableStateFlow(false)
     private val _discoveryRequested = MutableStateFlow(false)
     private val _gattServerReady = MutableStateFlow(false)
@@ -71,6 +73,7 @@ class NetworkManager private constructor(context: Context) {
     @Volatile private var gattStarter: (suspend () -> Boolean)? = null
     @Volatile private var gattStopper: (() -> Unit)? = null
     @Volatile private var transportWasAvailable = false
+    @Volatile private var bleBearerStopped = !_bleEnabled.value
 
     private val bluetoothReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -108,11 +111,25 @@ class NetworkManager private constructor(context: Context) {
         }
 
         runtimeStarted = true
+        _bleEnabled.value = transportPreferences.selection.value.bleEnabled
+        bleBearerStopped = !_bleEnabled.value
         _networkEnabled.value = true
-        _discoveryRequested.value = true
+        _discoveryRequested.value = _bleEnabled.value
         _initializationState.value = InitializationState.CHECKING_PERMISSIONS
         registerBluetoothReceiver()
         registerConnectivityCallback()
+
+        runtimeJobs += scope.launch {
+            transportPreferences.selection.collect { selection ->
+                val wasEnabled = _bleEnabled.value
+                _bleEnabled.value = selection.bleEnabled
+                _discoveryRequested.value = selection.bleEnabled
+                if (selection.bleEnabled) bleBearerStopped = false
+                if (wasEnabled && !selection.bleEnabled) stopBleBearer()
+                reconcileRuntime()
+                publishState()
+            }
+        }
 
         runtimeJobs += scope.launch {
             bleAdvertiser.state.collect { state ->
@@ -225,6 +242,9 @@ class NetworkManager private constructor(context: Context) {
     }
 
     fun refresh() {
+        _bleEnabled.value = transportPreferences.selection.value.bleEnabled
+        if (!runtimeStarted) bleBearerStopped = !_bleEnabled.value
+        _discoveryRequested.value = _bleEnabled.value
         _initializationState.value =
             if (!runtimeStarted) {
                 InitializationState.BOOTSTRAPPING
@@ -329,6 +349,13 @@ class NetworkManager private constructor(context: Context) {
     private fun reconcileRuntime() {
         _blePermissions.value = PermissionManager.ble(appContext)
 
+        if (!_bleEnabled.value) {
+            stopBleBearer()
+            _initializationState.value = InitializationState.DISABLED
+            publishState()
+            return
+        }
+
         val supported = isBleSupported()
         val permissions = _blePermissions.value
         val bluetoothReady = _bluetoothState.value == BluetoothState.ON
@@ -351,6 +378,18 @@ class NetworkManager private constructor(context: Context) {
                 requestRecovery()
             }
         }
+    }
+
+    private fun stopBleBearer() {
+        if (bleBearerStopped) return
+        bleBearerStopped = true
+        cancelRecovery()
+        incrementGeneration()
+        _gattServerReady.value = false
+        bleScanner.stopScanning(clearPeers = true)
+        bleAdvertiser.stopAdvertising()
+        gattStopper?.invoke()
+        markTransportUnavailable(BleRuntimeEvent.TRANSPORT_UNAVAILABLE)
     }
 
     private fun requestRecovery() {
@@ -587,6 +626,9 @@ class NetworkManager private constructor(context: Context) {
 
     private fun updateInitializationState() {
         _initializationState.value = when {
+            !_bleEnabled.value ->
+                InitializationState.DISABLED
+
             !isBleSupported() ->
                 InitializationState.DEGRADED
 
@@ -630,12 +672,16 @@ class NetworkManager private constructor(context: Context) {
 
     private fun isBleRuntimeUsable(): Boolean =
         runtimeStarted &&
+            _bleEnabled.value &&
             _blePermissions.value.allGranted &&
             _bluetoothState.value == BluetoothState.ON &&
             isBleSupported() &&
             identityStore.isNicknameConfigured()
 
     private fun buildRuntimeState(): BleRuntimeState = when {
+        !_bleEnabled.value ->
+            BleRuntimeState.DISABLED
+
         !isBleSupported() ->
             BleRuntimeState.UNSUPPORTED
 
@@ -680,6 +726,7 @@ class NetworkManager private constructor(context: Context) {
         permissionsGranted = _blePermissions.value.allGranted,
         internetAvailable = _internetAvailable.value,
         networkEnabled = _networkEnabled.value,
+        bleEnabled = _bleEnabled.value,
         discoveryRequested = _discoveryRequested.value,
         gattServerReady = _gattServerReady.value,
         advertisingState = bleAdvertiser.state.value,

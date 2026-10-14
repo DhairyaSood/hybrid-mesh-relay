@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
+import com.hybridmesh.relay.network.MeshTransportSelection
 
 data class BlePermissionState(
     val scanGranted: Boolean,
@@ -105,6 +106,27 @@ object PermissionManager {
      */
     fun hasAnyMeshTransportPermissionGranted(context: Context): Boolean =
         ble(context).allGranted || wifiDirectPermissionGranted(context)
+
+    fun missingEnabledMeshPermissions(
+        context: Context,
+        selection: MeshTransportSelection
+    ): Array<String> = buildList {
+        if (selection.bleEnabled) addAll(missingBlePermissions(context))
+        if (selection.wifiDirectEnabled) {
+            val wifiPermission = if (requiresNearbyWifiDevicesPermission(context)) {
+                "android.permission.NEARBY_WIFI_DEVICES"
+            } else {
+                Manifest.permission.ACCESS_FINE_LOCATION
+            }
+            if (!granted(context, wifiPermission)) add(wifiPermission)
+        }
+    }.distinct().toTypedArray()
+
+    fun hasEnabledMeshTransportPermissionGranted(
+        context: Context,
+        selection: MeshTransportSelection
+    ): Boolean = (selection.bleEnabled && ble(context).allGranted) ||
+        (selection.wifiDirectEnabled && wifiDirectPermissionGranted(context))
 
     fun hasCompletedMeshPermissionRequest(context: Context): Boolean =
         prefs(context).getBoolean(KEY_MESH_PERMISSION_REQUEST_COMPLETED, false)

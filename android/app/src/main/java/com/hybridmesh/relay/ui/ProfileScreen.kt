@@ -1,6 +1,8 @@
 package com.hybridmesh.relay.ui
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -16,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -30,6 +33,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hybridmesh.relay.data.NicknamePolicy
+import com.hybridmesh.relay.messaging.MessagingManager
+import com.hybridmesh.relay.network.MeshTransportPreferences
+import com.hybridmesh.relay.network.NetworkManager
+import com.hybridmesh.relay.permissions.PermissionManager
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelayBackground
 import com.hybridmesh.relay.ui.theme.RelayBorder
@@ -44,6 +51,13 @@ fun ProfileScreen() {
     val context = LocalContext.current
     val viewModel: ProfileViewModel = viewModel()
     val identity by viewModel.identity.collectAsStateWithLifecycle()
+    val mesh by MessagingManager.getInstance(context).mesh.collectAsStateWithLifecycle()
+    val transportPreferences = MeshTransportPreferences.getInstance(context)
+    val selection by transportPreferences.selection.collectAsStateWithLifecycle()
+    val networkManager = NetworkManager.getInstance(context)
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        networkManager.refresh()
+    }
     var deviceName by remember(identity.deviceName) { mutableStateOf(identity.deviceName) }
     val cleanedUsername = NicknamePolicy.clean(deviceName)
     val validationError = NicknamePolicy.errorMessage(deviceName)
@@ -83,6 +97,54 @@ fun ProfileScreen() {
             }
         }
         item {
+            Column(
+                Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large)
+                    .border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("MESH TRANSPORTS", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
+                Text(
+                    "Quick controls for Neyra. These switches do not change Bluetooth or Wi-Fi in Android settings.",
+                    color = RelayTextMuted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                ProfileTransportSwitch(
+                    label = "Bluetooth LE",
+                    status = when {
+                        !selection.bleEnabled -> "App disabled"
+                        mesh.availableTransports.contains("BLE_GATT") -> "Ready"
+                        else -> "Enabled · waiting"
+                    },
+                    checked = selection.bleEnabled,
+                    onCheckedChange = { enabled ->
+                        transportPreferences.setBleEnabled(enabled)
+                        if (enabled) {
+                            val desired = selection.copy(bleEnabled = true)
+                            val missing = PermissionManager.missingEnabledMeshPermissions(context, desired)
+                            if (missing.isNotEmpty()) permissionLauncher.launch(missing)
+                        }
+                    }
+                )
+                ProfileTransportSwitch(
+                    label = "Wi-Fi Direct",
+                    status = when {
+                        !selection.wifiDirectEnabled -> "App disabled"
+                        mesh.availableTransports.contains("WIFI_DIRECT") -> "Ready · ${mesh.connectedWifiPeers} peer(s)"
+                        else -> "Enabled · ${mesh.wifiDirectStage.lowercase().replace('_', ' ')}"
+                    },
+                    checked = selection.wifiDirectEnabled,
+                    onCheckedChange = { enabled ->
+                        transportPreferences.setWifiDirectEnabled(enabled)
+                        if (enabled) {
+                            val desired = selection.copy(wifiDirectEnabled = true)
+                            val missing = PermissionManager.missingEnabledMeshPermissions(context, desired)
+                            if (missing.isNotEmpty()) permissionLauncher.launch(missing)
+                        }
+                    }
+                )
+            }
+        }
+        item {
             InfoRow(label = "Node ID", value = identity.nodeId)
         }
         item { InfoRow("Device type", identity.deviceType.name) }
@@ -95,6 +157,22 @@ fun ProfileScreen() {
             )
         }
         item { Spacer(Modifier.height(4.dp)) }
+    }
+}
+
+@Composable
+private fun ProfileTransportSwitch(
+    label: String,
+    status: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            Text(status, color = RelayTextMuted, style = MaterialTheme.typography.labelSmall)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 

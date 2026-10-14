@@ -6,7 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.LocationManager as AndroidLocationManager
 import android.net.NetworkInfo
+import android.provider.Settings
 import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
@@ -21,6 +23,9 @@ import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.data.NodeIdGenerator
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.mesh.MeshPacketCodec
+import com.hybridmesh.relay.network.MeshTransportPreferences
+import com.hybridmesh.relay.network.NetworkDiagnostics
+import com.hybridmesh.relay.network.NetworkEventKind
 import com.hybridmesh.relay.permissions.PermissionManager
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -83,6 +88,8 @@ class WifiDirectManager(
 ) {
     private val appContext = context.applicationContext
     private val identityStore = IdentityStore.getInstance(appContext)
+    private val transportPreferences = MeshTransportPreferences.getInstance(appContext)
+    private val diagnostics = NetworkDiagnostics.getInstance()
     private val manager = appContext.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessions = ConcurrentHashMap<String, PeerSession>()
@@ -96,15 +103,20 @@ class WifiDirectManager(
     private val serviceSetupInProgress = AtomicBoolean(false)
     private val serviceSetupGeneration = AtomicLong(0L)
     private val discoveryRequestInProgress = AtomicBoolean(false)
+    private val discoveryRequestGeneration = AtomicLong(0L)
     private val connectionAttemptInProgress = AtomicBoolean(false)
+    private val connectionAttemptGeneration = AtomicLong(0L)
     private val connectionInfoRequestInProgress = AtomicBoolean(false)
     private val connectionInfoRequestToken = AtomicLong(0L)
     private val discoveryToken = UUID.randomUUID().toString().replace("-", "").take(12)
+    private val serviceSetupLock = Any()
+    private val discoveryLock = Any()
 
     @Volatile private var started = false
     @Volatile private var receiverRegistered = false
     @Volatile private var groupFormed = false
     @Volatile private var groupOwner = false
+    @Volatile private var groupClientCount = 0
     @Volatile private var groupOwnerAddress: InetAddress? = null
     @Volatile private var channel: WifiP2pManager.Channel? = null
     @Volatile private var serverSocket: ServerSocket? = null
@@ -113,14 +125,22 @@ class WifiDirectManager(
     @Volatile private var mediaServerJob: Job? = null
     @Volatile private var clientJob: Job? = null
     @Volatile private var connectionTimeoutJob: Job? = null
+    @Volatile private var connectRequestCallbackJob: Job? = null
     @Volatile private var serviceRetryJob: Job? = null
     @Volatile private var reconciliationJob: Job? = null
     @Volatile private var connectionInfoWatchdogJob: Job? = null
     @Volatile private var discoveryRetryJob: Job? = null
+    @Volatile private var serviceSetupWatchdogJob: Job? = null
+    @Volatile private var discoveryWatchdogJob: Job? = null
     @Volatile private var serviceDiscoveryActive = false
     @Volatile private var discoveryRetryAttempt = 0
     @Volatile private var localService: WifiP2pDnsSdServiceInfo? = null
     @Volatile private var serviceRequest: WifiP2pDnsSdServiceRequest? = null
+    @Volatile private var currentAttemptId: String? = null
+    @Volatile private var currentPeer: String? = null
+    @Volatile private var currentAttemptStartedAt: Long? = null
+    private val groupAttemptId = AtomicReference<String?>(null)
+    private val discoveredCandidates = ConcurrentHashMap<String, WifiDiscoveryCandidate>()
     private val _runtimeState = MutableStateFlow(WifiDirectRuntimeState())
     val runtimeState: StateFlow<WifiDirectRuntimeState> = _runtimeState.asStateFlow()
 
@@ -131,7 +151,7 @@ class WifiDirectManager(
                     val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
                     if (state != WifiP2pManager.WIFI_P2P_STATE_ENABLED) {
                         resetRuntimeForP2pLoss(clearChannel = false)
-                        publishRuntimeState(WifiDirectStage.DEGRADED, "P2P_RADIO_DISABLED")
+                        publishRuntimeState(WifiDirectStage.DEGRADED, "P2P_RADIO_DISABLED", retryCount = 0)
                     } else if (started) {
                         // P2P radio toggles can invalidate service registration even
                         // when the Channel object survives. Remove stale registrations
@@ -160,6 +180,25 @@ class WifiDirectManager(
                 }
                 WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> Unit
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> Unit
+                AndroidLocationManager.MODE_CHANGED_ACTION -> {
+                    if (started) {
+                        if (isLocationModeEnabled()) {
+                            discoveryRetryJob?.cancel(); discoveryRetryJob = null
+                            discoveryRetryAttempt = 0
+                            if (localService == null || serviceRequest == null) installServiceAndDiscover()
+                            else beginDiscovery()
+                        } else if (!groupFormed) {
+                            synchronized(discoveryLock) {
+                                discoveryRequestGeneration.incrementAndGet()
+                                discoveryRequestInProgress.set(false)
+                                serviceDiscoveryActive = false
+                                discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+                            }
+                            discoveryRetryJob?.cancel(); discoveryRetryJob = null
+                            publishRuntimeState(WifiDirectStage.DEGRADED, "LOCATION_MODE_OFF")
+                        }
+                    }
+                }
             }
         }
     }
@@ -167,21 +206,39 @@ class WifiDirectManager(
     @SuppressLint("MissingPermission")
     @Synchronized
     fun start(): Boolean {
+        if (!transportPreferences.selection.value.wifiDirectEnabled) {
+            stop()
+            publishRuntimeState(WifiDirectStage.STOPPED, error = null)
+            return false
+        }
         if (started) {
             if (hasRequiredPermissions() && channel != null) return true
             stop()
         }
-        if (manager == null) return false
-        if (!appContext.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_DIRECT)) return false
-        if (!hasRequiredPermissions()) return false
+        if (manager == null) {
+            publishRuntimeState(WifiDirectStage.DEGRADED, "P2P_SERVICE_UNAVAILABLE")
+            return false
+        }
+        if (!appContext.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI_DIRECT)) {
+            publishRuntimeState(WifiDirectStage.DEGRADED, "P2P_UNSUPPORTED")
+            return false
+        }
+        if (!hasRequiredPermissions()) {
+            publishRuntimeState(WifiDirectStage.DEGRADED, "PERMISSION_REQUIRED")
+            return false
+        }
         val identity = identityStore.getIdentity()
-        if (identity.nodeId.isBlank() || identity.deviceName.isBlank() || !identityStore.isNicknameConfigured()) return false
+        if (identity.nodeId.isBlank() || identity.deviceName.isBlank() || !identityStore.isNicknameConfigured()) {
+            publishRuntimeState(WifiDirectStage.DEGRADED, "IDENTITY_NOT_READY")
+            return false
+        }
 
         started = true
         publishRuntimeState(WifiDirectStage.STARTING)
         channel = createChannel()
         if (channel == null) {
             started = false
+            publishRuntimeState(WifiDirectStage.DEGRADED, "P2P_CHANNEL_UNAVAILABLE")
             return false
         }
 
@@ -190,14 +247,23 @@ class WifiDirectManager(
             addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
             addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
+            addAction(AndroidLocationManager.MODE_CHANGED_ACTION)
         }
-        ContextCompat.registerReceiver(appContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-        receiverRegistered = true
+        try {
+            ContextCompat.registerReceiver(appContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            receiverRegistered = true
+        } catch (failure: Exception) {
+            started = false
+            channel = null
+            publishRuntimeState(WifiDirectStage.DEGRADED, "P2P_RECEIVER_REGISTRATION_${failure.javaClass.simpleName}")
+            return false
+        }
         installServiceAndDiscover()
         requestConnectionInfo()
         reconciliationJob = scope.launch {
             while (isActive && started) {
                 requestConnectionInfo()
+                pruneExpiredCandidates()
                 delay(CONNECTION_RECONCILE_INTERVAL_MS)
             }
         }
@@ -206,14 +272,20 @@ class WifiDirectManager(
 
     @Synchronized
     fun stop() {
-        if (!started && !receiverRegistered) return
+        if (!started && !receiverRegistered) {
+            publishRuntimeState(WifiDirectStage.STOPPED, error = null, retryCount = 0)
+            return
+        }
         started = false
         healthProbeJob.getAndSet(null)?.cancel()
+        resolveGroupAttemptAsStopped("MANAGER_STOPPED")
         groupFormed = false
         groupOwner = false
         groupOwnerAddress = null
+        groupClientCount = 0
         serviceSetupGeneration.incrementAndGet()
         serviceSetupInProgress.set(false)
+        connectionAttemptGeneration.incrementAndGet()
         discoveryRetryJob?.cancel(); discoveryRetryJob = null
         serviceDiscoveryActive = false
         discoveryRetryAttempt = 0
@@ -223,6 +295,10 @@ class WifiDirectManager(
         connectionInfoWatchdogJob?.cancel(); connectionInfoWatchdogJob = null
         connectionAttemptInProgress.set(false)
         connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+        connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
+        serviceSetupWatchdogJob?.cancel(); serviceSetupWatchdogJob = null
+        discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+        discoveryRequestGeneration.incrementAndGet()
         serviceRetryJob?.cancel(); serviceRetryJob = null
         reconciliationJob?.cancel(); reconciliationJob = null
         clientJob?.cancel(); clientJob = null
@@ -241,25 +317,29 @@ class WifiDirectManager(
         localService = null
         advertisedServiceDevices.clear()
         compatibleServiceAddresses.clear()
+        discoveredCandidates.clear()
         connectAttempts.clear()
         if (receiverRegistered) {
             runCatching { appContext.unregisterReceiver(receiver) }
             receiverRegistered = false
         }
         channel = null
-        publishRuntimeState(WifiDirectStage.STOPPED)
+        publishRuntimeState(WifiDirectStage.STOPPED, retryCount = 0)
     }
 
-    fun isStarted(): Boolean = started && channel != null && hasRequiredPermissions()
+    fun isStarted(): Boolean = transportPreferences.selection.value.wifiDirectEnabled &&
+        started && channel != null && hasRequiredPermissions()
     fun isDiscoveryActive(): Boolean =
         isStarted() && serviceRequest != null && serviceDiscoveryActive
-    fun isAvailable(): Boolean = sessions.isNotEmpty()
+    fun isAvailable(): Boolean = transportPreferences.selection.value.wifiDirectEnabled &&
+        started && sessions.isNotEmpty()
     fun connectedPeerCount(): Int = sessions.size
-    fun hasPeer(nodeId: String): Boolean = sessions.containsKey(normalize(nodeId))
+    fun hasPeer(nodeId: String): Boolean = transportPreferences.selection.value.wifiDirectEnabled &&
+        started && sessions.containsKey(normalize(nodeId))
 
     private fun publishRuntimeState(
         stage: WifiDirectStage,
-        error: String? = _runtimeState.value.lastError,
+        error: String? = null,
         retryCount: Int = _runtimeState.value.retryCount
     ) {
         val previous = _runtimeState.value
@@ -267,18 +347,34 @@ class WifiDirectManager(
         _runtimeState.value = previous.copy(
             stage = stage,
             groupOwner = groupOwner,
+            groupFormed = groupFormed,
             groupOwnerAddress = groupOwnerAddress?.hostAddress,
             controlServerReady = serverSocket != null,
             mediaServerReady = mediaServerSocket != null,
             sessionCount = sessions.size,
+            groupClientCount = groupClientCount,
+            candidates = discoveredCandidates.values.sortedByDescending { it.lastSeen },
+            currentAttemptId = currentAttemptId,
+            currentPeer = currentPeer,
+            locationModeEnabled = isLocationModeEnabled(),
             retryCount = retryCount,
             lastError = error,
             stageSince = if (previous.stage == stage) previous.stageSince else now,
             updatedAt = now
         )
+        if (previous.stage != stage || previous.lastError != error) {
+            diagnostics.record(
+                kind = if (error == null) NetworkEventKind.CONNECTION_STAGE else NetworkEventKind.REQUEST_FAILED,
+                operation = "wifi.p2p.${stage.name.lowercase()}",
+                correlationId = currentAttemptId,
+                transport = "WIFI_DIRECT",
+                result = error ?: "OK"
+            )
+        }
     }
 
     suspend fun sendToPeer(nodeId: String, payload: ByteArray): Boolean {
+        if (!transportPreferences.selection.value.wifiDirectEnabled || !started) return false
         if (payload.isEmpty() || payload.size > MeshPacketCodec.MAX_PACKET_BYTES) return false
         return sessions[normalize(nodeId)]?.send(payload, transferIds.incrementAndGet()) ?: false
     }
@@ -290,6 +386,7 @@ class WifiDirectManager(
         file: File,
         onProgress: suspend (Long) -> Unit = {}
     ): Boolean {
+        if (!transportPreferences.selection.value.wifiDirectEnabled || !started) return false
         if (!manifest.isValid() || !file.isFile || file.length() != manifest.sizeBytes) return false
         val peer = sessions[normalize(nodeId)]?.peer ?: return false
         val socket = Socket()
@@ -315,6 +412,7 @@ class WifiDirectManager(
                 val accepted = input.readBoolean()
                 var offset = input.readLong()
                 if (!accepted || offset !in 0..manifest.sizeBytes) return@withContext false
+                onProgress(offset)
 
                 file.inputStream().buffered(MEDIA_CHUNK_BYTES).use { source ->
                     var skipped = 0L
@@ -400,17 +498,30 @@ class WifiDirectManager(
             serviceSetupInProgress.set(false)
             return
         }
-        p2pManager.addLocalService(current, service, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() {
-                if (!isCurrentSetup(current, generation)) {
-                    runCatching { manager?.removeLocalService(current, service, null) }
-                    return
-                }
-                manager?.setDnsSdResponseListeners(
+        val request = WifiP2pDnsSdServiceRequest.newInstance()
+        serviceRequest = request
+        var localServiceReady = false
+        var serviceRequestReady = false
+        fun completeRegistrationIfReady() = synchronized(serviceSetupLock) {
+            if (!isCurrentSetup(current, generation) || !serviceSetupInProgress.get()) return@synchronized
+            if (!localServiceReady || !serviceRequestReady) return@synchronized
+            serviceSetupWatchdogJob?.cancel(); serviceSetupWatchdogJob = null
+            serviceSetupInProgress.set(false)
+            publishRuntimeState(WifiDirectStage.DISCOVERING)
+            beginDiscovery()
+        }
+
+        try {
+            // Install callbacks before registering the request. Submit local
+            // advertisement and remote discovery registration in the same setup
+            // turn: neither operation depends on the other's completion callback.
+            p2pManager.setDnsSdResponseListeners(
                 current,
                 WifiP2pManager.DnsSdServiceResponseListener { instanceName, _, device ->
-                    if (instanceName.equals("neyra", true) && device != null && started && !groupFormed) {
+                    if (isCurrentSetup(current, generation) && instanceName.equals("neyra", true) &&
+                        device != null && !groupFormed) {
                         val key = device.deviceAddress.lowercase()
+                        rememberCandidate(device, decision = "NEYRA_SERVICE_SEEN")
                         if (advertisedServiceDevices.size >= MAX_DISCOVERED_SERVICE_DEVICES) {
                             advertisedServiceDevices.clear()
                             compatibleServiceAddresses.clear()
@@ -422,19 +533,29 @@ class WifiDirectManager(
                 WifiP2pManager.DnsSdTxtRecordListener { _, record, device ->
                     // TXT carries protocol metadata only; authoritative Neyra identity
                     // is exchanged over the socket HELLO after the P2P group forms.
-                    if (device != null) {
+                    if (isCurrentSetup(current, generation) && device != null && !groupFormed) {
                         val key = device.deviceAddress.lowercase()
-                        val txtRecord = record.orEmpty()
-                        if (txtRecord["v"] == MeshPacketCodec.PROTOCOL_VERSION.toString()) {
+                        val remoteVersion = record.orEmpty()["v"]
+                        if (remoteVersion == MeshPacketCodec.PROTOCOL_VERSION.toString()) {
                             if (compatibleServiceAddresses.size >= MAX_DISCOVERED_SERVICE_DEVICES) {
                                 compatibleServiceAddresses.clear()
                                 advertisedServiceDevices.clear()
                             }
-                            val remoteToken = txtRecord["r"]
-                            // New Neyra peers use a deterministic tie-breaker so
-                            // exactly one side requests a connection. Peers using
-                            // the earlier record format remain interoperable.
-                            val shouldInitiate = remoteToken == null || discoveryToken < remoteToken
+                            val remoteToken = record.orEmpty()["r"]?.takeIf { it.isNotBlank() }
+                            // Peers from the earlier record format have no token and
+                            // already initiate when they see a compatible peer. Stay
+                            // passive for those peers so both sides do not race to
+                            // connect. Token-capable peers still elect one initiator.
+                            val shouldInitiate = remoteToken?.let { discoveryToken < it } ?: false
+                            rememberCandidate(
+                                device,
+                                protocolVersion = remoteVersion,
+                                decision = when {
+                                    shouldInitiate -> "COMPATIBLE_INITIATOR"
+                                    remoteToken == null -> "COMPATIBLE_WAITING_FOR_LEGACY_INITIATOR"
+                                    else -> "COMPATIBLE_WAITING_FOR_PEER"
+                                }
+                            )
                             if (shouldInitiate) {
                                 compatibleServiceAddresses.add(key)
                                 advertisedServiceDevices[key]?.let { if (started && !groupFormed) connectToService(it) }
@@ -442,50 +563,149 @@ class WifiDirectManager(
                                 compatibleServiceAddresses.remove(key)
                             }
                         } else {
+                            rememberCandidate(device, protocolVersion = remoteVersion, decision = "INCOMPATIBLE_PROTOCOL")
                             compatibleServiceAddresses.remove(key)
                         }
                     }
                 }
             )
-                val request = WifiP2pDnsSdServiceRequest.newInstance()
-                serviceRequest = request
-                manager?.addServiceRequest(current, request, object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        if (!isCurrentSetup(current, generation)) return
-                        serviceSetupInProgress.set(false)
-                        publishRuntimeState(WifiDirectStage.DISCOVERING)
-                        beginDiscovery()
+        } catch (failure: Exception) {
+            failServiceSetup(current, generation, "SERVICE_LISTENER_SETUP_EXCEPTION_${failure.javaClass.simpleName}")
+            return
+        }
+
+        armServiceSetupWatchdog(current, generation, "REGISTER_SERVICES")
+        try {
+            p2pManager.addLocalService(current, service, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() = synchronized(serviceSetupLock) {
+                    if (!isCurrentSetup(current, generation) || !serviceSetupInProgress.get()) {
+                        runCatching { manager?.removeLocalService(current, service, null) }
+                        return@synchronized
                     }
-                    override fun onFailure(reason: Int) {
-                        if (isCurrentSetup(current, generation)) {
-                            runCatching { manager?.clearServiceRequests(current, null) }
-                            runCatching { manager?.removeLocalService(current, service, null) }
-                            serviceRequest = null
-                            localService = null
-                            serviceSetupInProgress.set(false)
-                            scheduleServiceRetry()
-                        }
-                    }
-                })
-            }
-            override fun onFailure(reason: Int) {
-                if (isCurrentSetup(current, generation)) {
-                    runCatching { manager?.removeLocalService(current, service, null) }
-                    localService = null
-                    serviceRequest = null
-                    serviceSetupInProgress.set(false)
-                    scheduleServiceRetry()
+                    localServiceReady = true
+                    completeRegistrationIfReady()
                 }
-            }
-        })
+
+                override fun onFailure(reason: Int) {
+                    failServiceSetup(current, generation, "ADD_LOCAL_SERVICE_FAILED_$reason")
+                }
+            })
+            p2pManager.addServiceRequest(current, request, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() = synchronized(serviceSetupLock) {
+                    if (!isCurrentSetup(current, generation) || !serviceSetupInProgress.get()) return@synchronized
+                    serviceRequestReady = true
+                    completeRegistrationIfReady()
+                }
+
+                override fun onFailure(reason: Int) {
+                    failServiceSetup(current, generation, "ADD_SERVICE_REQUEST_FAILED_$reason")
+                }
+            })
+        } catch (failure: Exception) {
+            failServiceSetup(current, generation, "SERVICE_SETUP_EXCEPTION_${failure.javaClass.simpleName}")
+        }
     }
 
     private fun isCurrentSetup(candidate: WifiP2pManager.Channel, generation: Long): Boolean =
         started && channel === candidate && serviceSetupGeneration.get() == generation
 
+    private fun armServiceSetupWatchdog(
+        current: WifiP2pManager.Channel,
+        generation: Long,
+        phase: String
+    ) {
+        serviceSetupWatchdogJob?.cancel()
+        serviceSetupWatchdogJob = scope.launch {
+            delay(SERVICE_CALLBACK_TIMEOUT_MS)
+            synchronized(serviceSetupLock) {
+                if (isCurrentSetup(current, generation) && serviceSetupInProgress.compareAndSet(true, false)) {
+                    // Invalidate every callback belonging to this timed-out attempt
+                    // before the retry can install a replacement registration.
+                    serviceSetupGeneration.compareAndSet(generation, generation + 1L)
+                    runCatching { manager?.clearServiceRequests(current, null) }
+                    localService?.let { runCatching { manager?.removeLocalService(current, it, null) } }
+                    localService = null
+                    serviceRequest = null
+                    serviceDiscoveryActive = false
+                    publishRuntimeState(WifiDirectStage.DEGRADED, "${phase}_CALLBACK_TIMEOUT")
+                    scheduleServiceRetry()
+                }
+            }
+        }
+    }
+
+    private fun failServiceSetup(
+        current: WifiP2pManager.Channel,
+        generation: Long,
+        error: String
+    ) = synchronized(serviceSetupLock) {
+        if (!isCurrentSetup(current, generation) || !serviceSetupInProgress.get()) return@synchronized
+        serviceSetupInProgress.set(false)
+        serviceSetupGeneration.compareAndSet(generation, generation + 1L)
+        serviceSetupWatchdogJob?.cancel(); serviceSetupWatchdogJob = null
+        runCatching { manager?.clearServiceRequests(current, null) }
+        localService?.let { runCatching { manager?.removeLocalService(current, it, null) } }
+        localService = null
+        serviceRequest = null
+        serviceDiscoveryActive = false
+        publishRuntimeState(WifiDirectStage.DEGRADED, error)
+        scheduleServiceRetry()
+    }
+
+    private fun rememberCandidate(
+        device: WifiP2pDevice,
+        protocolVersion: String? = null,
+        decision: String
+    ) {
+        val address = device.deviceAddress?.lowercase().orEmpty()
+        if (address.isBlank()) return
+        val now = System.currentTimeMillis()
+        pruneExpiredCandidates(now)
+        val candidate = WifiDiscoveryCandidate(
+            deviceName = device.deviceName?.takeIf { it.isNotBlank() } ?: "Wi-Fi Direct peer",
+            deviceAddress = address,
+            protocolVersion = protocolVersion,
+            decision = decision,
+            lastSeen = now
+        )
+        discoveredCandidates[address] = candidate
+        diagnostics.record(
+            kind = NetworkEventKind.DISCOVERY_CANDIDATE,
+            operation = "wifi.discovery.candidate",
+            correlationId = currentAttemptId,
+            transport = "WIFI_DIRECT",
+            result = "${candidate.deviceName}; version=${protocolVersion ?: "pending"}; $decision",
+            timestamp = now
+        )
+        publishRuntimeState(_runtimeState.value.stage, error = _runtimeState.value.lastError)
+    }
+
+    private fun pruneExpiredCandidates(now: Long = System.currentTimeMillis()) {
+        val removed = discoveredCandidates.entries.removeIf {
+            now - it.value.lastSeen > CANDIDATE_RETENTION_MS
+        }
+        if (removed) {
+            publishRuntimeState(_runtimeState.value.stage, error = _runtimeState.value.lastError)
+        }
+    }
+
+    private fun isLocationModeEnabled(): Boolean = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            appContext.getSystemService(AndroidLocationManager::class.java)?.isLocationEnabled == true
+        } else {
+            Settings.Secure.getInt(appContext.contentResolver, Settings.Secure.LOCATION_MODE) !=
+                Settings.Secure.LOCATION_MODE_OFF
+        }
+    }.getOrDefault(false)
+
     private fun resetServiceRegistrationState() {
         serviceSetupGeneration.incrementAndGet()
         serviceSetupInProgress.set(false)
+        synchronized(discoveryLock) {
+            discoveryRequestGeneration.incrementAndGet()
+            discoveryRequestInProgress.set(false)
+            discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+        }
         serviceRetryJob?.cancel(); serviceRetryJob = null
         discoveryRetryJob?.cancel(); discoveryRetryJob = null
         discoveryRequestInProgress.set(false)
@@ -512,17 +732,26 @@ class WifiDirectManager(
     }
 
     private fun resetRuntimeForP2pLoss(clearChannel: Boolean) {
+        resolveGroupAttemptAsStopped("P2P_UNAVAILABLE")
         groupFormed = false
         groupOwner = false
         groupOwnerAddress = null
+        groupClientCount = 0
+        discoveryRetryAttempt = 0
         discoveryRetryJob?.cancel(); discoveryRetryJob = null
-        discoveryRequestInProgress.set(false)
+        synchronized(discoveryLock) {
+            discoveryRequestGeneration.incrementAndGet()
+            discoveryRequestInProgress.set(false)
+            discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+        }
         serviceDiscoveryActive = false
         connectionInfoRequestInProgress.set(false)
         connectionInfoRequestToken.incrementAndGet()
         connectionInfoWatchdogJob?.cancel(); connectionInfoWatchdogJob = null
         connectionAttemptInProgress.set(false)
+        connectionAttemptGeneration.incrementAndGet()
         connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+        connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
         clientJob?.cancel(); clientJob = null
         closeServer()
         closeMediaServer()
@@ -541,6 +770,7 @@ class WifiDirectManager(
             advertisedServiceDevices.clear()
             compatibleServiceAddresses.clear()
         }
+        publishRuntimeState(_runtimeState.value.stage, error = _runtimeState.value.lastError, retryCount = 0)
     }
 
     @SuppressLint("MissingPermission")
@@ -565,14 +795,53 @@ class WifiDirectManager(
 
     @SuppressLint("MissingPermission")
     private fun beginDiscovery() {
-        if (!started || groupFormed || connectionAttemptInProgress.get() || !hasRequiredPermissions()) return
-        if (serviceDiscoveryActive || !discoveryRequestInProgress.compareAndSet(false, true)) return
+        if (!started || groupFormed || connectionAttemptInProgress.get() || !hasRequiredPermissions() ||
+            localService == null || serviceRequest == null) return
+        val requestGeneration = synchronized(discoveryLock) {
+            if (!started || groupFormed || connectionAttemptInProgress.get() || !hasRequiredPermissions() ||
+                localService == null || serviceRequest == null || !isLocationModeEnabled() || serviceDiscoveryActive ||
+                !discoveryRequestInProgress.compareAndSet(false, true)) {
+                null
+            } else {
+                discoveryRequestGeneration.incrementAndGet()
+            }
+        }
+        if (requestGeneration == null) {
+            if (!isLocationModeEnabled()) {
+                publishRuntimeState(WifiDirectStage.DEGRADED, "LOCATION_MODE_OFF")
+                scheduleDiscoveryRetry()
+            }
+            return
+        }
         val current = channel
         val p2pManager = manager
         if (current == null || p2pManager == null) {
-            discoveryRequestInProgress.set(false)
+            synchronized(discoveryLock) {
+                if (discoveryRequestGeneration.get() == requestGeneration) {
+                    discoveryRequestInProgress.set(false)
+                    discoveryRequestGeneration.incrementAndGet()
+                }
+            }
             scheduleDiscoveryRetry()
             return
+        }
+
+        discoveryWatchdogJob?.cancel()
+        discoveryWatchdogJob = scope.launch {
+            delay(DISCOVERY_CALLBACK_TIMEOUT_MS)
+            val timedOut = synchronized(discoveryLock) {
+                if (isCurrentDiscovery(current, requestGeneration) &&
+                    discoveryRequestInProgress.compareAndSet(true, false)) {
+                    discoveryRequestGeneration.compareAndSet(requestGeneration, requestGeneration + 1L)
+                    serviceDiscoveryActive = false
+                    discoveryWatchdogJob = null
+                    true
+                } else false
+            }
+            if (timedOut) {
+                publishRuntimeState(WifiDirectStage.DEGRADED, "DISCOVER_SERVICES_CALLBACK_TIMEOUT")
+                scheduleDiscoveryRetry()
+            }
         }
 
         try {
@@ -581,37 +850,67 @@ class WifiDirectManager(
             // on a timer only invites BUSY failures and does not speed up scanning.
             p2pManager.discoverServices(current, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
-                    discoveryRequestInProgress.set(false)
-                    publishRuntimeState(WifiDirectStage.DISCOVERING)
-                    if (started && channel === current && !groupFormed) {
+                    val accepted = synchronized(discoveryLock) {
+                        if (!isCurrentDiscovery(current, requestGeneration)) return@synchronized false
+                        discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+                        discoveryRequestInProgress.set(false)
+                        // ActionListener callbacks are one-shot. Invalidate this
+                        // token so a duplicate/late callback cannot change the state
+                        // after a later attempt has started.
+                        discoveryRequestGeneration.compareAndSet(requestGeneration, requestGeneration + 1L)
+                        if (groupFormed) return@synchronized false
                         serviceDiscoveryActive = true
                         discoveryRetryAttempt = 0
-                        discoveryRetryJob?.cancel()
-                        discoveryRetryJob = null
+                        discoveryRetryJob?.cancel(); discoveryRetryJob = null
+                        true
                     }
+                    if (accepted) publishRuntimeState(WifiDirectStage.DISCOVERING, retryCount = 0)
                 }
 
                 override fun onFailure(reason: Int) {
-                    discoveryRequestInProgress.set(false)
-                    if (started && channel === current && !groupFormed) {
+                    val accepted = synchronized(discoveryLock) {
+                        if (!isCurrentDiscovery(current, requestGeneration)) return@synchronized false
+                        discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+                        discoveryRequestInProgress.set(false)
+                        discoveryRequestGeneration.compareAndSet(requestGeneration, requestGeneration + 1L)
                         serviceDiscoveryActive = false
+                        !groupFormed
+                    }
+                    if (accepted) {
                         publishRuntimeState(WifiDirectStage.DEGRADED, "DISCOVERY_FAILED_$reason")
                         scheduleDiscoveryRetry()
                     }
                 }
             })
         } catch (_: Exception) {
-            discoveryRequestInProgress.set(false)
-            serviceDiscoveryActive = false
-            scheduleDiscoveryRetry()
+            val accepted = synchronized(discoveryLock) {
+                if (!isCurrentDiscovery(current, requestGeneration)) return@synchronized false
+                discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+                discoveryRequestInProgress.set(false)
+                discoveryRequestGeneration.compareAndSet(requestGeneration, requestGeneration + 1L)
+                serviceDiscoveryActive = false
+                !groupFormed
+            }
+            if (accepted) {
+                publishRuntimeState(WifiDirectStage.DEGRADED, "DISCOVER_SERVICES_EXCEPTION")
+                scheduleDiscoveryRetry()
+            }
         }
     }
+
+    private fun isCurrentDiscovery(current: WifiP2pManager.Channel, generation: Long): Boolean =
+        started && channel === current && discoveryRequestGeneration.get() == generation
 
     private fun scheduleDiscoveryRetry() {
         if (!started || groupFormed || connectionAttemptInProgress.get() || discoveryRetryJob?.isActive == true) return
         val shift = discoveryRetryAttempt.coerceAtMost(4)
         val delayMs = (DISCOVERY_RETRY_BASE_MS * (1L shl shift)).coerceAtMost(DISCOVERY_RETRY_MAX_MS)
         discoveryRetryAttempt = (discoveryRetryAttempt + 1).coerceAtMost(5)
+        publishRuntimeState(
+            _runtimeState.value.stage,
+            error = _runtimeState.value.lastError,
+            retryCount = discoveryRetryAttempt
+        )
         discoveryRetryJob = scope.launch {
             delay(delayMs)
             discoveryRetryJob = null
@@ -621,9 +920,28 @@ class WifiDirectManager(
 
     @SuppressLint("MissingPermission")
     private fun connectToService(device: WifiP2pDevice) {
-        if (!started || groupFormed || !hasRequiredPermissions()) return
+        if (!transportPreferences.selection.value.wifiDirectEnabled || !started || groupFormed || !hasRequiredPermissions()) return
         val key = device.deviceAddress?.lowercase() ?: return
         if (!connectionAttemptInProgress.compareAndSet(false, true)) return
+        val attemptId = UUID.randomUUID().toString()
+        currentAttemptId = attemptId
+        val attemptGeneration = connectionAttemptGeneration.incrementAndGet()
+        synchronized(discoveryLock) {
+            discoveryRequestGeneration.incrementAndGet()
+            discoveryRequestInProgress.set(false)
+            serviceDiscoveryActive = false
+            discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+        }
+        discoveryRetryJob?.cancel(); discoveryRetryJob = null
+        currentPeer = device.deviceName?.takeIf { it.isNotBlank() } ?: key.takeLast(6)
+        currentAttemptStartedAt = System.nanoTime()
+        diagnostics.record(
+            kind = NetworkEventKind.CONNECTION_STAGE,
+            operation = "wifi.p2p.connect_requested",
+            correlationId = attemptId,
+            transport = "WIFI_DIRECT",
+            result = "peer=$currentPeer; WPS_PBC"
+        )
         publishRuntimeState(WifiDirectStage.NEGOTIATING)
         if (!connectAttempts.add(key)) {
             connectionAttemptInProgress.set(false)
@@ -644,16 +962,75 @@ class WifiDirectManager(
             connectionAttemptInProgress.set(false)
             return
         }
+        fun isCurrentAttempt(): Boolean = started && channel === current &&
+            connectionAttemptGeneration.get() == attemptGeneration &&
+            currentAttemptId == attemptId && connectionAttemptInProgress.get()
+        connectRequestCallbackJob?.cancel()
+        connectRequestCallbackJob = scope.launch {
+            delay(CONNECT_REQUEST_CALLBACK_TIMEOUT_MS)
+            if (!isCurrentAttempt()) return@launch
+            diagnostics.record(
+                kind = NetworkEventKind.REQUEST_FAILED,
+                operation = "wifi.p2p.connect_callback_timeout",
+                correlationId = attemptId,
+                transport = "WIFI_DIRECT",
+                durationMs = ((System.nanoTime() - (currentAttemptStartedAt ?: System.nanoTime())) / 1_000_000L),
+                result = "Android did not invoke the connect request callback"
+            )
+            connectRequestCallbackJob = null
+            connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+            connectAttempts.remove(key)
+            connectionAttemptInProgress.set(false)
+            connectionAttemptGeneration.compareAndSet(attemptGeneration, attemptGeneration + 1L)
+            serviceDiscoveryActive = false
+            publishRuntimeState(WifiDirectStage.DEGRADED, "CONNECT_CALLBACK_TIMEOUT")
+            runCatching {
+                manager?.cancelConnect(current, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() = scheduleDiscoveryRetry()
+                    override fun onFailure(reason: Int) = scheduleDiscoveryRetry()
+                })
+            }.onFailure { scheduleDiscoveryRetry() }
+            scheduleDiscoveryRetry()
+        }
         try {
             p2pManager.connect(current, config, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
+                    if (!isCurrentAttempt()) return
+                    connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
                     serviceDiscoveryActive = false
+                    diagnostics.record(
+                        kind = NetworkEventKind.CONNECTION_STAGE,
+                        operation = "wifi.p2p.connect_request_accepted",
+                        correlationId = attemptId,
+                        transport = "WIFI_DIRECT",
+                        result = "Android accepted request initiation; group formation is pending"
+                    )
                     connectionTimeoutJob?.cancel()
                     connectionTimeoutJob = scope.launch {
-                        delay(CONNECT_NEGOTIATION_TIMEOUT_MS)
-                        if (started && !groupFormed && connectionAttemptInProgress.get()) {
+                        delay(CONNECT_NEGOTIATION_NOTICE_MS)
+                        if (isCurrentAttempt()) {
+                            diagnostics.record(
+                                kind = NetworkEventKind.CONNECTION_STAGE,
+                                operation = "wifi.p2p.negotiation_still_pending",
+                                correlationId = attemptId,
+                                transport = "WIFI_DIRECT",
+                                durationMs = CONNECT_NEGOTIATION_NOTICE_MS,
+                                result = "Waiting for Android peer/group approval"
+                            )
+                        }
+                        delay(CONNECT_NEGOTIATION_TIMEOUT_MS - CONNECT_NEGOTIATION_NOTICE_MS)
+                        if (isCurrentAttempt()) {
+                            diagnostics.record(
+                                kind = NetworkEventKind.REQUEST_FAILED,
+                                operation = "wifi.p2p.negotiation_timeout",
+                                correlationId = attemptId,
+                                transport = "WIFI_DIRECT",
+                                durationMs = CONNECT_NEGOTIATION_TIMEOUT_MS,
+                                result = "No group formation observed before timeout"
+                            )
                             connectAttempts.remove(key)
                             connectionAttemptInProgress.set(false)
+                            publishRuntimeState(WifiDirectStage.DEGRADED, "GROUP_NEGOTIATION_TIMEOUT")
                             val activeChannel = channel
                             if (activeChannel == null) {
                                 scheduleDiscoveryRetry()
@@ -666,22 +1043,29 @@ class WifiDirectManager(
                         }
                     }
                 }
+
                 override fun onFailure(reason: Int) {
+                    if (!isCurrentAttempt()) return
+                    connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
                     connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
                     connectAttempts.remove(key)
                     connectionAttemptInProgress.set(false)
+                    connectionAttemptGeneration.compareAndSet(attemptGeneration, attemptGeneration + 1L)
                     serviceDiscoveryActive = false
                     publishRuntimeState(WifiDirectStage.DEGRADED, "CONNECT_FAILED_$reason")
                     scheduleDiscoveryRetry()
                 }
             })
         } catch (_: Exception) {
-                connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
-                connectAttempts.remove(key)
-                connectionAttemptInProgress.set(false)
-                serviceDiscoveryActive = false
-                publishRuntimeState(WifiDirectStage.DEGRADED, "CONNECT_EXCEPTION")
-                scheduleDiscoveryRetry()
+            if (!isCurrentAttempt()) return
+            connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
+            connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+            connectAttempts.remove(key)
+            connectionAttemptInProgress.set(false)
+            connectionAttemptGeneration.compareAndSet(attemptGeneration, attemptGeneration + 1L)
+            serviceDiscoveryActive = false
+            publishRuntimeState(WifiDirectStage.DEGRADED, "CONNECT_EXCEPTION")
+            scheduleDiscoveryRetry()
         }
     }
 
@@ -709,55 +1093,105 @@ class WifiDirectManager(
                 connectionInfoRequestInProgress.set(false)
                 connectionInfoWatchdogJob?.cancel(); connectionInfoWatchdogJob = null
                 if (!started || channel !== current) return@connectionInfoCallback
-            val ownerAddress = info.groupOwnerAddress
-            if (!info.groupFormed || ownerAddress == null) {
-                // A connection request can take several seconds to form its group.
-                // Do not restart discovery just because an early connection-info
-                // callback still reports the pre-group state.
-                if (connectionAttemptInProgress.get()) return@connectionInfoCallback
-                connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+                val ownerAddress = info.groupOwnerAddress
+                if (!info.groupFormed || ownerAddress == null) {
+                    // A connection request can take several seconds to form its group.
+                    // Do not restart discovery just because an early connection-info
+                    // callback still reports the pre-group state.
+                    if (connectionAttemptInProgress.get()) return@connectionInfoCallback
+                    val hadGroup = groupFormed
+                    if (hadGroup) {
+                        resolveGroupAttemptAsStopped("GROUP_LOST")
+                        connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+                        connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
+                        connectAttempts.clear()
+                        connectionAttemptInProgress.set(false)
+                        connectionAttemptGeneration.incrementAndGet()
+                        synchronized(discoveryLock) {
+                            discoveryRequestGeneration.incrementAndGet()
+                            discoveryRequestInProgress.set(false)
+                            serviceDiscoveryActive = false
+                            discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+                        }
+                        groupFormed = false
+                        groupOwner = false
+                        groupOwnerAddress = null
+                        groupClientCount = 0
+                        closeServer()
+                        clientJob?.cancel(); clientJob = null
+                        closeAllSessions()
+                    }
+                    if (hadGroup || (!serviceDiscoveryActive && !discoveryRequestInProgress.get())) {
+                        beginDiscovery()
+                    }
+                    return@connectionInfoCallback
+                }
+
+                val sameGroup = groupFormed &&
+                    groupOwner == info.isGroupOwner &&
+                    groupOwnerAddress?.hostAddress == ownerAddress.hostAddress
                 connectAttempts.clear()
                 connectionAttemptInProgress.set(false)
-                serviceDiscoveryActive = false
-                groupFormed = false
-                groupOwner = false
-                groupOwnerAddress = null
-                closeServer()
-                clientJob?.cancel(); clientJob = null
-                closeAllSessions()
-                beginDiscovery()
-                return@connectionInfoCallback
-            }
-
-            val sameGroup = groupFormed &&
-                groupOwner == info.isGroupOwner &&
-                groupOwnerAddress?.hostAddress == ownerAddress.hostAddress
-            connectAttempts.clear()
-            connectionAttemptInProgress.set(false)
-            connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
-            serviceDiscoveryActive = false
-            discoveryRetryJob?.cancel(); discoveryRetryJob = null
-            groupFormed = true
-            groupOwner = info.isGroupOwner
-            groupOwnerAddress = ownerAddress
-            if (!sameGroup) {
-                publishRuntimeState(WifiDirectStage.GROUP_FORMED)
-            }
-            startMediaServer()
-            if (info.isGroupOwner) {
-                startServer()
-            } else {
-                closeServer()
-                if (sessions.isEmpty()) {
-                    publishRuntimeState(WifiDirectStage.CONNECTING_TO_GROUP_OWNER)
-                    connectToGroupOwner(ownerAddress)
+                connectionAttemptGeneration.incrementAndGet()
+                connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
+                connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
+                synchronized(discoveryLock) {
+                    discoveryRequestGeneration.incrementAndGet()
+                    discoveryRequestInProgress.set(false)
+                    serviceDiscoveryActive = false
+                    discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
                 }
-            }
+                discoveryRetryJob?.cancel(); discoveryRetryJob = null
+                groupFormed = true
+                groupOwner = info.isGroupOwner
+                groupOwnerAddress = ownerAddress
+                if (!sameGroup) {
+                    groupAttemptId.set(currentAttemptId)
+                    diagnostics.record(
+                        kind = NetworkEventKind.CONNECTION_STAGE,
+                        operation = "wifi.p2p.group_formed",
+                        correlationId = currentAttemptId,
+                        transport = "WIFI_DIRECT",
+                        durationMs = currentAttemptStartedAt?.let { ((System.nanoTime() - it) / 1_000_000L).coerceAtLeast(0L) },
+                        result = if (info.isGroupOwner) "GROUP_OWNER" else "GROUP_CLIENT"
+                    )
+                    publishRuntimeState(WifiDirectStage.GROUP_FORMED)
+                }
+                requestGroupInfo(current)
+                startMediaServer()
+                if (info.isGroupOwner) {
+                    startServer()
+                } else {
+                    closeServer()
+                    if (sessions.isEmpty()) {
+                        publishRuntimeState(WifiDirectStage.CONNECTING_TO_GROUP_OWNER)
+                        connectToGroupOwner(ownerAddress)
+                    }
+                }
             }
         } catch (_: Exception) {
             connectionInfoRequestInProgress.set(false)
             connectionInfoRequestToken.compareAndSet(requestToken, requestToken + 1L)
             connectionInfoWatchdogJob?.cancel(); connectionInfoWatchdogJob = null
+        }
+    }
+
+    private fun requestGroupInfo(current: WifiP2pManager.Channel) {
+        if (!started || !groupFormed) return
+        runCatching {
+            manager?.requestGroupInfo(current) { group ->
+                if (channel !== current || !started || !groupFormed) return@requestGroupInfo
+                groupClientCount = if (groupOwner) group?.clientList?.size ?: 0 else 0
+                publishRuntimeState(_runtimeState.value.stage, error = _runtimeState.value.lastError)
+            }
+        }.onFailure {
+            diagnostics.record(
+                kind = NetworkEventKind.CONNECTION_STAGE,
+                operation = "wifi.p2p.group_info_failed",
+                correlationId = currentAttemptId,
+                transport = "WIFI_DIRECT",
+                result = it.javaClass.simpleName
+            )
         }
     }
 
@@ -772,14 +1206,35 @@ class WifiDirectManager(
             // waiting for a connection broadcast that may never be sent again.
             while (isActive && started && groupFormed && !groupOwner && sessions.isEmpty()) {
                 attempt++
+                val connectStarted = System.nanoTime()
                 val socket = runCatching {
                     Socket().apply {
                         tcpNoDelay = true
                         keepAlive = true
                         connect(InetSocketAddress(host, TCP_PORT), CLIENT_SOCKET_CONNECT_TIMEOUT_MS)
                     }
+                }.onSuccess {
+                    diagnostics.record(
+                        kind = NetworkEventKind.CONNECTION_STAGE,
+                        operation = "wifi.tcp.connected_to_group_owner",
+                        correlationId = currentAttemptId,
+                        transport = "WIFI_DIRECT",
+                        durationMs = ((System.nanoTime() - connectStarted) / 1_000_000L).coerceAtLeast(0L),
+                        attempt = attempt,
+                        result = "TCP_CONNECTED"
+                    )
+                }.onFailure {
+                    diagnostics.record(
+                        kind = NetworkEventKind.REQUEST_FAILED,
+                        operation = "wifi.tcp.connect_to_group_owner",
+                        correlationId = currentAttemptId,
+                        transport = "WIFI_DIRECT",
+                        durationMs = ((System.nanoTime() - connectStarted) / 1_000_000L).coerceAtLeast(0L),
+                        attempt = attempt,
+                        result = it.javaClass.simpleName
+                    )
                 }.getOrNull()
-                if (socket != null && establishSession(socket)) return@launch
+                if (socket != null && establishSession(socket, currentAttemptId ?: UUID.randomUUID().toString())) return@launch
                 runCatching { socket?.close() }
                 delay(if (attempt <= CLIENT_FAST_RETRY_COUNT) CLIENT_RETRY_DELAY_MS else CLIENT_RETRY_MAX_DELAY_MS)
             }
@@ -818,8 +1273,16 @@ class WifiDirectManager(
                         runCatching { socket.close() }
                         activeMediaSockets.remove(socket)
                     } else {
+                        val attemptId = UUID.randomUUID().toString()
+                        diagnostics.record(
+                            kind = NetworkEventKind.CONNECTION_STAGE,
+                            operation = "wifi.tcp.incoming_socket_accepted",
+                            correlationId = attemptId,
+                            transport = "WIFI_DIRECT",
+                            result = "TCP_ACCEPTED"
+                        )
                         launch {
-                            try { establishSession(socket) } finally { handshakeSlots.release() }
+                            try { establishSession(socket, attemptId) } finally { handshakeSlots.release() }
                         }
                     }
                 }
@@ -899,7 +1362,6 @@ class WifiDirectManager(
             val remoteHost = active.inetAddress.hostAddress
             if (remotePeer == null || !remotePeer.nodeId.equals(senderNodeId, true) ||
                 !remotePeer.host.equals(remoteHost, true) ||
-                !manifest.senderNodeId.equals(senderNodeId, true) ||
                 !manifest.isValid()) {
                 output.writeBoolean(false); output.writeLong(0L); output.flush()
                 return@withContext
@@ -946,7 +1408,8 @@ class WifiDirectManager(
         }
     }
 
-    private suspend fun establishSession(socket: Socket): Boolean {
+    private suspend fun establishSession(socket: Socket, attemptId: String): Boolean {
+        val handshakeStartedAt = System.nanoTime()
         socket.soTimeout = HANDSHAKE_TIMEOUT_MS
         val input = runCatching { DataInputStream(BufferedInputStream(socket.getInputStream())) }.getOrNull()
             ?: return false.also { runCatching { socket.close() } }
@@ -962,6 +1425,13 @@ class WifiDirectManager(
         }
         val remote = try {
             publishRuntimeState(WifiDirectStage.HANDSHAKING)
+            diagnostics.record(
+                kind = NetworkEventKind.CONNECTION_STAGE,
+                operation = "wifi.tcp.handshake_started",
+                correlationId = attemptId,
+                transport = "WIFI_DIRECT",
+                result = "HELLO_SENT"
+            )
             synchronized(output) {
                 WifiDirectFrameCodec.writeHello(
                     output,
@@ -993,7 +1463,15 @@ class WifiDirectManager(
         } catch (cancelled: CancellationException) {
             runCatching { socket.close() }
             throw cancelled
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            diagnostics.record(
+                kind = NetworkEventKind.REQUEST_FAILED,
+                operation = "wifi.tcp.handshake_failed",
+                correlationId = attemptId,
+                transport = "WIFI_DIRECT",
+                durationMs = ((System.nanoTime() - handshakeStartedAt) / 1_000_000L).coerceAtLeast(0L),
+                result = failure.message ?: failure.javaClass.simpleName
+            )
             runCatching { socket.close() }
             return false
         } finally {
@@ -1023,11 +1501,40 @@ class WifiDirectManager(
             }
         }
         if (!admitted) {
+            diagnostics.record(
+                kind = NetworkEventKind.REQUEST_FAILED,
+                operation = "wifi.tcp.session_rejected",
+                correlationId = attemptId,
+                transport = "WIFI_DIRECT",
+                result = "SESSION_CAPACITY_OR_NODE_ID_CONFLICT"
+            )
             runCatching { socket.close() }
             return false
         }
         previous?.takeIf { it !== session }?.close(notify = false)
         onPeerConnected(remote)
+        groupAttemptId.getAndSet(null)?.let { groupCorrelationId ->
+            diagnostics.record(
+                kind = NetworkEventKind.CONNECTION_STAGE,
+                operation = "wifi.p2p.session_ready",
+                correlationId = groupCorrelationId,
+                transport = "WIFI_DIRECT",
+                peerNodeId = remote.nodeId,
+                durationMs = ((System.nanoTime() - handshakeStartedAt) / 1_000_000L).coerceAtLeast(0L),
+                result = "TCP_SESSION_ACTIVE"
+            )
+        }
+        currentAttemptId = attemptId
+        currentPeer = remote.nodeId
+        diagnostics.record(
+            kind = NetworkEventKind.CONNECTION_STAGE,
+            operation = "wifi.tcp.session_active",
+            correlationId = attemptId,
+            transport = "WIFI_DIRECT",
+            peerNodeId = remote.nodeId,
+            durationMs = ((System.nanoTime() - handshakeStartedAt) / 1_000_000L).coerceAtLeast(0L),
+            result = "PROTOCOL_${remote.protocolVersion}"
+        )
         publishRuntimeState(WifiDirectStage.SESSION_READY)
         session.startReader()
         ensureHealthProbeLoop()
@@ -1224,15 +1731,24 @@ class WifiDirectManager(
     }
 
     private fun resetGroupConnections() {
+        resolveGroupAttemptAsStopped("GROUP_DISCONNECTED")
         connectAttempts.clear()
         connectionInfoRequestToken.incrementAndGet()
         connectionInfoRequestInProgress.set(false)
         connectionInfoWatchdogJob?.cancel(); connectionInfoWatchdogJob = null
         connectionAttemptInProgress.set(false)
+        connectionAttemptGeneration.incrementAndGet()
         connectionTimeoutJob?.cancel(); connectionTimeoutJob = null
-        serviceDiscoveryActive = false
+        connectRequestCallbackJob?.cancel(); connectRequestCallbackJob = null
+        synchronized(discoveryLock) {
+            discoveryRequestGeneration.incrementAndGet()
+            discoveryRequestInProgress.set(false)
+            serviceDiscoveryActive = false
+            discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
+        }
         groupFormed = false
         groupOwner = false
+        groupClientCount = 0
         groupOwnerAddress = null
         closeServer()
         closeMediaServer()
@@ -1242,6 +1758,18 @@ class WifiDirectManager(
         if (started && hasRequiredPermissions()) {
             if (localService == null || serviceRequest == null) installServiceAndDiscover()
             else beginDiscovery()
+        }
+    }
+
+    private fun resolveGroupAttemptAsStopped(result: String) {
+        groupAttemptId.getAndSet(null)?.let { attemptId ->
+            diagnostics.record(
+                kind = NetworkEventKind.CONNECTION_STAGE,
+                operation = "wifi.p2p.stopped",
+                correlationId = attemptId,
+                transport = "WIFI_DIRECT",
+                result = result
+            )
         }
     }
 
@@ -1310,9 +1838,14 @@ class WifiDirectManager(
         private const val DISCOVERY_RETRY_BASE_MS = 3_000L
         private const val DISCOVERY_RETRY_MAX_MS = 30_000L
         private const val SERVICE_SETUP_RETRY_MS = 4_000L
+        private const val SERVICE_CALLBACK_TIMEOUT_MS = 8_000L
+        private const val DISCOVERY_CALLBACK_TIMEOUT_MS = 8_000L
+        private const val CANDIDATE_RETENTION_MS = 60_000L
         private const val SOCKET_CONNECT_TIMEOUT_MS = 4_000
         private const val CLIENT_SOCKET_CONNECT_TIMEOUT_MS = 1_200
-        private const val CONNECT_NEGOTIATION_TIMEOUT_MS = 30_000L
+        private const val CONNECT_NEGOTIATION_NOTICE_MS = 30_000L
+        private const val CONNECT_REQUEST_CALLBACK_TIMEOUT_MS = 10_000L
+        private const val CONNECT_NEGOTIATION_TIMEOUT_MS = 120_000L
         private const val HANDSHAKE_TIMEOUT_MS = 6_000
         private const val TRANSPORT_ACK_TIMEOUT_MS = 8_000L
         private const val SEND_OPERATION_TIMEOUT_MS = 10_000L

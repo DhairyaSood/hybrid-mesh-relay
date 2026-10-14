@@ -51,6 +51,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hybridmesh.relay.data.NicknamePolicy
 import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
+import com.hybridmesh.relay.network.MeshTransportPreferences
 import com.hybridmesh.relay.permissions.PermissionManager
 import com.hybridmesh.relay.service.HybridMeshService
 import com.hybridmesh.relay.ui.ConversationScreen
@@ -115,6 +116,8 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     val activity = context as? MainActivity
     val lifecycleOwner = LocalLifecycleOwner.current
     val networkManager = NetworkManager.getInstance(context)
+    val transportPreferences = MeshTransportPreferences.getInstance(context)
+    val transportSelection by transportPreferences.selection.collectAsStateWithLifecycle()
     val identityStore = com.hybridmesh.relay.data.IdentityStore.getInstance(context)
     val networkState by networkManager.state.collectAsStateWithLifecycle()
     val identity by identityStore.identity.collectAsStateWithLifecycle()
@@ -126,7 +129,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     var showRadioPrompt by rememberSaveable { mutableStateOf(false) }
     var meshPermissionRequestLaunched by remember { mutableStateOf(false) }
     var showPermissionRecovery by remember { mutableStateOf(false) }
-    val hasAnyMeshTransportPermission = PermissionManager.hasAnyMeshTransportPermissionGranted(context)
+    val hasAnyMeshTransportPermission = PermissionManager.hasEnabledMeshTransportPermissionGranted(context, transportSelection)
 
     val blePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -135,7 +138,8 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         networkManager.refresh()
         // A denied bearer must not block the other one. Show recovery only when
         // neither BLE nor Wi-Fi Direct has the permission needed to operate.
-        showPermissionRecovery = !PermissionManager.hasAnyMeshTransportPermissionGranted(context)
+        showPermissionRecovery = transportSelection.anyEnabled &&
+            !PermissionManager.hasEnabledMeshTransportPermissionGranted(context, transportSelection)
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -162,9 +166,9 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(foregroundCycle, networkState.blePermissions, identity.deviceName) {
+    LaunchedEffect(foregroundCycle, networkState.blePermissions, transportSelection, identity.deviceName) {
         if (identity.deviceName.isBlank()) return@LaunchedEffect
-        val missing = PermissionManager.missingMeshPermissions(context)
+        val missing = PermissionManager.missingEnabledMeshPermissions(context, transportSelection)
         if (missing.isEmpty()) {
             PermissionManager.markMeshPermissionRequestCompleted(context)
         } else if (!PermissionManager.hasCompletedMeshPermissionRequest(context) && !meshPermissionRequestLaunched) {
@@ -178,7 +182,11 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
 
     // If permissions are later revoked in Android Settings, surface recovery on
     // the next foreground visit instead of silently leaving the runtime stopped.
-    LaunchedEffect(foregroundCycle, hasAnyMeshTransportPermission, identity.deviceName) {
+    LaunchedEffect(foregroundCycle, hasAnyMeshTransportPermission, transportSelection, identity.deviceName) {
+        if (!transportSelection.anyEnabled) {
+            showPermissionRecovery = false
+            return@LaunchedEffect
+        }
         if (identity.deviceName.isNotBlank() &&
             !hasAnyMeshTransportPermission &&
             PermissionManager.hasCompletedMeshPermissionRequest(context)
@@ -187,7 +195,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         }
     }
 
-    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, hasAnyMeshTransportPermission, identity.deviceName) {
+    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, hasAnyMeshTransportPermission, transportSelection, identity.deviceName) {
         if (identity.deviceName.isBlank()) return@LaunchedEffect
         val notificationPermission = PermissionManager.notifications(context)
         val shouldPrompt = notificationPermission.level == com.hybridmesh.relay.permissions.NotificationPermissionLevel.NOT_REQUESTED ||
@@ -204,7 +212,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
 
     // Start the service if either bearer can operate. In particular, do not gate
     // Wi-Fi Direct behind the full BLE permission set.
-    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, hasAnyMeshTransportPermission, identity.deviceName) {
+    LaunchedEffect(foregroundCycle, networkState.blePermissions.allGranted, hasAnyMeshTransportPermission, transportSelection, identity.deviceName) {
         if (hasAnyMeshTransportPermission && identity.deviceName.isNotBlank()) {
             runCatching { HybridMeshService.start(context) }
         }

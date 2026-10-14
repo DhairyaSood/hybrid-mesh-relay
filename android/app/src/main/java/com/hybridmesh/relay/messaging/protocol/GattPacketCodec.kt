@@ -39,7 +39,8 @@ object GattPacketCodec {
 
     data class AckFrame(
         val transferId: Long,
-        val accepted: Boolean
+        val accepted: Boolean,
+        val offset: Long? = null
     )
 
     data class MessageEnvelope(
@@ -146,15 +147,17 @@ object GattPacketCodec {
         }.getOrNull()
     }
 
-    fun encodeAck(transferId: Long, accepted: Boolean): ByteArray =
-        ByteBuffer.allocate(ACK_BYTES)
+    fun encodeAck(transferId: Long, accepted: Boolean, offset: Long? = null): ByteArray =
+        ByteBuffer.allocate(ACK_BYTES + if (offset == null) 0 else 4)
             .order(ByteOrder.BIG_ENDIAN)
             .apply {
+                require(offset == null || offset in 0..0xFFFF_FFFFL)
                 putShort(MAGIC)
                 put(VERSION)
                 put(TYPE_ACK)
                 putLong(transferId)
                 put(if (accepted) 1 else 0)
+                if (offset != null) putInt(offset.toInt())
             }
             .array()
 
@@ -199,10 +202,12 @@ object GattPacketCodec {
     }
 
     private fun decodeAck(buffer: ByteBuffer): AckFrame? {
-        if (buffer.remaining() != 9) return null
+        if (buffer.remaining() != 9 && buffer.remaining() != 13) return null
         val transferId = buffer.long
-        val accepted = buffer.get().toInt() == 1
-        return AckFrame(transferId, accepted)
+        val acceptedByte = buffer.get().toInt()
+        if (acceptedByte !in 0..1) return null
+        val offset = if (buffer.hasRemaining()) buffer.int.toLong() and 0xFFFF_FFFFL else null
+        return AckFrame(transferId, acceptedByte == 1, offset)
     }
 
     private fun nodeUuid(nodeId: String): UUID =
