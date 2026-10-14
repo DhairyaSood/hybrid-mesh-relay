@@ -399,7 +399,8 @@ class MessagingRepository private constructor(context: Context) {
         manifest: AttachmentTransferManifest,
         localPath: String,
         receivedFromNodeId: String,
-        localCanRelay: Boolean
+        localCanRelay: Boolean,
+        transport: String = "WIFI_DIRECT"
     ): Boolean =
         database.withTransaction {
             val localNodeId = identityStore.getIdentity().nodeId
@@ -432,7 +433,7 @@ class MessagingRepository private constructor(context: Context) {
                         createdAt = manifest.createdAt,
                         messageType = MessageType.ATTACHMENT.name,
                         status = DeliveryStatus.DELIVERED.name,
-                        lastTransport = "WIFI_DIRECT",
+                        lastTransport = transport,
                         deliveredAt = now,
                         attemptCount = 0,
                         nextAttemptAt = null,

@@ -16,6 +16,8 @@ import com.hybridmesh.relay.messaging.data.MessageTraceEventEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.data.PeerEntity
 import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
+import com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.model.ChatSummary
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
@@ -155,7 +157,14 @@ class MessagesViewModel(
             var importedFile: java.io.File? = null
             try {
                 val imported = withContext(Dispatchers.IO) {
-                    AttachmentFileStore.importPickedFile(getApplication(), uri)
+                    val runtime = meshRuntime.value
+                    val hasWifiDirectPeer = runtime.wifiDirectEnabled && runtime.connectedWifiPeers > 0
+                    val effectiveLimit = if (hasWifiDirectPeer) {
+                        AttachmentDescriptor.MAX_ATTACHMENT_BYTES
+                    } else {
+                        AttachmentTransferManifest.MAX_BLE_BYTES
+                    }
+                    AttachmentFileStore.importPickedFile(getApplication(), uri, effectiveLimit)
                 }
                 importedFile = imported.file
                 withContext(Dispatchers.IO) {

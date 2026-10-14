@@ -16,9 +16,13 @@ import com.hybridmesh.relay.messaging.model.GattTransportError
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.messaging.model.GattTransportState
 import com.hybridmesh.relay.messaging.protocol.GattPacketCodec
+import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
+import com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -148,7 +152,7 @@ class BleGattClient(context: Context) {
             val accepted = try {
                 withTimeout(BleGattConstants.ACK_TIMEOUT_MS) {
                     select<Boolean> {
-                        session.ack.onAwait { it }
+                        session.ack.onAwait { it.accepted }
                         session.failure.onAwait { throw GattTransportException(session.error) }
                     }
                 }
@@ -179,6 +183,125 @@ class BleGattClient(context: Context) {
         } catch (_: Exception) {
             session.fail(GattTransportError.INTERNAL_ERROR)
             return GattSendResult.Failed(GattTransportError.INTERNAL_ERROR, session.snapshot())
+        } finally {
+            session.markDisconnecting()
+            closeGatt(gatt)
+        }
+    }
+
+    /** Streams one attachment over a single GATT session, with resumable per-block custody ACKs. */
+    @SuppressLint("MissingPermission")
+    suspend fun sendAttachment(
+        device: BluetoothDevice,
+        manifest: AttachmentTransferManifest,
+        file: File,
+        runtimeGeneration: Long,
+        isRuntimeGenerationCurrent: () -> Boolean,
+        onProgress: suspend (Long) -> Unit = {},
+        onState: (GattTransportSnapshot) -> Unit = {}
+    ): Boolean {
+        if (!manifest.isValid() || manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES ||
+            !file.isFile || file.length() != manifest.sizeBytes ||
+            runCatching { AttachmentFileStore.sha256(file) }.getOrNull() != manifest.sha256) return false
+
+        val session = ClientSession(
+            address = safeAddress(device),
+            messageId = manifest.messageId,
+            runtimeGeneration = runtimeGeneration,
+            isRuntimeGenerationCurrent = isRuntimeGenerationCurrent,
+            publish = onState
+        )
+        val gatt = try { connect(device, session) } catch (_: CancellationException) { throw CancellationException() }
+            ?: return false
+
+        try {
+            session.requireRuntime()
+            session.transition(GattTransportState.DISCOVERING_SERVICES)
+            discoverServices(gatt, session)
+            session.transition(GattTransportState.SETTING_UP_NOTIFICATIONS)
+            enableNotifications(gatt, session)
+            session.transition(GattTransportState.NEGOTIATING_MTU)
+            val mtu = negotiateMtu(gatt, session)
+            val payloadBytes = GattPacketCodec.safePayloadBytes(mtu)
+            session.transition(GattTransportState.READY)
+            val streamId = UUID.randomUUID().leastSignificantBits
+
+            suspend fun sendFrame(bytes: ByteArray, expectedOffset: Long? = null): GattPacketCodec.AckFrame? {
+                val frameTransferId = UUID.randomUUID().leastSignificantBits
+                val count = ((bytes.size + payloadBytes - 1) / payloadBytes).coerceAtLeast(1)
+                if (count > GattPacketCodec.MAX_CHUNKS) return null
+                session.expectedTransferId = frameTransferId
+                session.ack = CompletableDeferred()
+                session.frameCount = count
+                session.bytesSent = 0
+                for (index in 0 until count) {
+                    session.requireRuntime()
+                    val start = index * payloadBytes
+                    val end = minOf(bytes.size, start + payloadBytes)
+                    val frame = GattPacketCodec.encodeData(
+                        GattPacketCodec.DataFrame(frameTransferId, index, count, bytes.copyOfRange(start, end))
+                    )
+                    session.transition(GattTransportState.WRITING, index)
+                    writeCharacteristic(gatt, session, frame)
+                    session.bytesSent += end - start
+                }
+                session.transition(GattTransportState.WAITING_ACK, null)
+                val ack = try {
+                    withTimeout(BleGattConstants.ACK_TIMEOUT_MS) {
+                        select<GattPacketCodec.AckFrame> {
+                            session.ack.onAwait { it }
+                            session.failure.onAwait { throw GattTransportException(session.error) }
+                        }
+                    }
+                } catch (_: kotlinx.coroutines.TimeoutCancellationException) { return null }
+                if (!ack.accepted) return null
+                if (expectedOffset != null && ack.offset != expectedOffset) return null
+                return ack
+            }
+
+            val beginAck = sendFrame(BleAttachmentFrameCodec.encodeBegin(streamId, manifest)) ?: return false
+            val resumeOffset = beginAck.offset ?: return false
+            if (resumeOffset !in 0..manifest.sizeBytes) return false
+            var offset = resumeOffset
+            onProgress(offset)
+
+            file.inputStream().buffered().use { input ->
+                var skipped = 0L
+                while (skipped < offset) {
+                    val count = input.skip(offset - skipped)
+                    if (count <= 0L) {
+                        if (input.read() < 0) return false
+                        skipped++
+                    } else skipped += count
+                }
+                val buffer = ByteArray(BleAttachmentFrameCodec.MAX_CHUNK_BYTES)
+                while (offset < manifest.sizeBytes) {
+                    session.requireRuntime()
+                    val wanted = minOf(buffer.size.toLong(), manifest.sizeBytes - offset).toInt()
+                    var read = 0
+                    while (read < wanted) {
+                        val count = input.read(buffer, read, wanted - read)
+                        if (count < 0) return false
+                        if (count > 0) read += count
+                    }
+                    val nextOffset = offset + read
+                    val appFrame = BleAttachmentFrameCodec.encodeChunk(
+                        streamId, manifest.messageId, offset, buffer.copyOf(read)
+                    )
+                    if (sendFrame(appFrame, nextOffset) == null) return false
+                    offset = nextOffset
+                    onProgress(offset)
+                }
+            }
+
+            val finish = sendFrame(BleAttachmentFrameCodec.encodeFinish(streamId, manifest.messageId), manifest.sizeBytes)
+                ?: return false
+            session.transition(GattTransportState.COMPLETED)
+            return finish.accepted
+        } catch (_: CancellationException) {
+            throw CancellationException()
+        } catch (_: Exception) {
+            return false
         } finally {
             session.markDisconnecting()
             closeGatt(gatt)
@@ -555,7 +678,7 @@ class BleGattClient(context: Context) {
     private fun handleNotification(session: ClientSession, value: ByteArray) {
         val ack = GattPacketCodec.decode(value) as? GattPacketCodec.AckFrame ?: return
         if (ack.transferId != session.expectedTransferId) return
-        session.ack.complete(ack.accepted)
+        session.ack.complete(ack)
     }
 
     private fun decodeIdentity(bytes: ByteArray): RemoteIdentity? {
@@ -640,7 +763,7 @@ class BleGattClient(context: Context) {
         val servicesDiscovered = CompletableDeferred<Unit>()
         val notificationsReady = CompletableDeferred<Unit>()
         val mtuChanged = CompletableDeferred<Boolean>()
-        val ack = CompletableDeferred<Boolean>()
+        var ack = CompletableDeferred<GattPacketCodec.AckFrame>()
         val failure = CompletableDeferred<Unit>()
 
         fun isRuntimeCurrent(): Boolean = isRuntimeGenerationCurrent()

@@ -14,6 +14,7 @@ data class NetworkState(
     val permissionsGranted: Boolean,
     val internetAvailable: Boolean,
     val networkEnabled: Boolean,
+    val bleEnabled: Boolean = true,
     val discoveryRequested: Boolean,
     val gattServerReady: Boolean,
     val advertisingState: BleOperationState,

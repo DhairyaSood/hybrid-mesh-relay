@@ -15,10 +15,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.hybridmesh.relay.ble.BleOperationState
 import com.hybridmesh.relay.messaging.MessagingManager
-import com.hybridmesh.relay.network.BluetoothState
-import com.hybridmesh.relay.network.NetworkManager
 import com.hybridmesh.relay.permissions.PermissionManager
 import com.hybridmesh.relay.ui.theme.RelayAccent
 import com.hybridmesh.relay.ui.theme.RelaySurface
@@ -28,7 +25,6 @@ import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 @Composable
 fun AppStatusStrip() {
     val context = LocalContext.current
-    val state by NetworkManager.getInstance(context).state.collectAsStateWithLifecycle()
     val manager = MessagingManager.getInstance(context)
     val mesh by manager.mesh.collectAsStateWithLifecycle()
     val peers by manager.meshPeers.collectAsStateWithLifecycle()
@@ -36,10 +32,9 @@ fun AppStatusStrip() {
     val wifiSupported = context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_WIFI_DIRECT)
     val wifiPermissionGranted = PermissionManager.wifiDirectPermissionGranted(context)
 
-    val bleReady = state.bleSupported && state.permissionsGranted &&
-        state.bluetoothState == BluetoothState.ON && state.scanningState == BleOperationState.ACTIVE
-    val wifiReady = wifiSupported && wifiEnabled && wifiPermissionGranted &&
-        (mesh.wifiDirectDiscoveryActive || mesh.connectedWifiPeers > 0)
+    val bleReady = mesh.bleEnabled && "BLE_GATT" in mesh.availableTransports
+    val wifiReady = mesh.wifiDirectEnabled && wifiSupported && wifiEnabled && wifiPermissionGranted &&
+        "WIFI_DIRECT" in mesh.availableTransports
     val activeBearers = buildList {
         if (bleReady) add("BLE")
         if (wifiReady) add("Wi-Fi Direct")
@@ -48,6 +43,7 @@ fun AppStatusStrip() {
         activeBearers.size == 2 -> "MESH ACTIVE · BLE + WI-FI DIRECT"
         bleReady -> "MESH ACTIVE · BLE"
         wifiReady -> "MESH ACTIVE · WI-FI DIRECT"
+        mesh.running && !mesh.bleEnabled && !mesh.wifiDirectEnabled -> "MESH PAUSED · ALL CARRIERS OFF"
         mesh.running -> "MESH RUNNING · CONNECTING"
         else -> "MESH STARTING"
     }

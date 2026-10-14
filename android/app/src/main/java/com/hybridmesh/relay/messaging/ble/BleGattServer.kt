@@ -75,8 +75,15 @@ class BleGattServer(context: Context) {
     @Volatile
     private var packetReceiver: (suspend (BluetoothDevice, ByteArray) -> Boolean)? = null
 
+    @Volatile
+    private var attachmentReceiver: (suspend (BluetoothDevice, ByteArray) -> Long?)? = null
+
     fun setPacketReceiver(receiver: (suspend (BluetoothDevice, ByteArray) -> Boolean)?) {
         packetReceiver = receiver
+    }
+
+    fun setAttachmentReceiver(receiver: (suspend (BluetoothDevice, ByteArray) -> Long?)?) {
+        attachmentReceiver = receiver
     }
 
     @Volatile
@@ -473,14 +480,13 @@ class BleGattServer(context: Context) {
         synchronized(assembly) {
             if (assembly.completed) return
 
-            val currentBytes = assembly.chunks.values.sumOf { it.size }
-            val existingBytes = assembly.chunks[frame.chunkIndex]?.size ?: 0
-            val nextBytes =
-                currentBytes - existingBytes + frame.payload.size
+            val existingPayload = assembly.chunks[frame.chunkIndex]
+            val nextBytes = assembly.assembledBytes -
+                (existingPayload?.size ?: 0) + frame.payload.size
 
             if (
                 nextBytes >
-                com.hybridmesh.relay.messaging.mesh.MeshPacketCodec.MAX_PACKET_BYTES
+                com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec.MAX_FRAME_BYTES
             ) {
                 assemblies.remove(key)
                 sendAck(
@@ -492,6 +498,7 @@ class BleGattServer(context: Context) {
             }
 
             assembly.chunks[frame.chunkIndex] = frame.payload
+            assembly.assembledBytes = nextBytes
             assembly.lastUpdatedAt = System.currentTimeMillis()
 
             if (assembly.chunks.size != assembly.chunkCount) return
@@ -519,12 +526,13 @@ class BleGattServer(context: Context) {
         // durably accepted the complete packet (or determined that it is a
         // valid duplicate/already-consumed packet). This makes the one-hop ACK
         // a true custody/acceptance signal instead of merely a byte-arrival signal.
-        val receiver = packetReceiver
+        val isAttachmentFrame = com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec.isFrame(combined)
+        val hasReceiver = if (isAttachmentFrame) attachmentReceiver != null else packetReceiver != null
 
         assemblies.remove(key)
 
         if (
-            receiver == null ||
+            !hasReceiver ||
             callbackGeneration != serverGeneration
         ) {
             sendAck(
@@ -548,21 +556,16 @@ class BleGattServer(context: Context) {
             }
 
             try {
-                val accepted =
-                    withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
-                        try {
-                            receiver.invoke(device, combined)
-                        } catch (_: Exception) {
-                            false
-                        }
+                if (isAttachmentFrame) {
+                    val offset = withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
+                        try { attachmentReceiver?.invoke(device, combined) } catch (_: Exception) { null }
+                    }
+                    if (callbackGeneration == serverGeneration) sendAck(device, frame.transferId, offset != null, offset)
+                } else {
+                    val accepted = withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
+                        try { packetReceiver?.invoke(device, combined) == true } catch (_: Exception) { false }
                     } ?: false
-
-                if (callbackGeneration == serverGeneration) {
-                    sendAck(
-                        device,
-                        frame.transferId,
-                        accepted = accepted
-                    )
+                    if (callbackGeneration == serverGeneration) sendAck(device, frame.transferId, accepted)
                 }
             } finally {
                 meshProcessingSlots.release()
@@ -574,16 +577,14 @@ class BleGattServer(context: Context) {
     private fun sendAck(
         device: BluetoothDevice,
         transferId: Long,
-        accepted: Boolean
+        accepted: Boolean,
+        offset: Long? = null
     ): Boolean {
         if (!subscribedDevices.contains(safeAddress(device))) return false
 
         val characteristic = txCharacteristic ?: return false
         val currentServer = server ?: return false
-        val value = GattPacketCodec.encodeAck(
-            transferId,
-            accepted
-        )
+        val value = GattPacketCodec.encodeAck(transferId, accepted, offset)
 
         val success = try {
             if (Build.VERSION.SDK_INT >= 33) {
@@ -666,6 +667,7 @@ class BleGattServer(context: Context) {
         val transferId: Long,
         val chunkCount: Int,
         val chunks: MutableMap<Int, ByteArray> = mutableMapOf(),
+        var assembledBytes: Int = 0,
         var completed: Boolean = false,
         var lastUpdatedAt: Long = System.currentTimeMillis()
     )

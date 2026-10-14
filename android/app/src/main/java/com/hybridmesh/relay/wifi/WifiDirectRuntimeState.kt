@@ -14,13 +14,27 @@ enum class WifiDirectStage {
     DEGRADED
 }
 
+data class WifiDiscoveryCandidate(
+    val deviceName: String,
+    val deviceAddress: String,
+    val protocolVersion: String? = null,
+    val decision: String = "SERVICE_SEEN",
+    val lastSeen: Long = System.currentTimeMillis()
+)
+
 data class WifiDirectRuntimeState(
     val stage: WifiDirectStage = WifiDirectStage.STOPPED,
     val groupOwner: Boolean = false,
+    val groupFormed: Boolean = false,
     val groupOwnerAddress: String? = null,
     val controlServerReady: Boolean = false,
     val mediaServerReady: Boolean = false,
     val sessionCount: Int = 0,
+    val groupClientCount: Int = 0,
+    val candidates: List<WifiDiscoveryCandidate> = emptyList(),
+    val currentAttemptId: String? = null,
+    val currentPeer: String? = null,
+    val locationModeEnabled: Boolean = true,
     val retryCount: Int = 0,
     val lastError: String? = null,
     val stageSince: Long = System.currentTimeMillis(),

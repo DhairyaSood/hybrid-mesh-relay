@@ -28,8 +28,12 @@ data class AttachmentDescriptor(
             if (json.optInt("v") != VERSION) return null
             val id = json.optString("id").takeIf { it.isNotBlank() && it.length <= 160 } ?: return null
             val mime = json.optString("mime").lowercase()
-            if (!mime.startsWith("image/") && !mime.startsWith("video/")) return null
-            val name = json.optString("name").takeIf { it.isNotBlank() && it.length <= 180 } ?: return null
+            if ((!mime.startsWith("image/") && !mime.startsWith("video/")) ||
+                mime.toByteArray(Charsets.UTF_8).size > AttachmentTransferManifest.MAX_MIME_TYPE_UTF8_BYTES) return null
+            val name = json.optString("name").takeIf {
+                it.isNotBlank() && it.length <= AttachmentTransferManifest.MAX_DISPLAY_NAME_UTF8_BYTES &&
+                    it.toByteArray(Charsets.UTF_8).size <= AttachmentTransferManifest.MAX_DISPLAY_NAME_UTF8_BYTES
+            } ?: return null
             val size = json.optLong("size", -1L)
             if (size !in 1..MAX_ATTACHMENT_BYTES) return null
             val hash = json.optString("sha256").lowercase()
@@ -48,4 +52,8 @@ object AttachmentTransferStatus {
     const val RELAYED = "RELAYED"
     const val DELIVERED = "DELIVERED"
     const val FAILED = "FAILED"
+}
+
+object AttachmentTransferError {
+    const val WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT = "WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT"
 }

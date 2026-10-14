@@ -3,6 +3,7 @@ package com.hybridmesh.relay.messaging.mesh
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.content.Context
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
@@ -17,6 +18,7 @@ import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor
 import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
+import com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
@@ -24,6 +26,7 @@ import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.network.NetworkManager
 import com.hybridmesh.relay.network.NetworkDiagnostics
 import com.hybridmesh.relay.network.NetworkEventKind
+import com.hybridmesh.relay.network.MeshTransportPreferences
 import com.hybridmesh.relay.notifications.MessagingNotificationCoordinator
 import com.hybridmesh.relay.wifi.WifiDirectManager
 import com.hybridmesh.relay.wifi.WifiPeerSessionInfo
@@ -57,6 +60,7 @@ import kotlinx.coroutines.sync.withPermit
 class MeshEngine(context: Context) {
     private val appContext = context.applicationContext
     private val networkManager = NetworkManager.getInstance(appContext)
+    private val transportPreferences = MeshTransportPreferences.getInstance(appContext)
     private val networkDiagnostics = NetworkDiagnostics.getInstance()
     private val repository = MessagingRepository.getInstance(appContext)
     private val identityStore = IdentityStore.getInstance(appContext)
@@ -77,9 +81,9 @@ class MeshEngine(context: Context) {
         onPacket = ::onWifiTransportPacket,
         onPeerDisconnected = ::removeWifiPeer,
         onPeerHealthSample = ::onWifiPeerHealthSample,
-        onAttachmentBegin = ::onAttachmentBegin,
-        onAttachmentChunk = ::onAttachmentChunk,
-        onAttachmentFinish = ::onAttachmentFinish
+        onAttachmentBegin = { source, manifest -> onAttachmentBegin(source, manifest) },
+        onAttachmentChunk = { source, manifest, offset, bytes -> onAttachmentChunk(source, manifest, offset, bytes) },
+        onAttachmentFinish = { source, manifest -> onAttachmentFinish(source, manifest) }
     )
     private val wifiTransport = WifiDirectMeshTransport(wifiDirectManager)
     private val meshTransports = listOf<MeshTransport>(bleTransport, wifiTransport)
@@ -93,7 +97,8 @@ class MeshEngine(context: Context) {
     private val transportSendSlots = Semaphore(MAX_CONCURRENT_TRANSPORT_SENDS)
     private val fanoutAttemptSlots = Semaphore(MAX_CONCURRENT_FANOUT_ATTEMPTS)
     private val activeFanoutJobs = ConcurrentHashMap.newKeySet<Job>()
-    private val attachmentStartedAt = ConcurrentHashMap<String, Long>()
+    private data class AttachmentRateWindow(val startedAtNanos: Long, val initialBytes: Long)
+    private val attachmentRateWindows = ConcurrentHashMap<String, AttachmentRateWindow>()
 
     private val _snapshot = MutableStateFlow(MeshRuntimeSnapshot())
     val snapshot: StateFlow<MeshRuntimeSnapshot> = _snapshot.asStateFlow()
@@ -115,10 +120,12 @@ class MeshEngine(context: Context) {
 
         _snapshot.value = _snapshot.value.copy(
             running = true,
+            bleEnabled = transportPreferences.selection.value.bleEnabled,
+            wifiDirectEnabled = transportPreferences.selection.value.wifiDirectEnabled,
             updatedAt = System.currentTimeMillis()
         )
         // Optional transport: missing hardware/permission must not block BLE.
-        wifiDirectManager.start()
+        if (transportPreferences.selection.value.wifiDirectEnabled) wifiDirectManager.start()
 
         jobs += scope.launch {
             repository.observeQueuedOutgoing()
@@ -138,7 +145,38 @@ class MeshEngine(context: Context) {
                     repository.makeAllQueuedEligible()
                     repository.makePendingForwardingEligible()
                 }
-                if (!wifiDirectManager.isStarted()) wifiDirectManager.start()
+                if (transportPreferences.selection.value.wifiDirectEnabled && !wifiDirectManager.isStarted()) {
+                    wifiDirectManager.start()
+                }
+                wakeChannel.trySend(Unit)
+            }
+        }
+
+        jobs += scope.launch {
+            transportPreferences.selection.collect { selection ->
+                if (selection.wifiDirectEnabled) wifiDirectManager.start() else wifiDirectManager.stop()
+                val wifiState = wifiDirectManager.runtimeState.value
+                _snapshot.value = _snapshot.value.copy(
+                    bleEnabled = selection.bleEnabled,
+                    wifiDirectEnabled = selection.wifiDirectEnabled,
+                    availableTransports = meshTransports.filter { it.isAvailable() }.map { it.kind.name },
+                    wifiDirectDiscoveryActive = selection.wifiDirectEnabled && wifiDirectManager.isDiscoveryActive(),
+                    connectedWifiPeers = if (selection.wifiDirectEnabled) wifiDirectManager.connectedPeerCount() else 0,
+                    wifiDirectGroupClientCount = if (selection.wifiDirectEnabled) wifiState.groupClientCount else 0,
+                    wifiDirectGroupFormed = selection.wifiDirectEnabled && wifiState.groupFormed,
+                    wifiDirectGroupOwner = selection.wifiDirectEnabled && wifiState.groupOwner,
+                    wifiDirectCandidates = if (selection.wifiDirectEnabled) wifiState.candidates else emptyList(),
+                    wifiDirectStage = wifiState.stage.name,
+                    wifiDirectCurrentAttemptId = if (selection.wifiDirectEnabled) wifiState.currentAttemptId else null,
+                    wifiDirectCurrentPeer = if (selection.wifiDirectEnabled) wifiState.currentPeer else null,
+                    wifiDirectRetryCount = if (selection.wifiDirectEnabled) wifiState.retryCount else 0,
+                    wifiDirectStageSince = if (selection.wifiDirectEnabled) wifiState.stageSince else 0L,
+                    wifiDirectControlServerReady = selection.wifiDirectEnabled && wifiState.controlServerReady,
+                    wifiDirectMediaServerReady = selection.wifiDirectEnabled && wifiState.mediaServerReady,
+                    wifiDirectGroupOwnerAddress = if (selection.wifiDirectEnabled) wifiState.groupOwnerAddress else null,
+                    wifiDirectLastError = if (selection.wifiDirectEnabled) wifiState.lastError else null,
+                    updatedAt = System.currentTimeMillis()
+                )
                 wakeChannel.trySend(Unit)
             }
         }
@@ -153,7 +191,9 @@ class MeshEngine(context: Context) {
         // Retry optional Wi-Fi initialization slowly without blocking BLE or polling aggressively.
         jobs += scope.launch {
             while (currentCoroutineContext().isActive && started) {
-                if (!wifiDirectManager.isStarted()) wifiDirectManager.start()
+                if (transportPreferences.selection.value.wifiDirectEnabled && !wifiDirectManager.isStarted()) {
+                    wifiDirectManager.start()
+                }
                 delay(WIFI_START_RETRY_MS)
             }
         }
@@ -175,11 +215,29 @@ class MeshEngine(context: Context) {
         activeFanoutJobs.clear()
         wifiDirectManager.stop()
         receivedAtByPacket.clear()
+        attachmentRateWindows.clear()
+        val wifiState = wifiDirectManager.runtimeState.value
         _snapshot.value = _snapshot.value.copy(
             running = false,
             availableTransports = emptyList(),
             wifiDirectDiscoveryActive = false,
             connectedWifiPeers = 0,
+            wifiDirectGroupClientCount = wifiState.groupClientCount,
+            wifiDirectGroupFormed = wifiState.groupFormed,
+            wifiDirectGroupOwner = wifiState.groupOwner,
+            wifiDirectLocationModeEnabled = wifiState.locationModeEnabled,
+            wifiDirectCandidates = wifiState.candidates,
+            wifiDirectStage = wifiState.stage.name,
+            wifiDirectCurrentAttemptId = wifiState.currentAttemptId,
+            wifiDirectCurrentPeer = wifiState.currentPeer,
+            wifiDirectRetryCount = wifiState.retryCount,
+            wifiDirectStageSince = wifiState.stageSince,
+            wifiDirectControlServerReady = wifiState.controlServerReady,
+            wifiDirectMediaServerReady = wifiState.mediaServerReady,
+            wifiDirectGroupOwnerAddress = wifiState.groupOwnerAddress,
+            wifiDirectLastError = wifiState.lastError,
+            attachmentTransferActive = false,
+            currentAttachmentThroughputMbps = null,
             updatedAt = System.currentTimeMillis()
         )
     }
@@ -187,6 +245,9 @@ class MeshEngine(context: Context) {
     /** BLE-specific ingress adapter; core packet handling below is bearer-neutral. */
     suspend fun onBleTransportPacket(device: BluetoothDevice, payload: ByteArray): Boolean {
         val address = runCatching { device.address }.getOrDefault("Unknown")
+        if (BleAttachmentFrameCodec.isFrame(payload)) {
+            return onBleAttachmentFrame(address, payload) != null
+        }
         val sourceNodeId = peerDirectory.findByBleAddress(address)?.nodeId
         return onTransportPacket(
             sourceNodeId = sourceNodeId,
@@ -194,6 +255,43 @@ class MeshEngine(context: Context) {
             sourceTransport = MeshTransportKind.BLE_GATT,
             payload = payload
         )
+    }
+
+    suspend fun onBleAttachmentFrame(device: BluetoothDevice, payload: ByteArray): Long? {
+        val address = runCatching { device.address }.getOrDefault("Unknown")
+        return onBleAttachmentFrame(address, payload)
+    }
+
+    /** BLE attachment frames are accepted one bounded block at a time and persisted before ACK. */
+    private suspend fun onBleAttachmentFrame(address: String, payload: ByteArray): Long? {
+        if (!started || !transportPreferences.selection.value.bleEnabled) return null
+        val sourceNodeId = peerDirectory.findByBleAddress(address)?.nodeId ?: return null
+        val frame = BleAttachmentFrameCodec.decode(payload) ?: return null
+        return when (frame) {
+            is BleAttachmentFrameCodec.Frame.Begin -> {
+                if (frame.manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) return null
+                onAttachmentBegin(sourceNodeId, frame.manifest, MeshTransportKind.BLE_GATT)
+            }
+            is BleAttachmentFrameCodec.Frame.Chunk -> {
+                val record = repository.getAttachment(frame.messageId) ?: return null
+                if (!record.receivedFromNodeId.equals(sourceNodeId, true)) return null
+                val manifest = record.toAttachmentManifest()
+                val nextOffset = onAttachmentChunk(
+                    sourceNodeId,
+                    manifest,
+                    frame.offset,
+                    frame.bytes,
+                    MeshTransportKind.BLE_GATT
+                ) ?: return null
+                nextOffset
+            }
+            is BleAttachmentFrameCodec.Frame.Finish -> {
+                val record = repository.getAttachment(frame.messageId) ?: return null
+                if (!record.receivedFromNodeId.equals(sourceNodeId, true)) return null
+                val manifest = record.toAttachmentManifest()
+                if (onAttachmentFinish(sourceNodeId, manifest, MeshTransportKind.BLE_GATT)) manifest.sizeBytes else null
+            }
+        }
     }
 
     /** Shared ingress used by every bearer after its local peer context is resolved. */
@@ -204,6 +302,9 @@ class MeshEngine(context: Context) {
         payload: ByteArray
     ): Boolean {
         if (!started) return false
+        val selection = transportPreferences.selection.value
+        if (sourceTransport == MeshTransportKind.BLE_GATT && !selection.bleEnabled) return false
+        if (sourceTransport == MeshTransportKind.WIFI_DIRECT && !selection.wifiDirectEnabled) return false
         return handleReceivedPacket(
             payload = payload,
             sourceNodeId = sourceNodeId,
@@ -844,21 +945,22 @@ class MeshEngine(context: Context) {
         peer: MeshPeer,
         packet: MeshPacket
     ): MeshTransportKind? {
-        // Older/unknown peers receive the legacy v1 packet so ordinary messaging
-        // still works. Their route metadata cannot be preserved, so the trace is
-        // explicitly marked partial when the packet re-enters a v2 node.
-        val supportsTrace = peer.meshProtocolVersion >= MeshPacketCodec.PROTOCOL_VERSION
-        val wirePacket = if (supportsTrace) packet else packet.copy(
-            routeTransportCodes = emptyList(),
-            routeTraceComplete = false
-        )
-        val wireVersion = if (supportsTrace) MeshPacketCodec.PROTOCOL_VERSION else 1
-        val bytes = runCatching { MeshPacketCodec.encode(wirePacket, wireVersion) }.getOrNull() ?: return null
         var attempt = 0
         val candidates = transportSelector.candidates(peer).filter { (transport, _) ->
-            supportsTrace || transport.kind == MeshTransportKind.BLE_GATT
+            peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
+                transport.kind == MeshTransportKind.BLE_GATT
         }
         for ((transport, endpoint) in candidates) {
+            // Protocol support belongs to the endpoint, not the logical peer:
+            // one identity may have a newer Wi-Fi session and a legacy BLE link.
+            // Encode each fallback for the actual bearer that will carry it.
+            val supportsTrace = peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION
+            val wirePacket = if (supportsTrace) packet else packet.copy(
+                routeTransportCodes = emptyList(),
+                routeTraceComplete = false
+            )
+            val wireVersion = if (supportsTrace) MeshPacketCodec.PROTOCOL_VERSION else 1
+            val bytes = runCatching { MeshPacketCodec.encode(wirePacket, wireVersion) }.getOrNull() ?: continue
             attempt += 1
             if (attempt > 1) {
                 repository.recordTraceEvent(
@@ -873,10 +975,12 @@ class MeshEngine(context: Context) {
                 )
             }
             val startedAt = System.nanoTime()
+            val attemptId = UUID.randomUUID().toString()
             networkDiagnostics.record(
                 kind = NetworkEventKind.REQUEST_STARTED,
                 operation = "mesh.send",
                 correlationId = packet.messageId,
+                attemptId = attemptId,
                 transport = transport.kind.persistedName,
                 peerNodeId = peer.nodeId,
                 bytes = bytes.size.toLong(),
@@ -893,6 +997,19 @@ class MeshEngine(context: Context) {
             val result = try {
                 transportSendSlots.withPermit { transport.send(endpoint, bytes, packet.messageId) }
             } catch (cancelled: CancellationException) {
+                val durationMs = ((System.nanoTime() - startedAt) / 1_000_000L).coerceAtLeast(0L)
+                networkDiagnostics.record(
+                    kind = NetworkEventKind.REQUEST_FAILED,
+                    operation = "mesh.send",
+                    correlationId = packet.messageId,
+                    attemptId = attemptId,
+                    transport = transport.kind.persistedName,
+                    peerNodeId = peer.nodeId,
+                    durationMs = durationMs,
+                    bytes = bytes.size.toLong(),
+                    attempt = attempt,
+                    result = "CANCELLED"
+                )
                 throw cancelled
             } catch (failure: Exception) {
                 MeshTransportSendResult.Failed(transport.kind, failure.javaClass.simpleName)
@@ -914,6 +1031,7 @@ class MeshEngine(context: Context) {
                         kind = NetworkEventKind.REQUEST_SUCCEEDED,
                         operation = "mesh.send",
                         correlationId = packet.messageId,
+                        attemptId = attemptId,
                         transport = result.transport.persistedName,
                         peerNodeId = peer.nodeId,
                         durationMs = durationMs,
@@ -934,6 +1052,7 @@ class MeshEngine(context: Context) {
                         kind = NetworkEventKind.REQUEST_UNAVAILABLE,
                         operation = "mesh.send",
                         correlationId = packet.messageId,
+                        attemptId = attemptId,
                         transport = transport.kind.persistedName,
                         peerNodeId = peer.nodeId,
                         durationMs = durationMs,
@@ -953,6 +1072,7 @@ class MeshEngine(context: Context) {
                         kind = NetworkEventKind.REQUEST_FAILED,
                         operation = "mesh.send",
                         correlationId = packet.messageId,
+                        attemptId = attemptId,
                         transport = transport.kind.persistedName,
                         peerNodeId = peer.nodeId,
                         durationMs = durationMs,
@@ -969,14 +1089,13 @@ class MeshEngine(context: Context) {
     /** Legacy/unknown packet peers are supported only through the BLE v1 codec. */
     private fun hasCompatibleTransport(peer: MeshPeer): Boolean {
         val candidates = transportSelector.candidates(peer)
-        return if (peer.meshProtocolVersion < MeshPacketCodec.PROTOCOL_VERSION) {
-            candidates.any { it.first.kind == MeshTransportKind.BLE_GATT }
-        } else {
-            candidates.isNotEmpty()
+        return candidates.any { (transport, _) ->
+            peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
+                transport.kind == MeshTransportKind.BLE_GATT
         }
     }
 
-    /** Bulk files use Wi-Fi Direct only; BLE may carry the small attachment notice but never file bytes. */
+    /** Bulk files use Wi-Fi Direct or BLE, subject to each bearer’s attachment size limit. */
     private suspend fun attachmentLoop() {
         while (currentCoroutineContext().isActive && started) {
             val outgoing = repository.getPendingOutgoingAttachments(limit = 4)
@@ -993,23 +1112,54 @@ class MeshEngine(context: Context) {
                 }
 
                 val isOrigin = attachment.senderNodeId.equals(identityStore.getIdentity().nodeId, true)
+                if (isOrigin &&
+                    attachment.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES &&
+                    wifiDirectManager.connectedPeerCount() == 0
+                ) {
+                    if (attachment.status != AttachmentTransferStatus.WAITING_WIFI ||
+                        attachment.lastError != com.hybridmesh.relay.messaging.attachment.AttachmentTransferError.WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT) {
+                        repository.updateAttachmentProgress(
+                            attachment.messageId,
+                            AttachmentTransferStatus.WAITING_WIFI,
+                            attachment.transferredBytes,
+                            com.hybridmesh.relay.messaging.attachment.AttachmentTransferError.WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT
+                        )
+                    }
+                    continue
+                }
                 val isWaiting = attachment.status == AttachmentTransferStatus.WAITING_WIFI || attachment.status == AttachmentTransferStatus.RELAY_QUEUED
                 if (isWaiting && now - attachment.updatedAt < ATTACHMENT_RETRY_MS) {
                     continue
                 }
 
-                val connectedWifiPeers = peerDirectory.snapshot.value
+                val candidatePeers = peerDirectory.snapshot.value
                     .asSequence()
                     .filter { attachment.receivedFromNodeId.isNullOrBlank() || !it.nodeId.equals(attachment.receivedFromNodeId, true) }
-                    .filter { wifiDirectManager.hasPeer(it.nodeId) }
                     .filter { !it.nodeId.equals(attachment.senderNodeId, true) }
+                    .map { peer ->
+                        val transports = buildList {
+                            if (wifiDirectManager.hasPeer(peer.nodeId)) add(MeshTransportKind.WIFI_DIRECT)
+                            if (attachment.sizeBytes <= AttachmentTransferManifest.MAX_BLE_BYTES &&
+                                bleTransport.isAvailable() && bleTransport.canReach(peer.toTransportPeer())) {
+                                add(MeshTransportKind.BLE_GATT)
+                            }
+                        }
+                        peer to transports
+                    }
+                    .filter { it.second.isNotEmpty() }
                     .toList()
-                val nextHop = connectedWifiPeers.firstOrNull { it.nodeId.equals(attachment.recipientNodeId, true) }
-                    ?: connectedWifiPeers.firstOrNull {
-                        it.canRelay && it.canStoreForward &&
+                val nextHopCandidate = candidatePeers.firstOrNull { it.first.nodeId.equals(attachment.recipientNodeId, true) }
+                    ?: candidatePeers.firstOrNull { (peer, transports) ->
+                        peer.canRelay && peer.canStoreForward && transports.any { transport ->
+                            when (transport) {
+                                MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
+                                MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
+                                MeshTransportKind.LORA -> false
+                            }
+                        } &&
                             attachment.hopCount + 1 < AttachmentTransferManifest.MAX_HOPS
                     }
-                if (nextHop == null) {
+                if (nextHopCandidate == null) {
                     repository.updateAttachmentProgress(
                         attachment.messageId,
                         if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
@@ -1045,34 +1195,56 @@ class MeshEngine(context: Context) {
                     AttachmentTransferStatus.SENDING,
                     attachment.transferredBytes
                 )
-                val forwarded = wifiDirectManager.sendAttachmentToPeer(
-                    nextHop.nodeId,
-                    manifest,
-                    file,
-                    onProgress = { sent ->
-                        val startedAt = attachmentStartedAt.getOrPut(attachment.messageId) { System.nanoTime() }
-                        publishAttachmentThroughput(sent, startedAt, active = sent < attachment.sizeBytes)
-                        repository.updateAttachmentProgress(
-                            attachment.messageId,
-                            AttachmentTransferStatus.SENDING,
-                            sent
+                val nextHop = nextHopCandidate.first
+                var successfulTransport: MeshTransportKind? = null
+                for (transport in nextHopCandidate.second) {
+                    val forwarded = when (transport) {
+                        MeshTransportKind.WIFI_DIRECT -> wifiDirectManager.sendAttachmentToPeer(
+                            nextHop.nodeId, manifest, file,
+                            onProgress = { sent ->
+                                val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
+                                    AttachmentRateWindow(System.nanoTime(), sent)
+                                }
+                                publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
+                                repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
+                            }
                         )
+                        MeshTransportKind.BLE_GATT -> bleTransport.sendAttachment(
+                            nextHop.toTransportPeer(), manifest, file,
+                            onProgress = { sent ->
+                                val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
+                                    AttachmentRateWindow(System.nanoTime(), sent)
+                                }
+                                publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
+                                repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
+                            }
+                        )
+                        MeshTransportKind.LORA -> false
                     }
-                )
                 if (forwarded) {
-                    publishAttachmentThroughput(attachment.sizeBytes, attachmentStartedAt.remove(attachment.messageId), active = false)
+                        successfulTransport = transport
+                        break
+                    }
+                }
+                val completedTransport = successfulTransport
+                if (completedTransport != null) {
+                    publishAttachmentThroughput(
+                        attachment.sizeBytes, attachmentRateWindows.remove(attachment.messageId),
+                        active = false, transport = completedTransport
+                    )
                     repository.markAttachmentForwarded(attachment, nextHop.nodeId.equals(attachment.recipientNodeId, true))
                 } else {
                     publishAttachmentThroughput(
                         attachment.transferredBytes,
-                        attachmentStartedAt.remove(attachment.messageId),
-                        active = false
+                        attachmentRateWindows.remove(attachment.messageId),
+                        active = false,
+                        transport = nextHopCandidate.second.first()
                     )
                     repository.updateAttachmentProgress(
                         attachment.messageId,
                         if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
                         attachment.transferredBytes,
-                        "WIFI_DIRECT_TRANSFER_INTERRUPTED"
+                        "ATTACHMENT_TRANSFER_INTERRUPTED"
                     )
                 }
             }
@@ -1082,16 +1254,20 @@ class MeshEngine(context: Context) {
 
     private suspend fun onAttachmentBegin(
         sourceNodeId: String,
-        manifest: AttachmentTransferManifest
+        manifest: AttachmentTransferManifest,
+        transport: MeshTransportKind = MeshTransportKind.WIFI_DIRECT
     ): Long? {
         val isFinalRecipient = manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)
         if (!manifest.isValid() ||
+            (manifest.hopCount <= 1 && !manifest.senderNodeId.equals(sourceNodeId, true)) ||
+            (transport == MeshTransportKind.BLE_GATT && manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) ||
             (!isFinalRecipient && manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS) ||
             manifest.createdAt > System.currentTimeMillis() + MAX_CLOCK_SKEW_MS ||
             isExpired(manifest.createdAt, System.currentTimeMillis())) return null
         val resumeOffset = AttachmentFileStore.prepareReceive(appContext, manifest) ?: return null
         val finalPath = AttachmentFileStore.receivedFile(appContext, manifest.messageId).absolutePath
         if (!repository.prepareIncomingAttachment(manifest, finalPath, resumeOffset, sourceNodeId, localCanRelay = true)) return null
+        attachmentRateWindows[manifest.messageId] = AttachmentRateWindow(System.nanoTime(), resumeOffset)
         return resumeOffset
     }
 
@@ -1099,7 +1275,8 @@ class MeshEngine(context: Context) {
         sourceNodeId: String,
         manifest: AttachmentTransferManifest,
         offset: Long,
-        bytes: ByteArray
+        bytes: ByteArray,
+        transport: MeshTransportKind = MeshTransportKind.WIFI_DIRECT
     ): Long? {
         val nextOffset = AttachmentFileStore.appendChunk(
             appContext,
@@ -1113,23 +1290,36 @@ class MeshEngine(context: Context) {
             AttachmentTransferStatus.RECEIVING,
             nextOffset
         )
-        val startedAt = attachmentStartedAt.getOrPut(manifest.messageId) { System.nanoTime() }
-        publishAttachmentThroughput(nextOffset, startedAt, active = nextOffset < manifest.sizeBytes)
+        val rateWindow = attachmentRateWindows.getOrPut(manifest.messageId) {
+            AttachmentRateWindow(System.nanoTime(), offset)
+        }
+        publishAttachmentThroughput(nextOffset, rateWindow, active = nextOffset < manifest.sizeBytes, transport = transport)
         return nextOffset
     }
 
     private suspend fun onAttachmentFinish(
         sourceNodeId: String,
-        manifest: AttachmentTransferManifest
+        manifest: AttachmentTransferManifest,
+        transport: MeshTransportKind = MeshTransportKind.WIFI_DIRECT
     ): Boolean {
-        val completedFile = AttachmentFileStore.finishReceive(appContext, manifest) ?: return false
-        val completed = repository.completeIncomingAttachment(manifest, completedFile.absolutePath, sourceNodeId, localCanRelay = true)
+        val completedFile = AttachmentFileStore.finishReceive(appContext, manifest) ?: run {
+            attachmentRateWindows.remove(manifest.messageId)
+            return false
+        }
+        val completed = repository.completeIncomingAttachment(
+            manifest, completedFile.absolutePath, sourceNodeId, localCanRelay = true,
+            transport = transport.persistedName
+        )
+        val rateWindow = attachmentRateWindows.remove(manifest.messageId)
         if (completed) {
-            publishAttachmentThroughput(manifest.sizeBytes, attachmentStartedAt.remove(manifest.messageId), active = false)
+            publishAttachmentThroughput(
+                manifest.sizeBytes, rateWindow, active = false,
+                transport = transport
+            )
             repository.recordTraceEvent(
                 messageId = manifest.messageId,
                 eventType = if (manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)) "ATTACHMENT_DELIVERED" else "ATTACHMENT_STORED_FOR_RELAY",
-                transport = MeshTransportKind.WIFI_DIRECT.persistedName,
+                transport = transport.persistedName,
                 peerNodeId = sourceNodeId,
                 resultCode = "VERIFIED"
             )
@@ -1137,15 +1327,35 @@ class MeshEngine(context: Context) {
         return completed
     }
 
-    private fun publishAttachmentThroughput(bytes: Long, startedAt: Long?, active: Boolean) {
-        if (startedAt == null || bytes <= 0L) return
-        val elapsedSeconds = ((System.nanoTime() - startedAt).coerceAtLeast(1L)) / 1_000_000_000.0
-        val mbps = (bytes * 8.0 / elapsedSeconds) / 1_000_000.0
+    private fun AttachmentRecordEntity.toAttachmentManifest() = AttachmentTransferManifest(
+        messageId = messageId,
+        senderNodeId = senderNodeId,
+        recipientNodeId = recipientNodeId,
+        mimeType = mimeType,
+        displayName = displayName,
+        sizeBytes = sizeBytes,
+        sha256 = sha256,
+        createdAt = createdAt,
+        hopCount = hopCount
+    )
+
+    private fun publishAttachmentThroughput(
+        bytes: Long,
+        rateWindow: AttachmentRateWindow?,
+        active: Boolean,
+        transport: MeshTransportKind = MeshTransportKind.WIFI_DIRECT
+    ) {
+        if (rateWindow == null) return
+        val transferredSinceStart = (bytes - rateWindow.initialBytes).coerceAtLeast(0L)
+        val elapsedSeconds = ((System.nanoTime() - rateWindow.startedAtNanos).coerceAtLeast(1L)) / 1_000_000_000.0
+        val mbps = if (transferredSinceStart > 0L) {
+            (transferredSinceStart * 8.0 / elapsedSeconds) / 1_000_000.0
+        } else null
         _snapshot.value = _snapshot.value.copy(
             currentAttachmentThroughputMbps = if (active) mbps else null,
-            lastAttachmentThroughputMbps = if (active) _snapshot.value.lastAttachmentThroughputMbps else mbps,
+            lastAttachmentThroughputMbps = if (active || mbps == null) _snapshot.value.lastAttachmentThroughputMbps else mbps,
             attachmentTransferActive = active,
-            attachmentTransport = "WIFI_DIRECT",
+            attachmentTransport = transport.persistedName,
             updatedAt = System.currentTimeMillis()
         )
     }
@@ -1162,13 +1372,27 @@ class MeshEngine(context: Context) {
             val now = System.currentTimeMillis()
             _snapshot.value = _snapshot.value.copy(
                 running = true,
+                bleEnabled = transportPreferences.selection.value.bleEnabled,
+                wifiDirectEnabled = transportPreferences.selection.value.wifiDirectEnabled,
                 relayEnabled = true,
                 pendingForwarding = repository.pendingForwardCount(now),
                 cachedPackets = repository.activeSeenPacketCount(now),
                 availableTransports = meshTransports.filter { it.isAvailable() }.map { it.kind.name },
                 wifiDirectDiscoveryActive = wifiDirectManager.isDiscoveryActive(),
                 connectedWifiPeers = wifiDirectManager.connectedPeerCount(),
+                wifiDirectGroupClientCount = wifiDirectManager.runtimeState.value.groupClientCount,
+                wifiDirectGroupFormed = wifiDirectManager.runtimeState.value.groupFormed,
+                wifiDirectGroupOwner = wifiDirectManager.runtimeState.value.groupOwner,
+                wifiDirectLocationModeEnabled = wifiDirectManager.runtimeState.value.locationModeEnabled,
+                wifiDirectCandidates = wifiDirectManager.runtimeState.value.candidates,
                 wifiDirectStage = wifiDirectManager.runtimeState.value.stage.name,
+                wifiDirectCurrentAttemptId = wifiDirectManager.runtimeState.value.currentAttemptId,
+                wifiDirectCurrentPeer = wifiDirectManager.runtimeState.value.currentPeer,
+                wifiDirectRetryCount = wifiDirectManager.runtimeState.value.retryCount,
+                wifiDirectStageSince = wifiDirectManager.runtimeState.value.stageSince,
+                wifiDirectControlServerReady = wifiDirectManager.runtimeState.value.controlServerReady,
+                wifiDirectMediaServerReady = wifiDirectManager.runtimeState.value.mediaServerReady,
+                wifiDirectGroupOwnerAddress = wifiDirectManager.runtimeState.value.groupOwnerAddress,
                 wifiDirectLastError = wifiDirectManager.runtimeState.value.lastError,
                 updatedAt = now
             )

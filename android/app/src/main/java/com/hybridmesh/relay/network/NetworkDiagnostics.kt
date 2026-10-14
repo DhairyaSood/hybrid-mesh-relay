@@ -13,7 +13,10 @@ enum class NetworkEventKind {
     TRANSPORT_AVAILABLE,
     TRANSPORT_UNAVAILABLE,
     HEALTH_PROBE_SUCCEEDED,
-    HEALTH_PROBE_FAILED
+    HEALTH_PROBE_FAILED,
+    LIFECYCLE,
+    DISCOVERY_CANDIDATE,
+    CONNECTION_STAGE
 }
 
 data class NetworkDiagnosticEvent(
@@ -22,6 +25,7 @@ data class NetworkDiagnosticEvent(
     val kind: NetworkEventKind,
     val operation: String,
     val correlationId: String? = null,
+    val attemptId: String? = null,
     val transport: String? = null,
     val peerNodeId: String? = null,
     val durationMs: Long? = null,
@@ -153,6 +157,7 @@ class NetworkDiagnostics private constructor() {
         kind: NetworkEventKind,
         operation: String,
         correlationId: String? = null,
+        attemptId: String? = null,
         transport: String? = null,
         peerNodeId: String? = null,
         durationMs: Long? = null,
@@ -168,6 +173,7 @@ class NetworkDiagnostics private constructor() {
             kind = kind,
             operation = operation,
             correlationId = correlationId,
+            attemptId = attemptId,
             transport = transport,
             peerNodeId = peerNodeId,
             durationMs = durationMs,

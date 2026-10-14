@@ -1,7 +1,11 @@
 package com.hybridmesh.relay.messaging.mesh
 
+import com.hybridmesh.relay.wifi.WifiDiscoveryCandidate
+
 data class MeshRuntimeSnapshot(
     val running: Boolean = false,
+    val bleEnabled: Boolean = true,
+    val wifiDirectEnabled: Boolean = true,
     val relayEnabled: Boolean = true,
     val pendingForwarding: Int = 0,
     val cachedPackets: Int = 0,
@@ -17,7 +21,19 @@ data class MeshRuntimeSnapshot(
     val availableTransports: List<String> = emptyList(),
     val wifiDirectDiscoveryActive: Boolean = false,
     val connectedWifiPeers: Int = 0,
+    val wifiDirectGroupClientCount: Int = 0,
+    val wifiDirectGroupFormed: Boolean = false,
+    val wifiDirectGroupOwner: Boolean = false,
+    val wifiDirectLocationModeEnabled: Boolean = true,
+    val wifiDirectCandidates: List<WifiDiscoveryCandidate> = emptyList(),
     val wifiDirectStage: String = "STOPPED",
+    val wifiDirectCurrentAttemptId: String? = null,
+    val wifiDirectCurrentPeer: String? = null,
+    val wifiDirectRetryCount: Int = 0,
+    val wifiDirectStageSince: Long = 0L,
+    val wifiDirectControlServerReady: Boolean = false,
+    val wifiDirectMediaServerReady: Boolean = false,
+    val wifiDirectGroupOwnerAddress: String? = null,
     val wifiDirectLastError: String? = null,
     val updatedAt: Long = System.currentTimeMillis()
 )

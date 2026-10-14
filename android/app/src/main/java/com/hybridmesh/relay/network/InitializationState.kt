@@ -2,6 +2,7 @@ package com.hybridmesh.relay.network
 
 /** User-facing startup/recovery phases. This is observational and never owns persistence. */
 enum class InitializationState {
+    DISABLED,
     BOOTSTRAPPING,
     CHECKING_PERMISSIONS,
     STARTING_BLE,

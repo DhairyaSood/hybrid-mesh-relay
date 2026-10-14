@@ -4,9 +4,12 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import com.hybridmesh.relay.messaging.ble.BleGattClient
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.network.BluetoothState
+import com.hybridmesh.relay.network.MeshTransportPreferences
 import com.hybridmesh.relay.network.NetworkManager
+import java.io.File
 
 /** BLE/GATT adapter preserving the existing Neyra frame and acceptance protocol. */
 internal class BleGattMeshTransport(
@@ -17,13 +20,15 @@ internal class BleGattMeshTransport(
 ) : MeshTransport {
     private val appContext = context.applicationContext
     private val bluetoothManager = appContext.getSystemService(BluetoothManager::class.java)
+    private val transportPreferences = MeshTransportPreferences.getInstance(appContext)
     private val peerLocks = PeerLockRegistry()
 
     override val kind: MeshTransportKind = MeshTransportKind.BLE_GATT
 
     override fun isAvailable(): Boolean {
         val state = networkManager.state.value
-        return state.bleSupported && state.permissionsGranted &&
+        return transportPreferences.selection.value.bleEnabled &&
+            state.bleSupported && state.permissionsGranted &&
             state.bluetoothState == BluetoothState.ON && state.gattServerReady
     }
 
@@ -76,6 +81,36 @@ internal class BleGattMeshTransport(
                     ?.error?.name ?: "BLE_SEND_FAILED"
                 MeshTransportSendResult.Failed(kind, reason)
             }
+        } finally {
+            lease.close()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun sendAttachment(
+        peer: MeshTransportPeer,
+        manifest: AttachmentTransferManifest,
+        file: File,
+        onProgress: suspend (Long) -> Unit
+    ): Boolean {
+        if (!isAvailable() || manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES || !canReach(peer)) return false
+        val address = peer.bleAddress?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) } ?: return false
+        val device = runCatching { bluetoothManager?.adapter?.getRemoteDevice(address) }.getOrNull() ?: return false
+        val lease = peerLocks.tryAcquire(peer.nodeId) ?: return false
+        try {
+            val generation = networkManager.runtimeGeneration.value
+            if (!isAvailable()) return false
+            return gattClient.sendAttachment(
+                device = device,
+                manifest = manifest,
+                file = file,
+                runtimeGeneration = generation,
+                isRuntimeGenerationCurrent = {
+                    networkManager.runtimeGeneration.value == generation && isAvailable()
+                },
+                onProgress = { onProgress(it) },
+                onState = onState
+            )
         } finally {
             lease.close()
         }

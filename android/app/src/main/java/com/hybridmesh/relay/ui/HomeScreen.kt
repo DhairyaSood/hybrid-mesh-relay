@@ -103,9 +103,9 @@ private fun MeshStatusCard(
     wifiPermissionGranted: Boolean,
     onClick: () -> Unit
 ) {
-    val bleReady = state.bleSupported && state.permissionsGranted &&
+    val bleReady = state.bleEnabled && state.bleSupported && state.permissionsGranted &&
         state.bluetoothState == BluetoothState.ON && state.scanningState == BleOperationState.ACTIVE
-    val wifiReady = wifiSupported && wifiEnabled && wifiPermissionGranted &&
+    val wifiReady = mesh.wifiDirectEnabled && wifiSupported && wifiEnabled && wifiPermissionGranted &&
         (mesh.wifiDirectDiscoveryActive || mesh.connectedWifiPeers > 0)
     val headline = when {
         bleReady && wifiReady -> "Nearby mesh active over both transports"
@@ -128,7 +128,7 @@ private fun MeshStatusCard(
         }
         Text(headline, style = MaterialTheme.typography.titleMedium)
         TransportStatusLine("Bluetooth LE", bleStatus(state), bleReady)
-        TransportStatusLine("Wi-Fi Direct", wifiStatus(wifiEnabled, wifiSupported, wifiPermissionGranted, mesh), wifiReady)
+        TransportStatusLine("Wi-Fi Direct", wifiStatus(mesh.wifiDirectEnabled, wifiEnabled, wifiSupported, wifiPermissionGranted, mesh), wifiReady)
         Text("$peerCount nearby node${if (peerCount == 1) "" else "s"}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
         Text("Tap for network details", style = TechnicalTextStyle, color = RelayTextMuted)
     }
@@ -145,6 +145,7 @@ private fun TransportStatusLine(label: String, status: String, ready: Boolean) {
 }
 
 private fun bleStatus(state: NetworkState): String = when {
+    !state.bleEnabled -> "App disabled"
     !state.bleSupported -> "Unsupported"
     !state.permissionsGranted -> "Permission needed"
     state.bluetoothState != BluetoothState.ON -> state.bluetoothState.name.lowercase().replace('_', ' ')
@@ -153,7 +154,8 @@ private fun bleStatus(state: NetworkState): String = when {
     else -> state.bleRuntimeState.name.lowercase().replace('_', ' ')
 }
 
-private fun wifiStatus(enabled: Boolean, supported: Boolean, permissionGranted: Boolean, mesh: MeshRuntimeSnapshot): String = when {
+private fun wifiStatus(appEnabled: Boolean, enabled: Boolean, supported: Boolean, permissionGranted: Boolean, mesh: MeshRuntimeSnapshot): String = when {
+    !appEnabled -> "App disabled"
     !supported -> "Unsupported"
     !permissionGranted -> "Permission needed"
     !enabled -> "Wi-Fi is off"

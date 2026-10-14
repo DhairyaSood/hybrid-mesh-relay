@@ -16,10 +16,34 @@ data class MeshPeer(
     val wifiPort: Int? = null,
     val rssi: Int = -127,
     val lastSeen: Long = 0L,
-    val meshProtocolVersion: Int = 0,
-    val canRelay: Boolean = false,
-    val canStoreForward: Boolean = false
+    val bleProtocolVersion: Int = 0,
+    val wifiProtocolVersion: Int = 0,
+    val bleCanRelay: Boolean = false,
+    val bleCanStoreForward: Boolean = false,
+    val wifiCanRelay: Boolean = false,
+    val wifiCanStoreForward: Boolean = false
 ) {
+    val meshProtocolVersion: Int
+        get() = maxOf(
+            if (!bleAddress.isNullOrBlank()) bleProtocolVersion else 0,
+            if (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0) wifiProtocolVersion else 0
+        )
+
+    fun protocolVersionFor(transport: MeshTransportKind): Int = when (transport) {
+        MeshTransportKind.BLE_GATT -> bleProtocolVersion.takeIf { !bleAddress.isNullOrBlank() } ?: 0
+        MeshTransportKind.WIFI_DIRECT -> wifiProtocolVersion.takeIf {
+            !wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0
+        } ?: 0
+        MeshTransportKind.LORA -> 0
+    }
+
+    val canRelay: Boolean
+        get() = (!bleAddress.isNullOrBlank() && bleCanRelay) ||
+            (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0 && wifiCanRelay)
+    val canStoreForward: Boolean
+        get() = (!bleAddress.isNullOrBlank() && bleCanStoreForward) ||
+            (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0 && wifiCanStoreForward)
+
     fun toTransportPeer(): MeshTransportPeer = MeshTransportPeer(
         nodeId = nodeId,
         bleAddress = bleAddress,
@@ -44,14 +68,20 @@ class MeshPeerDirectory {
         val byNode = observed.associateBy { it.nodeId.normalized() }
         peers.entries.toList().forEach { (key, old) ->
             val ble = byNode[key]
-            val updated = if (ble == null) old.copy(bleAddress = null, rssi = -127) else old.copy(
+            val updated = if (ble == null) old.copy(
+                bleAddress = null,
+                bleProtocolVersion = 0,
+                bleCanRelay = false,
+                bleCanStoreForward = false,
+                rssi = -127
+            ) else old.copy(
                 deviceName = ble.deviceName.ifBlank { old.deviceName },
                 bleAddress = ble.address.takeUnless { it.isBlank() || it.equals("Unknown", true) },
                 rssi = ble.rssi,
                 lastSeen = maxOf(old.lastSeen, ble.lastSeen),
-                meshProtocolVersion = maxOf(old.meshProtocolVersion, ble.meshProtocolVersion),
-                canRelay = ble.canRelay || old.canRelay,
-                canStoreForward = ble.canStoreForward || old.canStoreForward
+                bleProtocolVersion = ble.meshProtocolVersion,
+                bleCanRelay = ble.canRelay,
+                bleCanStoreForward = ble.canStoreForward
             )
             if (updated.hasAnyEndpoint()) peers[key] = updated else peers.remove(key)
         }
@@ -67,9 +97,12 @@ class MeshPeerDirectory {
                 wifiPort = previous?.wifiPort,
                 rssi = ble.rssi,
                 lastSeen = maxOf(previous?.lastSeen ?: 0L, ble.lastSeen),
-                meshProtocolVersion = maxOf(previous?.meshProtocolVersion ?: 0, ble.meshProtocolVersion),
-                canRelay = ble.canRelay || (previous?.canRelay == true),
-                canStoreForward = ble.canStoreForward || (previous?.canStoreForward == true)
+                bleProtocolVersion = ble.meshProtocolVersion,
+                wifiProtocolVersion = previous?.wifiProtocolVersion ?: 0,
+                bleCanRelay = ble.canRelay,
+                bleCanStoreForward = ble.canStoreForward,
+                wifiCanRelay = previous?.wifiCanRelay ?: false,
+                wifiCanStoreForward = previous?.wifiCanStoreForward ?: false
             )
         }
         publishLocked()
@@ -97,9 +130,12 @@ class MeshPeerDirectory {
             wifiPort = port,
             rssi = previous?.rssi ?: -127,
             lastSeen = maxOf(previous?.lastSeen ?: 0L, observedAt),
-            meshProtocolVersion = maxOf(previous?.meshProtocolVersion ?: 0, protocolVersion),
-            canRelay = canRelay || (previous?.canRelay == true),
-            canStoreForward = canStoreForward || (previous?.canStoreForward == true)
+            bleProtocolVersion = previous?.bleProtocolVersion ?: 0,
+            wifiProtocolVersion = protocolVersion,
+            bleCanRelay = previous?.bleCanRelay ?: false,
+            bleCanStoreForward = previous?.bleCanStoreForward ?: false,
+            wifiCanRelay = canRelay,
+            wifiCanStoreForward = canStoreForward
         )
         publishLocked()
     }
@@ -107,7 +143,14 @@ class MeshPeerDirectory {
     fun removeWifi(nodeId: String) = synchronized(lock) {
         val key = nodeId.normalized()
         val previous = peers[key] ?: return@synchronized
-        val updated = previous.copy(wifiAddress = null, wifiHost = null, wifiPort = null)
+        val updated = previous.copy(
+            wifiAddress = null,
+            wifiHost = null,
+            wifiPort = null,
+            wifiProtocolVersion = 0,
+            wifiCanRelay = false,
+            wifiCanStoreForward = false
+        )
         if (updated.hasAnyEndpoint()) peers[key] = updated else peers.remove(key)
         publishLocked()
     }
