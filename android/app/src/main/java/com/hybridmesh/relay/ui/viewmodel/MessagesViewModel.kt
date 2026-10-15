@@ -158,8 +158,9 @@ class MessagesViewModel(
             try {
                 val imported = withContext(Dispatchers.IO) {
                     val runtime = meshRuntime.value
-                    val hasWifiDirectPeer = runtime.wifiDirectEnabled && runtime.connectedWifiPeers > 0
-                    val effectiveLimit = if (hasWifiDirectPeer) {
+                    val hasWifiDirectRoute = runtime.wifiDirectEnabled &&
+                        hasWifiDirectAttachmentRoute(peerNodeId)
+                    val effectiveLimit = if (hasWifiDirectRoute) {
                         AttachmentDescriptor.MAX_ATTACHMENT_BYTES
                     } else {
                         AttachmentTransferManifest.MAX_BLE_BYTES
@@ -185,6 +186,20 @@ class MessagesViewModel(
             }
         }
     }
+
+    private fun hasWifiDirectAttachmentRoute(recipientNodeId: String): Boolean {
+        val peers = meshPeers.value
+        val recipient = peers.firstOrNull { it.nodeId.equals(recipientNodeId, ignoreCase = true) } ?: return false
+        if (recipient.hasWifiDirectEndpoint()) return true
+        if (!recipient.isIndirect) return false
+        val relay = peers.firstOrNull {
+            it.nodeId.equals(recipient.reachableViaNodeId, ignoreCase = true)
+        } ?: return false
+        return relay.hasWifiDirectEndpoint() && relay.wifiCanRelay && relay.wifiCanStoreForward
+    }
+
+    private fun MeshPeer.hasWifiDirectEndpoint(): Boolean =
+        !wifiHost.isNullOrBlank() && (wifiPort ?: 0) in 1..65535
 
     fun addNode(
         nodeIdInput: String,

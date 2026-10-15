@@ -236,23 +236,34 @@ private fun NearbyList(
         } ?: meshPeer.deviceName.takeIf {
             it.isNotBlank() && !it.equals(meshPeer.nodeId, true)
         } ?: "Nearby node"
-        val transports = buildList {
-            if (blePeer != null || !meshPeer.bleAddress.isNullOrBlank()) add("BLE")
-            if (!meshPeer.wifiHost.isNullOrBlank() && (meshPeer.wifiPort ?: 0) > 0) add("WI-FI DIRECT")
-        }.joinToString(" · ")
+        val relayPeer = meshPeer.reachableViaNodeId?.let { via ->
+            meshPeers.firstOrNull { it.nodeId.equals(via, true) }
+        }
+        val transports = if (meshPeer.isIndirect) {
+            "WI-FI DIRECT VIA ${relayPeer?.deviceName ?: meshPeer.reachableViaDeviceName ?: "GROUP OWNER"}"
+        } else {
+            buildList {
+                if (blePeer != null || !meshPeer.bleAddress.isNullOrBlank()) add("BLE")
+                if (!meshPeer.wifiHost.isNullOrBlank() && (meshPeer.wifiPort ?: 0) > 0) add("WI-FI DIRECT")
+            }.joinToString(" · ")
+        }
+        val qualityPeer = if (meshPeer.isIndirect) relayPeer else meshPeer
         NearbyPeerItem(
             nodeId = meshPeer.nodeId,
             name = displayName,
             rssi = blePeer?.rssi,
             quality = connectionQuality(
-                bleRssi = blePeer?.rssi,
-                wifiHealth = if (!meshPeer.wifiHost.isNullOrBlank()) {
-                    diagnostics.peerHealth(meshPeer.nodeId, "WIFI_DIRECT")
+                bleRssi = blePeer?.rssi?.takeUnless { meshPeer.isIndirect },
+                wifiHealth = if (!qualityPeer?.wifiHost.isNullOrBlank()) {
+                    diagnostics.peerHealth(qualityPeer.nodeId, "WIFI_DIRECT")
                 } else {
                     null
                 }
             ),
-            transportLabel = transports.ifBlank { "NEARBY" }
+            transportLabel = transports.ifBlank { "NEARBY" },
+            viaRelay = meshPeer.reachableViaNodeId?.let {
+                relayPeer?.deviceName ?: meshPeer.reachableViaDeviceName ?: "group owner"
+            }
         )
     }.sortedBy { it.name.lowercase() }
 
@@ -282,6 +293,7 @@ private fun NearbyList(
                     rssi = peer.rssi,
                     quality = peer.quality,
                     transportLabel = peer.transportLabel,
+                    viaRelay = peer.viaRelay,
                     onCopyNodeId = onCopyNodeId
                 ) {
                     onConversationClick(peer.nodeId)
@@ -296,7 +308,8 @@ private data class NearbyPeerItem(
     val name: String,
     val rssi: Int?,
     val quality: ConnectionQuality?,
-    val transportLabel: String
+    val transportLabel: String,
+    val viaRelay: String?
 )
 
 @Composable
@@ -306,6 +319,7 @@ private fun PeerRow(
     rssi: Int?,
     quality: ConnectionQuality?,
     transportLabel: String,
+    viaRelay: String?,
     onCopyNodeId: (String) -> Unit,
     onClick: () -> Unit
 ) {
@@ -328,7 +342,9 @@ private fun PeerRow(
         }
 
         Text(
-            if (quality != null) {
+            if (viaRelay != null) {
+                "REACHABLE THROUGH $viaRelay · $transportLabel"
+            } else if (quality != null) {
                 "IN RANGE • $transportLabel · ${quality.detail}"
             } else {
                 "IN RANGE • $transportLabel"
@@ -343,7 +359,7 @@ private fun PeerRow(
 @Composable
 private fun ChatRow(chat: ChatSummary, onConversationClick: (String) -> Unit) {
     val status = when (chat.attachmentStatus) {
-        "WAITING_WIFI", "QUEUED", "RELAY_QUEUED" -> "MEDIA WAITING"
+        "WAITING_LINK", "WAITING_WIFI", "QUEUED", "RELAY_QUEUED" -> "MEDIA WAITING"
         "SENDING", "RECEIVING" -> "MEDIA TRANSFERRING"
         "RELAYED" -> "MEDIA FORWARDED"
         "DELIVERED" -> "MEDIA AVAILABLE"

@@ -51,3 +51,10 @@ internal class PeerLockRegistry {
         }
     }
 }
+
+/** Serializes every central GATT operation for a node across messaging and identity sync. */
+internal object BleGattPeerLocks {
+    private val registry = PeerLockRegistry()
+
+    fun tryAcquire(nodeId: String): PeerLockRegistry.Lease? = registry.tryAcquire(nodeId)
+}

@@ -21,7 +21,6 @@ internal class BleGattMeshTransport(
     private val appContext = context.applicationContext
     private val bluetoothManager = appContext.getSystemService(BluetoothManager::class.java)
     private val transportPreferences = MeshTransportPreferences.getInstance(appContext)
-    private val peerLocks = PeerLockRegistry()
 
     override val kind: MeshTransportKind = MeshTransportKind.BLE_GATT
 
@@ -54,7 +53,7 @@ internal class BleGattMeshTransport(
         val device = runCatching { bluetoothManager?.adapter?.getRemoteDevice(address) }
             .getOrNull()
             ?: return MeshTransportSendResult.Unavailable(kind, "BLE_DEVICE_NOT_FOUND")
-        val lease = peerLocks.tryAcquire(peer.nodeId)
+        val lease = BleGattPeerLocks.tryAcquire(peer.nodeId)
             ?: return MeshTransportSendResult.Unavailable(kind, "BLE_PEER_BUSY")
 
         try {
@@ -96,7 +95,7 @@ internal class BleGattMeshTransport(
         if (!isAvailable() || manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES || !canReach(peer)) return false
         val address = peer.bleAddress?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) } ?: return false
         val device = runCatching { bluetoothManager?.adapter?.getRemoteDevice(address) }.getOrNull() ?: return false
-        val lease = peerLocks.tryAcquire(peer.nodeId) ?: return false
+        val lease = BleGattPeerLocks.tryAcquire(peer.nodeId) ?: return false
         try {
             val generation = networkManager.runtimeGeneration.value
             if (!isAvailable()) return false

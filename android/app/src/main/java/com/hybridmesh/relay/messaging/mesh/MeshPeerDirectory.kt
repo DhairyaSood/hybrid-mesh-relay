@@ -1,6 +1,7 @@
 package com.hybridmesh.relay.messaging.mesh
 
 import com.hybridmesh.relay.ble.BlePeer
+import com.hybridmesh.relay.data.NodeIdGenerator
 import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,8 +22,14 @@ data class MeshPeer(
     val bleCanRelay: Boolean = false,
     val bleCanStoreForward: Boolean = false,
     val wifiCanRelay: Boolean = false,
-    val wifiCanStoreForward: Boolean = false
+    val wifiCanStoreForward: Boolean = false,
+    /** Non-null when this node is known through a relay rather than a direct radio session. */
+    val reachableViaNodeId: String? = null,
+    val reachableViaDeviceName: String? = null
 ) {
+    val isIndirect: Boolean
+        get() = reachableViaNodeId != null && !hasAnyEndpoint()
+
     val meshProtocolVersion: Int
         get() = maxOf(
             if (!bleAddress.isNullOrBlank()) bleProtocolVersion else 0,
@@ -59,8 +66,15 @@ data class MeshPeer(
  * Endpoint observations are runtime-only; Room schema and persisted identity stay unchanged.
  */
 class MeshPeerDirectory {
+    private data class IndirectRoster(
+        val revision: Long,
+        val observedAt: Long,
+        val peers: List<MeshPeer>
+    )
+
     private val lock = Any()
     private val peers = LinkedHashMap<String, MeshPeer>()
+    private val indirectRosters = LinkedHashMap<String, IndirectRoster>()
     private val _snapshot = MutableStateFlow<List<MeshPeer>>(emptyList())
     val snapshot: StateFlow<List<MeshPeer>> = _snapshot.asStateFlow()
 
@@ -142,17 +156,57 @@ class MeshPeerDirectory {
 
     fun removeWifi(nodeId: String) = synchronized(lock) {
         val key = nodeId.normalized()
-        val previous = peers[key] ?: return@synchronized
-        val updated = previous.copy(
-            wifiAddress = null,
-            wifiHost = null,
-            wifiPort = null,
-            wifiProtocolVersion = 0,
-            wifiCanRelay = false,
-            wifiCanStoreForward = false
-        )
-        if (updated.hasAnyEndpoint()) peers[key] = updated else peers.remove(key)
+        val previous = peers[key]
+        if (previous != null) {
+            val updated = previous.copy(
+                wifiAddress = null,
+                wifiHost = null,
+                wifiPort = null,
+                wifiProtocolVersion = 0,
+                wifiCanRelay = false,
+                wifiCanStoreForward = false
+            )
+            if (updated.hasAnyEndpoint()) peers[key] = updated else peers.remove(key)
+        }
+        // An indirect roster is scoped to the live relay session that supplied it.
+        indirectRosters.remove(key)
         publishLocked()
+    }
+
+    internal fun replaceIndirectPeers(
+        relayNodeId: String,
+        relayDeviceName: String,
+        revision: Long,
+        entries: List<WifiGroupRosterEntry>,
+        observedAt: Long = System.currentTimeMillis()
+    ): Boolean = synchronized(lock) {
+        val relayKey = relayNodeId.normalized()
+        if (!NodeIdGenerator.isValid(relayNodeId) || revision <= 0L) return@synchronized false
+        val previous = indirectRosters[relayKey]
+        if (previous != null && revision < previous.revision) return@synchronized false
+
+        val indirectPeers = entries.asSequence()
+            .filter { NodeIdGenerator.isValid(it.nodeId) && !it.nodeId.equals(relayNodeId, true) }
+            .distinctBy { it.nodeId.normalized() }
+            .map { entry ->
+                MeshPeer(
+                    nodeId = entry.nodeId,
+                    deviceName = entry.deviceName,
+                    lastSeen = observedAt,
+                    bleCanRelay = entry.canRelay,
+                    bleCanStoreForward = entry.canStoreForward,
+                    reachableViaNodeId = relayNodeId,
+                    reachableViaDeviceName = relayDeviceName
+                )
+            }
+            .toList()
+        indirectRosters[relayKey] = IndirectRoster(revision, observedAt, indirectPeers)
+        publishLocked()
+        true
+    }
+
+    fun pruneExpiredIndirectPeers(now: Long, maxAgeMs: Long = INDIRECT_ROSTER_MAX_AGE_MS) = synchronized(lock) {
+        if (indirectRosters.entries.removeAll { now - it.value.observedAt > maxAgeMs }) publishLocked()
     }
 
     fun findByBleAddress(address: String): MeshPeer? = synchronized(lock) {
@@ -164,10 +218,18 @@ class MeshPeerDirectory {
     }
 
     private fun publishLocked() {
-        _snapshot.value = peers.values
-            .filter { it.hasAnyEndpoint() }
-            .sortedBy { it.nodeId.lowercase(Locale.US) }
+        val visiblePeers = LinkedHashMap<String, MeshPeer>()
+        peers.forEach { (key, peer) -> if (peer.hasAnyEndpoint()) visiblePeers[key] = peer }
+        indirectRosters.values
+            .sortedByDescending { it.observedAt }
+            .flatMap { it.peers }
+            .forEach { peer -> visiblePeers.putIfAbsent(peer.nodeId.normalized(), peer) }
+        _snapshot.value = visiblePeers.values.sortedBy { it.nodeId.lowercase(Locale.US) }
     }
 
     private fun String.normalized(): String = trim().lowercase(Locale.US)
+
+    private companion object {
+        const val INDIRECT_ROSTER_MAX_AGE_MS = 30_000L
+    }
 }

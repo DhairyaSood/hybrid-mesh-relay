@@ -52,6 +52,7 @@ data class NetworkDiagnosticsSnapshot(
             val samples = inWindow(now, PEER_HEALTH_WINDOW_MS).filter {
                 it.peerNodeId.equals(peerNodeId, ignoreCase = true) &&
                     it.transport.equals(transport, ignoreCase = true) &&
+                    it.operation in setOf("mesh.send", "wifi.health_probe") &&
                     it.kind in TERMINAL_REQUEST_EVENTS
             }
             if (samples.isEmpty()) return null

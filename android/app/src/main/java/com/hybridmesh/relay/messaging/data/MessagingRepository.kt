@@ -43,7 +43,7 @@ class MessagingRepository private constructor(context: Context) {
     suspend fun getAttachment(messageId: String): AttachmentRecordEntity? = attachments.get(messageId)
 
     suspend fun getPendingOutgoingAttachments(limit: Int = 8): List<AttachmentRecordEntity> =
-        attachments.getPendingOutgoing(identityStore.getIdentity().nodeId, limit)
+        attachments.getPendingOutgoing(identityStore.getIdentity().nodeId, System.currentTimeMillis(), limit)
 
     suspend fun updateAttachmentProgress(
         messageId: String,
@@ -52,6 +52,29 @@ class MessagingRepository private constructor(context: Context) {
         error: String? = null
     ) {
         attachments.updateProgress(messageId, status, transferredBytes.coerceAtLeast(0L), System.currentTimeMillis(), error)
+    }
+
+    suspend fun scheduleAttachmentRetry(
+        record: AttachmentRecordEntity,
+        status: String,
+        transferredBytes: Long,
+        error: String?,
+        retryAt: Long,
+        countAsFailure: Boolean
+    ) {
+        attachments.scheduleRetry(
+            messageId = record.messageId,
+            status = status,
+            transferredBytes = transferredBytes.coerceAtLeast(0L),
+            updatedAt = System.currentTimeMillis(),
+            lastError = error,
+            nextAttemptAt = retryAt,
+            incrementRetryCount = if (countAsFailure) 1 else 0
+        )
+    }
+
+    suspend fun wakePendingAttachments() {
+        attachments.wakePendingOutgoing()
     }
 
     suspend fun resetInterruptedAttachmentTransfers() {

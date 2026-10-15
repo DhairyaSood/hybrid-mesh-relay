@@ -45,6 +45,7 @@ data class AttachmentDescriptor(
 
 object AttachmentTransferStatus {
     const val QUEUED = "QUEUED"
+    const val WAITING_LINK = "WAITING_LINK"
     const val WAITING_WIFI = "WAITING_WIFI"
     const val SENDING = "SENDING"
     const val RECEIVING = "RECEIVING"
@@ -56,4 +57,5 @@ object AttachmentTransferStatus {
 
 object AttachmentTransferError {
     const val WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT = "WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT"
+    const val TRANSFER_INTERRUPTED = "TRANSFER_INTERRUPTED"
 }

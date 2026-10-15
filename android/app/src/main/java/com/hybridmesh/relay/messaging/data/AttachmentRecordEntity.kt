@@ -21,5 +21,7 @@ data class AttachmentRecordEntity(
     val createdAt: Long,
     @ColumnInfo(defaultValue = "0") val transferredBytes: Long = 0L,
     val updatedAt: Long,
-    val lastError: String? = null
+    val lastError: String? = null,
+    @ColumnInfo(defaultValue = "0") val retryCount: Int = 0,
+    @ColumnInfo(defaultValue = "0") val nextAttemptAt: Long = 0L
 )

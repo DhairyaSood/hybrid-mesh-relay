@@ -7,6 +7,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.isActive
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.messaging.ble.BleGattClient
@@ -18,6 +19,7 @@ import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor
 import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferError
 import com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
@@ -49,6 +51,8 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 
 /**
@@ -91,18 +95,22 @@ class MeshEngine(context: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val wakeChannel = Channel<Unit>(Channel.CONFLATED)
+    private val attachmentWakeChannel = Channel<Unit>(Channel.CONFLATED)
     private val receivedAtByPacket = ConcurrentHashMap<String, Long>()
     private val forwardingSlots = Semaphore(MAX_CONCURRENT_FORWARD_PACKETS)
     private val originSlots = Semaphore(MAX_CONCURRENT_ORIGIN_SENDS)
     private val transportSendSlots = Semaphore(MAX_CONCURRENT_TRANSPORT_SENDS)
     private val fanoutAttemptSlots = Semaphore(MAX_CONCURRENT_FANOUT_ATTEMPTS)
     private val activeFanoutJobs = ConcurrentHashMap.newKeySet<Job>()
+    private val wifiRosterSendMutex = Mutex()
+    private val wifiRosterRevision = AtomicLong(0L)
+    @Volatile private var wifiRosterFingerprint: String? = null
     private data class AttachmentRateWindow(val startedAtNanos: Long, val initialBytes: Long)
     private val attachmentRateWindows = ConcurrentHashMap<String, AttachmentRateWindow>()
 
     private val _snapshot = MutableStateFlow(MeshRuntimeSnapshot())
     val snapshot: StateFlow<MeshRuntimeSnapshot> = _snapshot.asStateFlow()
-    /** Live endpoints discovered by BLE and Wi-Fi Direct, independent of either UI runtime. */
+    /** Direct endpoints plus currently reachable peers advertised by a Wi-Fi group owner. */
     val peers: StateFlow<List<MeshPeer>> = peerDirectory.snapshot
 
     private val _transport = MutableStateFlow(GattTransportSnapshot())
@@ -137,6 +145,7 @@ class MeshEngine(context: Context) {
             var previousTopology = emptyList<String>()
             networkManager.state.collect { state ->
                 peerDirectory.replaceBlePeers(state.peers)
+                attachmentWakeChannel.trySend(Unit)
                 val topology = state.peers.map {
                     "${it.nodeId}|${it.address}|${it.meshProtocolVersion}|${it.canRelay}|${it.canStoreForward}"
                 }.sorted()
@@ -144,6 +153,7 @@ class MeshEngine(context: Context) {
                     previousTopology = topology
                     repository.makeAllQueuedEligible()
                     repository.makePendingForwardingEligible()
+                    repository.wakePendingAttachments()
                 }
                 if (transportPreferences.selection.value.wifiDirectEnabled && !wifiDirectManager.isStarted()) {
                     wifiDirectManager.start()
@@ -156,6 +166,8 @@ class MeshEngine(context: Context) {
             transportPreferences.selection.collect { selection ->
                 if (selection.wifiDirectEnabled) wifiDirectManager.start() else wifiDirectManager.stop()
                 val wifiState = wifiDirectManager.runtimeState.value
+                repository.wakePendingAttachments()
+                attachmentWakeChannel.trySend(Unit)
                 _snapshot.value = _snapshot.value.copy(
                     bleEnabled = selection.bleEnabled,
                     wifiDirectEnabled = selection.wifiDirectEnabled,
@@ -163,6 +175,7 @@ class MeshEngine(context: Context) {
                     wifiDirectDiscoveryActive = selection.wifiDirectEnabled && wifiDirectManager.isDiscoveryActive(),
                     connectedWifiPeers = if (selection.wifiDirectEnabled) wifiDirectManager.connectedPeerCount() else 0,
                     wifiDirectGroupClientCount = if (selection.wifiDirectEnabled) wifiState.groupClientCount else 0,
+                    wifiDirectGroupMembers = if (selection.wifiDirectEnabled) wifiState.groupMembers else emptyList(),
                     wifiDirectGroupFormed = selection.wifiDirectEnabled && wifiState.groupFormed,
                     wifiDirectGroupOwner = selection.wifiDirectEnabled && wifiState.groupOwner,
                     wifiDirectCandidates = if (selection.wifiDirectEnabled) wifiState.candidates else emptyList(),
@@ -198,6 +211,13 @@ class MeshEngine(context: Context) {
             }
         }
 
+        jobs += scope.launch {
+            while (currentCoroutineContext().isActive && started) {
+                publishWifiGroupRoster()
+                delay(WIFI_GROUP_ROSTER_REFRESH_MS)
+            }
+        }
+
         jobs += scope.launch { originLoop() }
         jobs += scope.launch { forwardingLoop() }
         jobs += scope.launch { attachmentLoop() }
@@ -223,6 +243,7 @@ class MeshEngine(context: Context) {
             wifiDirectDiscoveryActive = false,
             connectedWifiPeers = 0,
             wifiDirectGroupClientCount = wifiState.groupClientCount,
+            wifiDirectGroupMembers = wifiState.groupMembers,
             wifiDirectGroupFormed = wifiState.groupFormed,
             wifiDirectGroupOwner = wifiState.groupOwner,
             wifiDirectLocationModeEnabled = wifiState.locationModeEnabled,
@@ -333,6 +354,8 @@ class MeshEngine(context: Context) {
             canRelay = peer.canRelay,
             canStoreForward = peer.canStoreForward
         )
+        scope.launch { repository.wakePendingAttachments() }
+        attachmentWakeChannel.trySend(Unit)
         scope.launch {
             repository.updateWifiDiscoveredPeer(
                 nodeId = peer.nodeId,
@@ -342,6 +365,7 @@ class MeshEngine(context: Context) {
                 canStoreForward = peer.canStoreForward
             )
         }
+        scope.launch { publishWifiGroupRoster() }
         wakeChannel.trySend(Unit)
     }
 
@@ -358,6 +382,9 @@ class MeshEngine(context: Context) {
 
     fun removeWifiPeer(nodeId: String) {
         peerDirectory.removeWifi(nodeId)
+        scope.launch { repository.wakePendingAttachments() }
+        attachmentWakeChannel.trySend(Unit)
+        scope.launch { publishWifiGroupRoster() }
         wakeChannel.trySend(Unit)
     }
 
@@ -608,6 +635,10 @@ class MeshEngine(context: Context) {
         if (packet.hopCount !in 0..MAX_TTL) return false
 
         val localNodeId = identityStore.getIdentity().nodeId
+        if (packet.packetType == MeshPacket.PacketType.DATA &&
+            packet.messageType == WifiGroupRosterCodec.MESSAGE_TYPE) {
+            return receiveWifiGroupRoster(packet, localNodeId, sourceNodeId, sourceTransport, now)
+        }
         if (packet.originNodeId.equals(localNodeId, true)) {
             // A structurally valid packet looped back to its origin is already
             // consumed. Accept it at the transport layer to prevent retries, but
@@ -643,6 +674,102 @@ class MeshEngine(context: Context) {
                     false
                 }
             }
+        }
+    }
+
+    private suspend fun receiveWifiGroupRoster(
+        packet: MeshPacket,
+        localNodeId: String,
+        sourceNodeId: String?,
+        sourceTransport: MeshTransportKind,
+        now: Long
+    ): Boolean {
+        val relayNodeId = sourceNodeId?.takeIf { it.isNotBlank() } ?: return false
+        val groupState = wifiDirectManager.runtimeState.value
+        if (sourceTransport != MeshTransportKind.WIFI_DIRECT ||
+            !packet.originNodeId.equals(relayNodeId, true) ||
+            !packet.destinationNodeId.equals(localNodeId, true) ||
+            packet.hopCount != 0 || packet.ttl != INITIAL_TTL ||
+            packet.expiresAt - packet.createdAt > WIFI_GROUP_ROSTER_PACKET_LIFETIME_MS ||
+            !groupState.groupFormed || groupState.groupOwner ||
+            !wifiDirectManager.hasPeer(relayNodeId)) return false
+
+        val roster = WifiGroupRosterCodec.decode(packet.content) ?: return false
+        val relayName = peerDirectory.findByNodeId(relayNodeId)?.deviceName ?: relayNodeId
+        val peers = roster.peers.filterNot { it.nodeId.equals(localNodeId, true) }
+        if (!peerDirectory.replaceIndirectPeers(relayNodeId, relayName, roster.revision, peers, now)) {
+            // A duplicated or stale roster is still safely consumed at the TCP layer.
+            return true
+        }
+
+        peers.forEach { peer ->
+            repository.updateWifiDiscoveredPeer(
+                nodeId = peer.nodeId,
+                displayName = peer.deviceName,
+                protocolVersion = MeshPacketCodec.PROTOCOL_VERSION,
+                canRelay = peer.canRelay,
+                canStoreForward = peer.canStoreForward,
+                observedAt = now
+            )
+        }
+        repository.wakePendingAttachments()
+        attachmentWakeChannel.trySend(Unit)
+        wakeChannel.trySend(Unit)
+        return true
+    }
+
+    /** The group owner tells each active app session which other Neyra clients can be reached through it. */
+    private suspend fun publishWifiGroupRoster() = wifiRosterSendMutex.withLock {
+        val groupState = wifiDirectManager.runtimeState.value
+        if (!started || !groupState.groupFormed || !groupState.groupOwner ||
+            !transportPreferences.selection.value.wifiDirectEnabled) {
+            wifiRosterFingerprint = null
+            return@withLock
+        }
+
+        val connectedPeers = wifiDirectManager.connectedPeerSessions()
+        val fingerprint = connectedPeers.joinToString("|") {
+            "${it.nodeId.lowercase()}=${it.deviceName}|${it.canRelay}|${it.canStoreForward}"
+        }
+        if (fingerprint != wifiRosterFingerprint) {
+            wifiRosterFingerprint = fingerprint
+            wifiRosterRevision.incrementAndGet()
+        }
+        val revision = wifiRosterRevision.updateAndGet { if (it == 0L) 1L else it }
+        val localNodeId = identityStore.getIdentity().nodeId
+        val now = System.currentTimeMillis()
+
+        coroutineScope {
+            connectedPeers.map { recipient ->
+                async {
+                    val entries = connectedPeers.asSequence()
+                        .filterNot { it.nodeId.equals(recipient.nodeId, true) }
+                        .map {
+                            WifiGroupRosterEntry(it.nodeId, it.deviceName, it.canRelay, it.canStoreForward)
+                        }
+                        .toList()
+                    val packet = MeshPacket(
+                        packetId = MeshPacketCodec.newPacketId(),
+                        messageId = "HMRM-${localNodeId.removePrefix("HMR-").lowercase()}::${UUID.randomUUID()}",
+                        originNodeId = localNodeId,
+                        destinationNodeId = recipient.nodeId,
+                        createdAt = now,
+                        expiresAt = now + WIFI_GROUP_ROSTER_PACKET_LIFETIME_MS,
+                        ttl = INITIAL_TTL,
+                        hopCount = 0,
+                        packetType = MeshPacket.PacketType.DATA,
+                        messageType = WifiGroupRosterCodec.MESSAGE_TYPE,
+                        content = WifiGroupRosterCodec.encode(revision, entries)
+                    )
+                    try {
+                        wifiDirectManager.sendToPeer(recipient.nodeId, MeshPacketCodec.encode(packet))
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+            }.awaitAll()
         }
     }
 
@@ -763,7 +890,9 @@ class MeshEngine(context: Context) {
                     sizeBytes = it.sizeBytes,
                     sha256 = it.sha256,
                     localPath = null,
-                    status = AttachmentTransferStatus.WAITING_WIFI,
+                    status = if (it.sizeBytes <= AttachmentTransferManifest.MAX_BLE_BYTES) {
+                        AttachmentTransferStatus.WAITING_LINK
+                    } else AttachmentTransferStatus.WAITING_WIFI,
                     receivedFromNodeId = immediatePeerNodeId,
                     hopCount = packet.hopCount,
                     createdAt = packet.createdAt,
@@ -1116,22 +1245,16 @@ class MeshEngine(context: Context) {
                     attachment.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES &&
                     wifiDirectManager.connectedPeerCount() == 0
                 ) {
-                    if (attachment.status != AttachmentTransferStatus.WAITING_WIFI ||
-                        attachment.lastError != com.hybridmesh.relay.messaging.attachment.AttachmentTransferError.WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT) {
-                        repository.updateAttachmentProgress(
-                            attachment.messageId,
-                            AttachmentTransferStatus.WAITING_WIFI,
-                            attachment.transferredBytes,
-                            com.hybridmesh.relay.messaging.attachment.AttachmentTransferError.WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT
-                        )
-                    }
+                    repository.scheduleAttachmentRetry(
+                        record = attachment,
+                        status = AttachmentTransferStatus.WAITING_WIFI,
+                        transferredBytes = attachment.transferredBytes,
+                        error = AttachmentTransferError.WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT,
+                        retryAt = System.currentTimeMillis() + ATTACHMENT_NO_ROUTE_RECHECK_MS,
+                        countAsFailure = false
+                    )
                     continue
                 }
-                val isWaiting = attachment.status == AttachmentTransferStatus.WAITING_WIFI || attachment.status == AttachmentTransferStatus.RELAY_QUEUED
-                if (isWaiting && now - attachment.updatedAt < ATTACHMENT_RETRY_MS) {
-                    continue
-                }
-
                 val candidatePeers = peerDirectory.snapshot.value
                     .asSequence()
                     .filter { attachment.receivedFromNodeId.isNullOrBlank() || !it.nodeId.equals(attachment.receivedFromNodeId, true) }
@@ -1160,10 +1283,18 @@ class MeshEngine(context: Context) {
                             attachment.hopCount + 1 < AttachmentTransferManifest.MAX_HOPS
                     }
                 if (nextHopCandidate == null) {
-                    repository.updateAttachmentProgress(
-                        attachment.messageId,
-                        if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
-                        attachment.transferredBytes
+                    val waitingStatus = when {
+                        !isOrigin -> AttachmentTransferStatus.RELAY_QUEUED
+                        attachment.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES -> AttachmentTransferStatus.WAITING_WIFI
+                        else -> AttachmentTransferStatus.WAITING_LINK
+                    }
+                    repository.scheduleAttachmentRetry(
+                        record = attachment,
+                        status = waitingStatus,
+                        transferredBytes = attachment.transferredBytes,
+                        error = null,
+                        retryAt = System.currentTimeMillis() + ATTACHMENT_NO_ROUTE_RECHECK_MS,
+                        countAsFailure = false
                     )
                     continue
                 }
@@ -1197,11 +1328,31 @@ class MeshEngine(context: Context) {
                 )
                 val nextHop = nextHopCandidate.first
                 var successfulTransport: MeshTransportKind? = null
+                var lastTransferError: String? = null
+                var latestTransferredBytes = attachment.transferredBytes
                 for (transport in nextHopCandidate.second) {
+                    val transferStartedAt = System.nanoTime()
+                    val attemptNumber = networkDiagnostics.snapshot.value.events.count {
+                        it.operation == "mesh.attachment.send" &&
+                            it.correlationId == attachment.messageId &&
+                            it.kind in TERMINAL_SEND_EVENTS
+                    } + 1
+                    val attemptId = UUID.randomUUID().toString()
+                    networkDiagnostics.record(
+                        kind = NetworkEventKind.REQUEST_STARTED,
+                        operation = "mesh.attachment.send",
+                        correlationId = attachment.messageId,
+                        attemptId = attemptId,
+                        transport = transport.persistedName,
+                        peerNodeId = nextHop.nodeId,
+                        bytes = attachment.sizeBytes,
+                        attempt = attemptNumber
+                    )
                     val forwarded = when (transport) {
                         MeshTransportKind.WIFI_DIRECT -> wifiDirectManager.sendAttachmentToPeer(
                             nextHop.nodeId, manifest, file,
                             onProgress = { sent ->
+                                latestTransferredBytes = sent
                                 val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
                                     AttachmentRateWindow(System.nanoTime(), sent)
                                 }
@@ -1212,6 +1363,7 @@ class MeshEngine(context: Context) {
                         MeshTransportKind.BLE_GATT -> bleTransport.sendAttachment(
                             nextHop.toTransportPeer(), manifest, file,
                             onProgress = { sent ->
+                                latestTransferredBytes = sent
                                 val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
                                     AttachmentRateWindow(System.nanoTime(), sent)
                                 }
@@ -1221,9 +1373,34 @@ class MeshEngine(context: Context) {
                         )
                         MeshTransportKind.LORA -> false
                     }
-                if (forwarded) {
+                    val transferDurationMs = ((System.nanoTime() - transferStartedAt) / 1_000_000L).coerceAtLeast(0L)
+                    val gattError = _transport.value
+                        .takeIf { it.messageId == attachment.messageId }
+                        ?.error
+                    val transferError = when {
+                        forwarded -> "ACCEPTED"
+                        transport == MeshTransportKind.BLE_GATT && gattError != null &&
+                            gattError != com.hybridmesh.relay.messaging.model.GattTransportError.NONE -> "BLE_${gattError.name}"
+                        transport == MeshTransportKind.BLE_GATT -> "BLE_TRANSFER_FAILED"
+                        else -> "WIFI_DIRECT_TRANSFER_FAILED"
+                    }
+                    networkDiagnostics.record(
+                        kind = if (forwarded) NetworkEventKind.REQUEST_SUCCEEDED else NetworkEventKind.REQUEST_FAILED,
+                        operation = "mesh.attachment.send",
+                        correlationId = attachment.messageId,
+                        attemptId = attemptId,
+                        transport = transport.persistedName,
+                        peerNodeId = nextHop.nodeId,
+                        durationMs = transferDurationMs,
+                        bytes = attachment.sizeBytes,
+                        attempt = attemptNumber,
+                        result = transferError
+                    )
+                    if (forwarded) {
                         successfulTransport = transport
                         break
+                    } else {
+                        lastTransferError = transferError
                     }
                 }
                 val completedTransport = successfulTransport
@@ -1235,20 +1412,37 @@ class MeshEngine(context: Context) {
                     repository.markAttachmentForwarded(attachment, nextHop.nodeId.equals(attachment.recipientNodeId, true))
                 } else {
                     publishAttachmentThroughput(
-                        attachment.transferredBytes,
+                        latestTransferredBytes,
                         attachmentRateWindows.remove(attachment.messageId),
                         active = false,
                         transport = nextHopCandidate.second.first()
                     )
-                    repository.updateAttachmentProgress(
-                        attachment.messageId,
-                        if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
-                        attachment.transferredBytes,
-                        "ATTACHMENT_TRANSFER_INTERRUPTED"
+                    val retryCount = (attachment.retryCount + 1).coerceAtMost(MAX_ATTACHMENT_RETRY_EXPONENT)
+                    val retryDelay = (ATTACHMENT_FAILURE_RETRY_BASE_MS * (1L shl (retryCount - 1)))
+                        .coerceAtMost(ATTACHMENT_FAILURE_RETRY_MAX_MS)
+                    repository.scheduleAttachmentRetry(
+                        record = attachment,
+                        status = when {
+                            !isOrigin -> AttachmentTransferStatus.RELAY_QUEUED
+                            attachment.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES -> AttachmentTransferStatus.WAITING_WIFI
+                            else -> AttachmentTransferStatus.WAITING_LINK
+                        },
+                        transferredBytes = latestTransferredBytes,
+                        error = lastTransferError ?: ATTACHMENT_TRANSFER_INTERRUPTED,
+                        retryAt = System.currentTimeMillis() + retryDelay,
+                        countAsFailure = true
                     )
                 }
             }
-            delay(if (outgoing.isEmpty()) 3_000L else 1_000L)
+            if (outgoing.isEmpty()) {
+                kotlinx.coroutines.withTimeoutOrNull(ATTACHMENT_IDLE_WAIT_MS) {
+                    attachmentWakeChannel.receive()
+                }
+            } else {
+                kotlinx.coroutines.withTimeoutOrNull(ATTACHMENT_RECHECK_MS) {
+                    attachmentWakeChannel.receive()
+                }
+            }
         }
     }
 
@@ -1363,6 +1557,7 @@ class MeshEngine(context: Context) {
     private suspend fun maintenanceLoop() {
         while (currentCoroutineContext().isActive && started) {
             repository.purgeMeshState()
+            peerDirectory.pruneExpiredIndirectPeers(System.currentTimeMillis())
             delay(MAINTENANCE_INTERVAL_MS)
         }
     }
@@ -1370,6 +1565,7 @@ class MeshEngine(context: Context) {
     private suspend fun snapshotLoop() {
         while (currentCoroutineContext().isActive && started) {
             val now = System.currentTimeMillis()
+            peerDirectory.pruneExpiredIndirectPeers(now)
             _snapshot.value = _snapshot.value.copy(
                 running = true,
                 bleEnabled = transportPreferences.selection.value.bleEnabled,
@@ -1381,6 +1577,7 @@ class MeshEngine(context: Context) {
                 wifiDirectDiscoveryActive = wifiDirectManager.isDiscoveryActive(),
                 connectedWifiPeers = wifiDirectManager.connectedPeerCount(),
                 wifiDirectGroupClientCount = wifiDirectManager.runtimeState.value.groupClientCount,
+                wifiDirectGroupMembers = wifiDirectManager.runtimeState.value.groupMembers,
                 wifiDirectGroupFormed = wifiDirectManager.runtimeState.value.groupFormed,
                 wifiDirectGroupOwner = wifiDirectManager.runtimeState.value.groupOwner,
                 wifiDirectLocationModeEnabled = wifiDirectManager.runtimeState.value.locationModeEnabled,
@@ -1514,6 +1711,8 @@ class MeshEngine(context: Context) {
         private const val MAINTENANCE_INTERVAL_MS = 30_000L
         private const val SNAPSHOT_INTERVAL_MS = 2_000L
         private const val WIFI_START_RETRY_MS = 15_000L
+        private const val WIFI_GROUP_ROSTER_REFRESH_MS = 5_000L
+        private const val WIFI_GROUP_ROSTER_PACKET_LIFETIME_MS = 30_000L
         private const val MAX_ORIGIN_BATCH = 8
         private const val MAX_CONCURRENT_ORIGIN_SENDS = 3
         private const val MAX_CONCURRENT_TRANSPORT_SENDS = 8
@@ -1521,9 +1720,20 @@ class MeshEngine(context: Context) {
         private const val MAX_FORWARD_BATCH = 16
         private const val MAX_CONCURRENT_FORWARD_PACKETS = 4
         private const val MAX_TRACKED_RECEIVE_TIMESTAMPS = 1_024
-        private const val ATTACHMENT_RETRY_MS = 15_000L
+        private const val ATTACHMENT_FAILURE_RETRY_BASE_MS = 5_000L
+        private const val ATTACHMENT_FAILURE_RETRY_MAX_MS = 60_000L
+        private const val ATTACHMENT_NO_ROUTE_RECHECK_MS = 5_000L
+        private const val MAX_ATTACHMENT_RETRY_EXPONENT = 5
+        private const val ATTACHMENT_RECHECK_MS = 1_000L
+        private const val ATTACHMENT_IDLE_WAIT_MS = 3_000L
+        private const val ATTACHMENT_TRANSFER_INTERRUPTED = "ATTACHMENT_TRANSFER_INTERRUPTED"
         private const val MAX_CLOCK_SKEW_MS = 2 * 60 * 1000L
         private const val DELIVERY_ACK_TYPE = "DELIVERY_ACK"
+        private val TERMINAL_SEND_EVENTS = setOf(
+            NetworkEventKind.REQUEST_SUCCEEDED,
+            NetworkEventKind.REQUEST_FAILED,
+            NetworkEventKind.REQUEST_UNAVAILABLE
+        )
 
         private val APPLICATION_MESSAGE_TYPES = setOf(
             MessageType.NORMAL.name,

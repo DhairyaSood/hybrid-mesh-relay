@@ -127,9 +127,13 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     var notificationRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
     var radioPromptShownForOffState by rememberSaveable { mutableStateOf(false) }
     var showRadioPrompt by rememberSaveable { mutableStateOf(false) }
+    var showLocationModePrompt by rememberSaveable { mutableStateOf(false) }
+    var skipLocationModePromptThisRun by remember { mutableStateOf(false) }
     var meshPermissionRequestLaunched by remember { mutableStateOf(false) }
     var showPermissionRecovery by remember { mutableStateOf(false) }
     val hasAnyMeshTransportPermission = PermissionManager.hasEnabledMeshTransportPermissionGranted(context, transportSelection)
+    val wifiDirectPermissionGranted = PermissionManager.wifiDirectPermissionGranted(context)
+    val locationModeEnabled = PermissionManager.locationModeEnabled(context)
 
     val blePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -166,6 +170,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // Ask for mesh permissions after nickname setup, when onboarding has finished.
     LaunchedEffect(foregroundCycle, networkState.blePermissions, transportSelection, identity.deviceName) {
         if (identity.deviceName.isBlank()) return@LaunchedEffect
         val missing = PermissionManager.missingEnabledMeshPermissions(context, transportSelection)
@@ -192,6 +197,29 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
             PermissionManager.hasCompletedMeshPermissionRequest(context)
         ) {
             showPermissionRecovery = true
+        }
+    }
+
+    LaunchedEffect(
+        foregroundCycle,
+        identity.deviceName,
+        transportSelection.wifiDirectEnabled,
+        wifiDirectPermissionGranted,
+        locationModeEnabled
+    ) {
+        if (locationModeEnabled) skipLocationModePromptThisRun = false
+        if (identity.deviceName.isNotBlank() &&
+            transportSelection.wifiDirectEnabled &&
+            wifiDirectPermissionGranted &&
+            !locationModeEnabled &&
+            !skipLocationModePromptThisRun
+        ) {
+            showLocationModePrompt = true
+        } else if (identity.deviceName.isBlank() ||
+            !transportSelection.wifiDirectEnabled ||
+            locationModeEnabled
+        ) {
+            showLocationModePrompt = false
         }
     }
 
@@ -341,6 +369,31 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
                 }) { Text("OPEN APP SETTINGS") }
             },
             dismissButton = { TextButton(onClick = { showPermissionRecovery = false }) { Text("LATER") } }
+        )
+    }
+
+    if (showLocationModePrompt) {
+        AlertDialog(
+            onDismissRequest = {
+                showLocationModePrompt = false
+                skipLocationModePromptThisRun = true
+            },
+            title = { Text("Turn on Location for Wi-Fi Direct") },
+            text = {
+                Text("Android requires the device Location setting to be on for Wi-Fi Direct service discovery. This is separate from Neyra’s nearby-device permission. BLE can still work while Location is off.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLocationModePrompt = false
+                    context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                }) { Text("OPEN LOCATION SETTINGS") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showLocationModePrompt = false
+                    skipLocationModePromptThisRun = true
+                }) { Text("NOT NOW") }
+            }
         )
     }
 
