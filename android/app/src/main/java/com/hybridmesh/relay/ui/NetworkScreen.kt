@@ -130,13 +130,15 @@ private fun Overview(
 ) {
     val now = System.currentTimeMillis()
     val events = windowMs?.let { diagnostics.inWindow(now, it) } ?: diagnostics.events
-    val requests = events.filter { it.operation == "mesh.send" && isCompletedSendAttempt(it) }
+    val requests = events.filter { it.isMeshSendOperation() && isCompletedSendAttempt(it) }
     val successful = requests.count { it.kind == NetworkEventKind.REQUEST_SUCCEEDED }
     val failures = requests.count {
         it.kind == NetworkEventKind.REQUEST_FAILED || it.kind == NetworkEventKind.REQUEST_UNAVAILABLE
     }
     val durations = requests.mapNotNull { it.durationMs }
-    val active = activeRequestEvents(events).size
+    val activeEvents = activeRequestEvents(events)
+    val active = activeEvents.size +
+        if (mesh.attachmentTransferActive && activeEvents.none { it.operation == "mesh.attachment.send" }) 1 else 0
     val windowDetail = if (windowMs == null) {
         "all ${events.size} retained events · ${diagnostics.droppedEvents} older events dropped"
     } else {
@@ -180,17 +182,17 @@ private fun Overview(
         }
         item {
             SectionCard("TRAFFIC · MEASURED") {
-                MetricLine("COMPLETED ATTEMPTS", requests.size.toString(), "$successful next-hop accepted · $failures failed / unavailable")
+                MetricLine("COMPLETED ATTEMPTS", requests.size.toString(), "message and attachment next-hop attempts · $successful accepted · $failures failed / unavailable")
                 MetricLine("ACCEPTANCE RATE", if (requests.isEmpty()) "—" else "${(successful * 100.0 / requests.size).oneDecimal()}%", "next-hop acceptance · does not mean destination delivery")
-                MetricLine("ACTIVE ATTEMPTS", active.coerceAtLeast(0).toString(), "in-progress sends or connection setups without a terminal result")
+                MetricLine("ACTIVE ATTEMPTS", active.coerceAtLeast(0).toString(), "in-progress message/media sends or connection setups")
                 MetricLine("RETRIES", requests.count { (it.attempt ?: 1) > 1 }.toString(), "attempts after the first candidate")
             }
         }
         item {
             SectionCard("PERFORMANCE · MEASURED") {
-                MetricLine("MEDIAN LATENCY", percentile(durations, 0.5)?.let { "$it ms" } ?: "—", "${durations.size} completed samples")
-                MetricLine("P95 LATENCY", percentile(durations, 0.95)?.let { "$it ms" } ?: "—", "upper-tail completed latency")
-                MetricLine("BYTES ATTEMPTED", formatBytes(requests.sumOf { it.bytes }), "wire payload bytes supplied to transports")
+                MetricLine("MEDIAN LATENCY", percentile(durations, 0.5)?.let { "$it ms" } ?: "—", "${durations.size} completed message/media attempts")
+                MetricLine("P95 LATENCY", percentile(durations, 0.95)?.let { "$it ms" } ?: "—", "upper-tail message/media attempt latency")
+                MetricLine("BYTES ATTEMPTED", formatBytes(requests.sumOf { it.bytes }), "message payload and attachment bytes declared for each carrier attempt")
             }
         }
         item {
@@ -406,9 +408,7 @@ private fun DiagnoseNetworkDialog(
     var selectedEvent by remember { mutableStateOf<NetworkDiagnosticEvent?>(null) }
     val recentEvents = diagnostics.events.asReversed().take(50)
     val activeEventIds = activeRequestEvents(diagnostics.events).mapTo(HashSet()) { it.id }
-    val completedRequests = diagnostics.events.count {
-        it.operation == "mesh.send" && isCompletedSendAttempt(it)
-    }
+    val completedRequests = diagnostics.events.count { it.isMeshSendOperation() && isCompletedSendAttempt(it) }
     val bleBlocked = mesh.bleEnabled && (
         !state.bleSupported || !state.blePermissions.allGranted || state.bluetoothState != BluetoothState.ON ||
             state.scanningErrorCode != null || state.advertisingErrorCode != null ||
@@ -500,6 +500,18 @@ private fun DiagnoseNetworkDialog(
                         MetricLine("CONNECTION STAGE", displayStage(mesh.wifiDirectStage), "${mesh.wifiDirectRetryCount} discovery retries · stage age ${ageLabel(mesh.wifiDirectStageSince)}")
                         MetricLine("GROUP", if (mesh.wifiDirectGroupFormed) if (mesh.wifiDirectGroupOwner) "OWNER" else "CLIENT" else "NOT FORMED", "${mesh.wifiDirectGroupClientCount} Android clients · ${mesh.connectedWifiPeers} Neyra sessions")
                         MetricLine("GROUP OWNER ADDRESS", mesh.wifiDirectGroupOwnerAddress.takeIf { mesh.wifiDirectGroupFormed } ?: "—", "active group owner address")
+                        if (mesh.wifiDirectGroupMembers.isEmpty()) {
+                            Text("No Android Wi-Fi Direct group members are currently reported.", color = RelayTextMuted)
+                        } else {
+                            Text("ANDROID GROUP MEMBERS", color = RelayTextMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            mesh.wifiDirectGroupMembers.forEach { member ->
+                                MetricLine(
+                                    member.deviceName,
+                                    if (member.isGroupOwner) "GROUP OWNER" else "GROUP CLIENT",
+                                    "${member.deviceAddress} · Android group membership confirmed"
+                                )
+                            }
+                        }
                         MetricLine("LAST PEER", mesh.wifiDirectCurrentPeer ?: "—", "most recently targeted Wi-Fi Direct peer")
                         MetricLine("LATEST ATTEMPT ID", mesh.wifiDirectCurrentAttemptId ?: "—", "last Wi-Fi Direct connection attempt")
                         val controlServerStatus = when {
@@ -565,7 +577,7 @@ private fun DiagnoseNetworkDialog(
                 item {
                     SectionCard("RECENT NETWORK EVENTS") {
                         MetricLine("RETAINED", diagnostics.events.size.toString(), "${diagnostics.droppedEvents} older process-local events dropped")
-                        MetricLine("TERMINAL SEND ATTEMPTS", completedRequests.toString(), "mesh sends that succeeded, failed, or had no available carrier")
+                        MetricLine("TERMINAL SEND ATTEMPTS", completedRequests.toString(), "message and attachment attempts that succeeded, failed, or were unavailable")
                         MetricLine("EVENTS SHOWN", recentEvents.size.toString(), "latest events · select one for full correlation and result details")
                         if (recentEvents.isEmpty()) Text("No network events have been recorded in this process yet.", color = RelayTextMuted)
                         recentEvents.forEach { event ->
@@ -605,6 +617,9 @@ private fun diagnosticIssueCount(state: NetworkState, mesh: MeshRuntimeSnapshot,
     }
     return count
 }
+
+private fun NetworkDiagnosticEvent.isMeshSendOperation(): Boolean =
+    operation == "mesh.send" || operation == "mesh.attachment.send"
 
 private fun isCompletedSendAttempt(event: NetworkDiagnosticEvent): Boolean =
     event.kind == NetworkEventKind.REQUEST_SUCCEEDED ||
@@ -807,10 +822,10 @@ private fun NetworkDiagnosticEvent.attemptKey() = DiagnosticAttemptKey(
 )
 
 private fun activeRequestEvents(events: List<NetworkDiagnosticEvent>): List<NetworkDiagnosticEvent> {
-    val terminalRequests = events.filter { it.operation == "mesh.send" && isCompletedSendAttempt(it) }
+    val terminalRequests = events.filter { it.isMeshSendOperation() && isCompletedSendAttempt(it) }
     val terminalAttemptKeys = terminalRequests.mapTo(HashSet()) { it.attemptKey() }
     val activeRequests = events.filter {
-        it.operation == "mesh.send" &&
+        it.isMeshSendOperation() &&
             it.kind == NetworkEventKind.REQUEST_STARTED &&
             it.attemptKey() !in terminalAttemptKeys
     }

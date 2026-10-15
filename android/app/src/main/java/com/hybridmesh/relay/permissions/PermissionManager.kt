@@ -3,7 +3,9 @@ package com.hybridmesh.relay.permissions
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Build
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.network.MeshTransportSelection
 
@@ -98,6 +100,20 @@ object PermissionManager {
             granted(appContext, Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
+
+    /** Wi-Fi P2P service discovery requires Android's Location Mode to be on. */
+    fun locationModeEnabled(context: Context): Boolean = runCatching {
+        val appContext = context.applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            appContext.getSystemService(LocationManager::class.java)?.isLocationEnabled == true
+        } else {
+            Settings.Secure.getInt(
+                appContext.contentResolver,
+                Settings.Secure.LOCATION_MODE,
+                Settings.Secure.LOCATION_MODE_OFF
+            ) != Settings.Secure.LOCATION_MODE_OFF
+        }
+    }.getOrDefault(false)
 
     /**
      * The long-lived mesh runtime can start when either bearer is permitted.

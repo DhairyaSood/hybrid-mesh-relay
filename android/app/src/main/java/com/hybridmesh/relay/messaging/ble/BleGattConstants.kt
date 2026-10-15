@@ -10,8 +10,9 @@ object BleGattConstants {
     val IDENTITY_CHARACTERISTIC_UUID: UUID = UUID.fromString("7f6d1004-7b8e-4b5a-9d11-4c2a8e6f1001")
     val CLIENT_CONFIG_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-    const val TARGET_MTU = 247
+    const val TARGET_MTU = 517
     const val DEFAULT_ATT_PAYLOAD_BYTES = 20
+    const val MAX_ATTACHMENT_GATT_WRITES = 25_000L
 
     const val CONNECT_TIMEOUT_MS = 8_000L
     const val SERVICE_DISCOVERY_TIMEOUT_MS = 5_000L

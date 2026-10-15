@@ -8,6 +8,7 @@ import com.hybridmesh.relay.messaging.ble.BleGattServer
 import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.mesh.MeshEngine
 import com.hybridmesh.relay.messaging.mesh.MeshTransportKind
+import com.hybridmesh.relay.messaging.mesh.BleGattPeerLocks
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.NetworkManager
@@ -217,24 +218,29 @@ class MessagingManager private constructor(context: Context) {
                 val generation = networkManager.runtimeGeneration.value
                 if (generation != networkManager.state.value.runtimeGeneration) return
 
-                val identity = identityGattClient.readIdentity(
-                    device = device,
-                    runtimeGeneration = generation,
-                    isRuntimeGenerationCurrent = {
-                        networkManager.runtimeGeneration.value == generation &&
-                            networkManager.state.value.bluetoothState == BluetoothState.ON &&
-                            networkManager.state.value.gattServerReady
+                val gattLease = BleGattPeerLocks.tryAcquire(nodeId) ?: return
+                try {
+                    val identity = identityGattClient.readIdentity(
+                        device = device,
+                        runtimeGeneration = generation,
+                        isRuntimeGenerationCurrent = {
+                            networkManager.runtimeGeneration.value == generation &&
+                                networkManager.state.value.bluetoothState == BluetoothState.ON &&
+                                networkManager.state.value.gattServerReady
+                        }
+                    ) ?: run {
+                        recordIdentitySyncFailure(nodeId)
+                        return
                     }
-                ) ?: run {
-                    recordIdentitySyncFailure(nodeId)
-                    return
-                }
 
-                repository.updatePeerIdentity(nodeId, identity.displayName, identity.deviceType)
-                lastSuccessfulAdvertisedIdentity[nodeId] = identityKey
-                lastSuccessfulIdentitySyncAt[nodeId] = System.currentTimeMillis()
-                identitySyncAttempts.remove(nodeId)
-                identitySyncNextAt.remove(nodeId)
+                    repository.updatePeerIdentity(nodeId, identity.displayName, identity.deviceType)
+                    lastSuccessfulAdvertisedIdentity[nodeId] = identityKey
+                    lastSuccessfulIdentitySyncAt[nodeId] = System.currentTimeMillis()
+                    identitySyncAttempts.remove(nodeId)
+                    identitySyncNextAt.remove(nodeId)
+                } finally {
+                    gattLease.close()
+                }
             } finally {
                 lock.unlock()
             }
