@@ -90,39 +90,6 @@ fun DevicesScreen() {
             )
         }
 
-        if (meshRuntime.wifiDirectGroupFormed) {
-            item {
-                Column(
-                    Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large)
-                        .border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("WI-FI DIRECT GROUP", style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
-                    Text(
-                        if (meshRuntime.connectedWifiPeers > 0) {
-                            "${meshRuntime.connectedWifiPeers} Neyra app session${if (meshRuntime.connectedWifiPeers == 1) "" else "s"} ready"
-                        } else {
-                            "Android group is connected; Neyra app session is still starting"
-                        },
-                        color = RelayTextMuted,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    meshRuntime.wifiDirectGroupMembers.forEach { member ->
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text("●", color = RelayAccent)
-                            Spacer(Modifier.padding(start = 5.dp))
-                            Text(member.deviceName, Modifier.weight(1f), maxLines = 1)
-                            Text(
-                                if (member.isGroupOwner) "GROUP OWNER" else "CONNECTED",
-                                style = TechnicalTextStyle,
-                                color = RelayAccent
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
         item {
             AccessCard(
                 scanGranted = ble.scanGranted,
@@ -164,10 +131,7 @@ fun DevicesScreen() {
                     it.nodeId.equals(peer.nodeId, true) &&
                         !it.wifiHost.isNullOrBlank() && (it.wifiPort ?: 0) > 0
                 }
-                val liveIndirect = meshPeers.firstOrNull {
-                    it.nodeId.equals(peer.nodeId, true) && it.isIndirect
-                }
-                KnownPeerRow(peer, live, liveWifi, liveIndirect) {
+                KnownPeerRow(peer, live, liveWifi) {
                     clipboard.setText(AnnotatedString(peer.nodeId))
                     Toast.makeText(context, "Node ID copied", Toast.LENGTH_SHORT).show()
                 }
@@ -197,7 +161,7 @@ private fun RuntimeCard(
         Text(if (mesh.running) "Mesh service running" else "Mesh service starting", style = MaterialTheme.typography.titleMedium)
         RuntimeTransportRow("Bluetooth LE", bleStatus(state), bleReady)
         RuntimeTransportRow("Wi-Fi Direct", wifiStatus(mesh.wifiDirectEnabled, wifiEnabled, wifiSupported, wifiPermissionGranted, mesh), wifiReady)
-        Text("$nearbyNodeCount reachable mesh node${if (nearbyNodeCount == 1) "" else "s"} · ${mesh.connectedWifiPeers} active Wi-Fi Direct session${if (mesh.connectedWifiPeers == 1) "" else "s"}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
+        Text("$nearbyNodeCount nearby node${if (nearbyNodeCount == 1) "" else "s"} · ${mesh.connectedWifiPeers} active Wi-Fi Direct session${if (mesh.connectedWifiPeers == 1) "" else "s"}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
     }
 }
 
@@ -260,44 +224,23 @@ private fun PermissionRow(label: String, granted: Boolean) {
 }
 
 @Composable
-private fun KnownPeerRow(peer: PeerEntity, live: com.hybridmesh.relay.ble.BlePeer?, liveWifi: MeshPeer?, liveIndirect: MeshPeer?, onCopyNodeId: () -> Unit) {
-    val inRange = live != null || liveWifi != null || liveIndirect != null
-    val wifiSessionActive = liveWifi != null
+private fun KnownPeerRow(peer: PeerEntity, live: com.hybridmesh.relay.ble.BlePeer?, liveWifi: MeshPeer?, onCopyNodeId: () -> Unit) {
+    val inRange = live != null || liveWifi != null
     Column(Modifier.fillMaxWidth().background(RelaySurface, MaterialTheme.shapes.large).border(1.dp, RelayBorder, MaterialTheme.shapes.large).padding(15.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(peer.displayName.takeIf { it.isNotBlank() && !it.equals(peer.nodeId, true) } ?: peer.nodeId, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
                 NodeIdText(peer.nodeId, style = TechnicalTextStyle, color = RelayAccent)
             }
-            Text(
-                when {
-                    wifiSessionActive -> "CONNECTED"
-                    liveIndirect != null -> "VIA ${liveIndirect.reachableViaDeviceName ?: "GROUP OWNER"}"
-                    inRange -> "IN RANGE"
-                    else -> "KNOWN"
-                },
-                style = TechnicalTextStyle,
-                color = if (inRange) RelayAccent else RelayTextMuted
-            )
+            Text(if (inRange) "IN RANGE" else "KNOWN", style = TechnicalTextStyle, color = if (inRange) RelayAccent else RelayTextMuted)
         }
-        if (liveIndirect != null) {
-            Text(
-                "Reachable through ${liveIndirect.reachableViaDeviceName ?: "the Wi-Fi Direct group owner"} · Wi-Fi Direct group",
-                style = MaterialTheme.typography.bodySmall,
-                color = RelayTextMuted,
-                modifier = Modifier.padding(top = 6.dp)
-            )
-        } else if (live != null || liveWifi != null) {
+        if (live != null || liveWifi != null) {
             val transports = buildList {
                 if (live != null) add("BLE")
                 if (liveWifi != null) add("Wi-Fi Direct")
             }.joinToString(" · ")
-            Text(
-                if (wifiSessionActive) "$transports • Neyra Wi-Fi Direct session active" else "$transports • BLE nearby",
-                style = TechnicalTextStyle,
-                color = RelayTextMuted,
-                modifier = Modifier.padding(top = 6.dp)
-            )
-        } else Text("Last seen: ${peer.lastSeenAt?.let { java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it)) } ?: "not discovered"}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted, modifier = Modifier.padding(top = 6.dp))
+            Text("$transports • seen now", style = TechnicalTextStyle, color = RelayTextMuted, modifier = Modifier.padding(top = 6.dp))
+        }
+        else Text("Last seen: ${peer.lastSeenAt?.let { java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it)) } ?: "not discovered"}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted, modifier = Modifier.padding(top = 6.dp))
     }
 }

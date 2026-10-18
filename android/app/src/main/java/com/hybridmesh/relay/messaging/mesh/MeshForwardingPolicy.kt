@@ -44,16 +44,6 @@ object MeshForwardingPolicy {
 
         usable.firstOrNull { it.nodeId.equals(destination, true) }?.let { return listOf(it) }
 
-        // A group roster gives us a concrete next hop for an otherwise indirect
-        // destination. Prefer that owner first so bounded flooding cannot omit
-        // the only known path when several unrelated relays are nearby.
-        val announcedDestination = peers.firstOrNull {
-            it.nodeId.equals(destination, true) && it.isIndirect
-        }
-        announcedDestination?.reachableViaNodeId?.let { relayNodeId ->
-            usable.firstOrNull { it.nodeId.equals(relayNodeId, true) }?.let { return listOf(it) }
-        }
-
         val eligible = usable.filter { it.canRelay && it.canStoreForward }
         if (eligible.isEmpty()) return emptyList()
 

@@ -221,30 +221,15 @@ class BleGattClient(context: Context) {
             session.transition(GattTransportState.SETTING_UP_NOTIFICATIONS)
             enableNotifications(gatt, session)
             session.transition(GattTransportState.NEGOTIATING_MTU)
-            // Request a high connection interval only for the lifetime of this
-            // bulk transfer; unsupported stacks keep their current parameters.
-            runCatching { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
             val mtu = negotiateMtu(gatt, session)
             val payloadBytes = GattPacketCodec.safePayloadBytes(mtu)
-            val estimatedAppFrameCount =
-                (manifest.sizeBytes + BleAttachmentFrameCodec.MAX_CHUNK_BYTES - 1L) /
-                    BleAttachmentFrameCodec.MAX_CHUNK_BYTES
-            val estimatedStreamBytes = manifest.sizeBytes + estimatedAppFrameCount * 64L + 256L
-            val estimatedGattWrites = (estimatedStreamBytes + payloadBytes - 1L) / payloadBytes
-            if (estimatedGattWrites > BleGattConstants.MAX_ATTACHMENT_GATT_WRITES) {
-                session.fail(GattTransportError.ATTACHMENT_LINK_TOO_SLOW)
-                return false
-            }
             session.transition(GattTransportState.READY)
             val streamId = UUID.randomUUID().leastSignificantBits
 
             suspend fun sendFrame(bytes: ByteArray, expectedOffset: Long? = null): GattPacketCodec.AckFrame? {
                 val frameTransferId = UUID.randomUUID().leastSignificantBits
                 val count = ((bytes.size + payloadBytes - 1) / payloadBytes).coerceAtLeast(1)
-                if (count > GattPacketCodec.MAX_CHUNKS) {
-                    session.fail(GattTransportError.FRAME_TOO_LARGE)
-                    return null
-                }
+                if (count > GattPacketCodec.MAX_CHUNKS) return null
                 session.expectedTransferId = frameTransferId
                 session.ack = CompletableDeferred()
                 session.frameCount = count
@@ -268,30 +253,15 @@ class BleGattClient(context: Context) {
                             session.failure.onAwait { throw GattTransportException(session.error) }
                         }
                     }
-                } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-                    session.fail(GattTransportError.ACK_TIMEOUT)
-                    return null
-                }
-                if (!ack.accepted) {
-                    session.fail(GattTransportError.ACK_REJECTED)
-                    return null
-                }
-                if (expectedOffset != null && ack.offset != expectedOffset) {
-                    session.fail(GattTransportError.PROTOCOL_ERROR)
-                    return null
-                }
+                } catch (_: kotlinx.coroutines.TimeoutCancellationException) { return null }
+                if (!ack.accepted) return null
+                if (expectedOffset != null && ack.offset != expectedOffset) return null
                 return ack
             }
 
             val beginAck = sendFrame(BleAttachmentFrameCodec.encodeBegin(streamId, manifest)) ?: return false
-            val resumeOffset = beginAck.offset ?: run {
-                session.fail(GattTransportError.PROTOCOL_ERROR)
-                return false
-            }
-            if (resumeOffset !in 0..manifest.sizeBytes) {
-                session.fail(GattTransportError.PROTOCOL_ERROR)
-                return false
-            }
+            val resumeOffset = beginAck.offset ?: return false
+            if (resumeOffset !in 0..manifest.sizeBytes) return false
             var offset = resumeOffset
             onProgress(offset)
 
@@ -300,10 +270,7 @@ class BleGattClient(context: Context) {
                 while (skipped < offset) {
                     val count = input.skip(offset - skipped)
                     if (count <= 0L) {
-                        if (input.read() < 0) {
-                            session.fail(GattTransportError.INTERNAL_ERROR)
-                            return false
-                        }
+                        if (input.read() < 0) return false
                         skipped++
                     } else skipped += count
                 }
@@ -314,10 +281,7 @@ class BleGattClient(context: Context) {
                     var read = 0
                     while (read < wanted) {
                         val count = input.read(buffer, read, wanted - read)
-                        if (count < 0) {
-                            session.fail(GattTransportError.INTERNAL_ERROR)
-                            return false
-                        }
+                        if (count < 0) return false
                         if (count > 0) read += count
                     }
                     val nextOffset = offset + read
@@ -332,19 +296,11 @@ class BleGattClient(context: Context) {
 
             val finish = sendFrame(BleAttachmentFrameCodec.encodeFinish(streamId, manifest.messageId), manifest.sizeBytes)
                 ?: return false
-            if (!finish.accepted) {
-                session.fail(GattTransportError.ACK_REJECTED)
-                return false
-            }
             session.transition(GattTransportState.COMPLETED)
-            return true
+            return finish.accepted
         } catch (_: CancellationException) {
             throw CancellationException()
-        } catch (failure: GattTransportException) {
-            session.fail(failure.error)
-            return false
         } catch (_: Exception) {
-            session.fail(GattTransportError.INTERNAL_ERROR)
             return false
         } finally {
             session.markDisconnecting()

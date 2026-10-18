@@ -22,13 +22,6 @@ data class WifiDiscoveryCandidate(
     val lastSeen: Long = System.currentTimeMillis()
 )
 
-/** Android-reported Wi-Fi Direct group membership. A Neyra session is tracked separately. */
-data class WifiDirectGroupMember(
-    val deviceName: String,
-    val deviceAddress: String,
-    val isGroupOwner: Boolean = false
-)
-
 data class WifiDirectRuntimeState(
     val stage: WifiDirectStage = WifiDirectStage.STOPPED,
     val groupOwner: Boolean = false,
@@ -38,7 +31,6 @@ data class WifiDirectRuntimeState(
     val mediaServerReady: Boolean = false,
     val sessionCount: Int = 0,
     val groupClientCount: Int = 0,
-    val groupMembers: List<WifiDirectGroupMember> = emptyList(),
     val candidates: List<WifiDiscoveryCandidate> = emptyList(),
     val currentAttemptId: String? = null,
     val currentPeer: String? = null,

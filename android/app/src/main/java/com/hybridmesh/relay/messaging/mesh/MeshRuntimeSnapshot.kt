@@ -1,7 +1,6 @@
 package com.hybridmesh.relay.messaging.mesh
 
 import com.hybridmesh.relay.wifi.WifiDiscoveryCandidate
-import com.hybridmesh.relay.wifi.WifiDirectGroupMember
 
 data class MeshRuntimeSnapshot(
     val running: Boolean = false,
@@ -23,7 +22,6 @@ data class MeshRuntimeSnapshot(
     val wifiDirectDiscoveryActive: Boolean = false,
     val connectedWifiPeers: Int = 0,
     val wifiDirectGroupClientCount: Int = 0,
-    val wifiDirectGroupMembers: List<WifiDirectGroupMember> = emptyList(),
     val wifiDirectGroupFormed: Boolean = false,
     val wifiDirectGroupOwner: Boolean = false,
     val wifiDirectLocationModeEnabled: Boolean = true,

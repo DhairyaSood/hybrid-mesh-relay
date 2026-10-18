@@ -1,9 +1,6 @@
 package com.hybridmesh.relay.ui
 
 import android.Manifest
-import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -127,7 +124,6 @@ fun ConversationScreen(peerNodeId: String) {
     val messages by viewModel.observeConversation(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
     val attachments by viewModel.observeConversationAttachments(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
     val conversationListState = rememberLazyListState()
-    var hasAppliedInitialScroll by remember(peerNodeId) { mutableStateOf(false) }
     val locationManager = remember { LocationManager(context) }
     val notificationCoordinator = remember { MessagingNotificationCoordinator.getInstance(context) }
     val scope = rememberCoroutineScope()
@@ -145,22 +141,7 @@ fun ConversationScreen(peerNodeId: String) {
     var selectedLocation by remember { mutableStateOf<LocationPayload?>(null) }
     var locationActionError by remember { mutableStateOf<String?>(null) }
 
-    val attachmentDocumentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) {
-            attachmentError = null
-            viewModel.sendAttachment(peerNodeId, uri) { success, error ->
-                if (!success) attachmentError = error ?: "Could not add this attachment."
-            }
-        }
-    }
-    val attachmentAppChooser = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val uri = if (result.resultCode == Activity.RESULT_OK) {
-            result.data?.data ?: result.data?.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
-        } else {
-            null
-        }
+    val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
             attachmentError = null
             viewModel.sendAttachment(peerNodeId, uri) { success, error ->
@@ -212,29 +193,11 @@ fun ConversationScreen(peerNodeId: String) {
         }
     }
 
-    fun chooseAttachmentApp() {
-        val request = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "*/*"
-            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
-            addCategory(Intent.CATEGORY_OPENABLE)
-        }
-        try {
-            attachmentAppChooser.launch(Intent.createChooser(request, "Choose a photo or video app"))
-        } catch (_: ActivityNotFoundException) {
-            // Keep a usable system file picker available on devices without a media app handler.
-            attachmentDocumentPicker.launch(arrayOf("image/*", "video/*"))
-        }
-    }
-
     val peer = peers.firstOrNull { it.nodeId.equals(peerNodeId, true) }
     val displayName = peer?.displayName?.takeIf { it.isNotBlank() && !it.equals(peerNodeId, true) } ?: "Unknown node"
     val nearbyPeer = meshPeers.firstOrNull { it.nodeId.equals(peerNodeId, true) }
     val inRange = nearbyPeer?.hasAnyEndpoint() == true
-    val indirectRelay = nearbyPeer?.reachableViaNodeId?.let { relayNodeId ->
-        meshPeers.firstOrNull { it.nodeId.equals(relayNodeId, true) }
-    }
-    val wifiHealthPeer = if (nearbyPeer?.isIndirect == true) indirectRelay else nearbyPeer
-    val wifiHealth = wifiHealthPeer
+    val wifiHealth = nearbyPeer
         ?.takeIf { !it.wifiHost.isNullOrBlank() }
         ?.let { diagnostics.peerHealth(it.nodeId, "WIFI_DIRECT") }
     val connectionQuality = connectionQuality(
@@ -246,16 +209,7 @@ fun ConversationScreen(peerNodeId: String) {
         if (messages.isNotEmpty()) {
             val dateMarkerCount = messages.map { conversationDateKey(it.createdAt) }.distinct().size
             val lastItemIndex = messages.size + dateMarkerCount - 1
-            val layoutInfo = conversationListState.layoutInfo
-            val lastVisibleIndex = layoutInfo.visibleItemsInfo.lastOrNull()?.index
-            val isNearBottom = layoutInfo.totalItemsCount > 0 &&
-                lastVisibleIndex != null &&
-                lastVisibleIndex >= layoutInfo.totalItemsCount - 3
-
-            if (!hasAppliedInitialScroll || isNearBottom) {
-                conversationListState.scrollToItem(lastItemIndex, Int.MAX_VALUE)
-                hasAppliedInitialScroll = true
-            }
+            conversationListState.scrollToItem(lastItemIndex)
         }
     }
 
@@ -320,8 +274,6 @@ fun ConversationScreen(peerNodeId: String) {
                                     if (!nearbyPeer?.wifiHost.isNullOrBlank()) add("WI-FI DIRECT")
                                 }
                                 "IN RANGE · ${transports.joinToString(" · ")}"
-                            } else if (nearbyPeer?.isIndirect == true) {
-                                "REACHABLE VIA ${indirectRelay?.deviceName ?: nearbyPeer.reachableViaDeviceName ?: "GROUP OWNER"}"
                             } else {
                                 "NOT IN RANGE"
                             },
@@ -349,7 +301,6 @@ fun ConversationScreen(peerNodeId: String) {
                     val hasBle = networkState.peers.any { it.nodeId.equals(peerNodeId, true) }
                     val hasWifi = !nearbyPeer?.wifiHost.isNullOrBlank()
                     val sourceLabel = when {
-                        nearbyPeer?.isIndirect == true -> "WI-FI DIRECT VIA ${indirectRelay?.deviceName ?: "GROUP OWNER"}"
                         hasBle && hasWifi -> "CONNECTION"
                         hasWifi -> "WI-FI DIRECT"
                         else -> "BLE"
@@ -365,13 +316,6 @@ fun ConversationScreen(peerNodeId: String) {
                 if (meshRuntime.availableTransports.isEmpty()) {
                     Text(
                         "Messages stay on this phone until Wi-Fi Direct or Bluetooth is available.",
-                        color = RelayTextMuted,
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                } else if (nearbyPeer?.isIndirect == true) {
-                    Text(
-                        "Messages route through ${indirectRelay?.deviceName ?: nearbyPeer.reachableViaDeviceName ?: "the Wi-Fi Direct group owner"}.",
                         color = RelayTextMuted,
                         style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.padding(top = 6.dp)
@@ -465,7 +409,7 @@ fun ConversationScreen(peerNodeId: String) {
                         placeholder = { Text("Message") },
                         trailingIcon = {
                             IconButton(
-                                onClick = { chooseAttachmentApp() },
+                                onClick = { attachmentPicker.launch(arrayOf("image/*", "video/*")) },
                                 modifier = Modifier.size(40.dp)
                             ) {
                                 Icon(
@@ -831,23 +775,21 @@ private fun MessageBubble(
                     Text(attachment?.displayName ?: descriptor.displayName, color = MaterialTheme.colorScheme.onSurface)
                 }
                 Text(formatAttachmentSize(descriptor.sizeBytes), style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
-                val state = attachment?.status ?: AttachmentTransferStatus.WAITING_LINK
+                val state = attachment?.status ?: AttachmentTransferStatus.WAITING_WIFI
                 val progress = attachment?.transferredBytes ?: 0L
                 val needsWifiForLargeFile = attachment?.lastError ==
                     AttachmentTransferError.WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT
-                val bleLinkTooSlow = attachment?.lastError == "BLE_ATTACHMENT_LINK_TOO_SLOW"
                 Text(
                     when {
                         needsWifiForLargeFile && state == AttachmentTransferStatus.WAITING_WIFI -> "WAITING · WI-FI DIRECT REQUIRED"
                         needsWifiForLargeFile -> "NOT SENT · WI-FI DIRECT REQUIRED"
-                        bleLinkTooSlow -> "WAITING · BLE LINK TOO SLOW FOR MEDIA"
                         state == AttachmentTransferStatus.DELIVERED -> if (attachment?.localPath != null) "AVAILABLE" else "DELIVERED"
                         state == AttachmentTransferStatus.SENDING -> "SENDING · ${formatAttachmentSize(progress)}"
                         state == AttachmentTransferStatus.RECEIVING -> "RECEIVING · ${formatAttachmentSize(progress)}"
                         state == AttachmentTransferStatus.RELAYED -> "FORWARDED · AWAITING RECIPIENT"
                         state == AttachmentTransferStatus.RELAY_QUEUED -> "WAITING FOR RELAY LINK"
                         state == AttachmentTransferStatus.FAILED -> "TRANSFER FAILED"
-                        state == AttachmentTransferStatus.WAITING_LINK || state == AttachmentTransferStatus.QUEUED || state == AttachmentTransferStatus.WAITING_WIFI -> "WAITING FOR A COMPATIBLE LINK"
+                        state == AttachmentTransferStatus.QUEUED || state == AttachmentTransferStatus.WAITING_WIFI -> "WAITING FOR A COMPATIBLE LINK"
                         else -> "WAITING FOR A COMPATIBLE LINK"
                     },
                     style = MaterialTheme.typography.labelSmall,
@@ -860,13 +802,6 @@ private fun MessageBubble(
                         } else {
                             "Connect a Wi-Fi Direct peer, then select the file again. BLE supports files up to 5 MB."
                         },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-                if (bleLinkTooSlow) {
-                    Text(
-                        "This BLE connection negotiated too small a transfer window for this file. The app will retry after the link changes; connect through Wi-Fi Direct for a faster transfer.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
