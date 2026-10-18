@@ -489,40 +489,47 @@ class MeshEngine(context: Context) {
 
     private suspend fun originLoop() {
         while (currentCoroutineContext().isActive && started) {
-            if (meshTransports.none { it.isAvailable() }) {
-                waitForWake(5_000L)
-                continue
-            }
-
-            val now = System.currentTimeMillis()
-            val eligible = repository.getEligibleOutgoing(now).take(MAX_ORIGIN_BATCH)
-            var worked = if (eligible.isEmpty()) {
-                false
-            } else {
-                // Bound concurrent origins so a slow peer does not serialize all
-                // other outgoing messages, without opening unbounded radio work.
-                coroutineScope {
-                    eligible.map { message ->
-                        async { originSlots.withPermit { processOutgoingMessage(message) } }
-                    }.awaitAll().any { it }
+            try {
+                if (meshTransports.none { it.isAvailable() }) {
+                    waitForWake(5_000L)
+                    continue
                 }
-            }
 
-            for (message in repository.getDueInFlight(System.currentTimeMillis()).take(MAX_ORIGIN_BATCH)) {
-                val currentNow = System.currentTimeMillis()
-                if (isExpired(message.createdAt, currentNow)) {
-                    repository.markFailed(message.messageId, null, "DELIVERY_EXPIRED")
+                val now = System.currentTimeMillis()
+                val eligible = repository.getEligibleOutgoing(now).take(MAX_ORIGIN_BATCH)
+                var worked = if (eligible.isEmpty()) {
+                    false
                 } else {
-                    repository.requeueIfInFlight(
-                        message.messageId,
-                        currentNow,
-                        "MESH_DELIVERY_ACK_TIMEOUT"
-                    )
+                    // Bound concurrent origins so a slow peer does not serialize all
+                    // other outgoing messages, without opening unbounded radio work.
+                    supervisorScope {
+                        eligible.map { message ->
+                            async { originSlots.withPermit { processOutgoingMessage(message) } }
+                        }.awaitAll().any { it }
+                    }
                 }
-                worked = true
-            }
 
-            if (!worked) waitForWake(originWaitTime(System.currentTimeMillis()))
+                for (message in repository.getDueInFlight(System.currentTimeMillis()).take(MAX_ORIGIN_BATCH)) {
+                    val currentNow = System.currentTimeMillis()
+                    if (isExpired(message.createdAt, currentNow)) {
+                        repository.markFailed(message.messageId, null, "DELIVERY_EXPIRED")
+                    } else {
+                        repository.requeueIfInFlight(
+                            message.messageId,
+                            currentNow,
+                            "MESH_DELIVERY_ACK_TIMEOUT"
+                        )
+                    }
+                    worked = true
+                }
+
+                if (!worked) waitForWake(originWaitTime(System.currentTimeMillis()))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                recordWorkerFailure("mesh.origin", failure)
+                delay(ORIGIN_LOOP_ERROR_BACKOFF_MS)
+            }
         }
     }
 
@@ -734,7 +741,7 @@ class MeshEngine(context: Context) {
             excludeNodeId = activeRecord.receivedFromNodeId,
             excludeAddress = activeRecord.receivedFromAddress,
             packetId = activeRecord.packetId,
-            isTransportUsable = ::hasCompatibleTransport
+            isTransportUsable = ::hasCompatibleRelayTransport
         )
 
         if (peers.isEmpty()) {
@@ -768,7 +775,7 @@ class MeshEngine(context: Context) {
             result = "FORWARD_ATTEMPT_STARTED"
         )
         val sendStartedAt = System.nanoTime()
-        val sendOutcome = sendPacketToPeers(forwardedPacket, peers)
+        val sendOutcome = sendPacketToPeers(forwardedPacket, peers, requireRelayCapability = true)
         val sendDurationMs = ((System.nanoTime() - sendStartedAt) / 1_000_000L).coerceAtLeast(0L)
         _snapshot.value = _snapshot.value.copy(
             lastTransportSendDurationMs = sendDurationMs,
@@ -960,7 +967,15 @@ class MeshEngine(context: Context) {
             // Receiving the same packet more than once is still an accepted
             // transport event. More importantly, repair an inconsistent state
             // where the cache survived but the durable forwarding row did not.
-            if (repository.getForwarding(packet.packetId) != null) return true
+            val existingForwarding = repository.getForwarding(packet.packetId)
+            if (existingForwarding != null) {
+                if (existingForwarding.state == "EXPIRED") {
+                    val repaired = repository.repairExpiredForwarding(packet.packetId, now)
+                    if (repaired) wakeChannel.trySend(Unit)
+                    return repaired
+                }
+                return true
+            }
 
             val rebuilt = repository.insertForwardingRecord(
                 packetWithObservedHop.toForwardingRecord(predecessorNodeId, sourceAddress)
@@ -1151,7 +1166,8 @@ class MeshEngine(context: Context) {
 
     private suspend fun sendPacketToPeers(
         packet: MeshPacket,
-        peers: List<MeshPeer>
+        peers: List<MeshPeer>,
+        requireRelayCapability: Boolean = false
     ): MeshSendOutcome {
         if (runCatching { MeshPacketCodec.encode(packet) }.isFailure) return MeshSendOutcome(false)
         if (peers.isEmpty()) return MeshSendOutcome(false)
@@ -1179,7 +1195,7 @@ class MeshEngine(context: Context) {
             }
             val job = scope.launch {
                 try {
-                    val acceptedTransport = sendPacketToPeer(peer, packet)
+                    val acceptedTransport = sendPacketToPeer(peer, packet, requireRelayCapability)
                     if (acceptedTransport != null) {
                         completion.complete(MeshSendOutcome(true, acceptedTransport.persistedName))
                     }
@@ -1229,12 +1245,20 @@ class MeshEngine(context: Context) {
 
     private suspend fun sendPacketToPeer(
         peer: MeshPeer,
-        packet: MeshPacket
+        packet: MeshPacket,
+        requireRelayCapability: Boolean = false
     ): MeshTransportKind? {
         var attempt = 0
         val candidates = transportSelector.candidates(peer).filter { (transport, _) ->
-            peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
-                transport.kind == MeshTransportKind.BLE_GATT
+            (!requireRelayCapability || when (transport.kind) {
+                MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
+                MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
+                MeshTransportKind.LORA -> false
+            }) &&
+            (
+                peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
+                    transport.kind == MeshTransportKind.BLE_GATT
+            )
         }
         for ((transport, endpoint) in candidates) {
             // Protocol support belongs to the endpoint, not the logical peer:
@@ -1381,9 +1405,37 @@ class MeshEngine(context: Context) {
         }
     }
 
+    private fun hasCompatibleRelayTransport(peer: MeshPeer): Boolean {
+        val candidates = transportSelector.candidates(peer)
+        return candidates.any { (transport, _) ->
+            val capable = when (transport.kind) {
+                MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
+                MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
+                MeshTransportKind.LORA -> false
+            }
+            capable && (
+                peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
+                    transport.kind == MeshTransportKind.BLE_GATT
+                )
+        }
+    }
+
     /** Bulk files use Wi-Fi Direct or BLE, subject to each bearer’s attachment size limit. */
     private suspend fun attachmentLoop() {
         while (currentCoroutineContext().isActive && started) {
+            try {
+                processAttachmentBatch()
+                delay(if (repository.getPendingOutgoingAttachments(limit = 1).isEmpty()) 3_000L else 1_000L)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                recordWorkerFailure("mesh.attachments", failure)
+                delay(ATTACHMENT_LOOP_ERROR_BACKOFF_MS)
+            }
+        }
+    }
+
+    private suspend fun processAttachmentBatch() {
             val outgoing = repository.getPendingOutgoingAttachments(limit = 4)
             for (attachment in outgoing) {
                 if (!started) break
@@ -1631,8 +1683,6 @@ class MeshEngine(context: Context) {
                     )
                 }
             }
-            delay(if (outgoing.isEmpty()) 3_000L else 1_000L)
-        }
     }
 
     private suspend fun onAttachmentBegin(
@@ -1808,21 +1858,40 @@ class MeshEngine(context: Context) {
 
     private suspend fun maintenanceLoop() {
         while (currentCoroutineContext().isActive && started) {
-            repository.purgeMeshState()
-            val recovered = repository.recoverStaleForwarding()
-            if (recovered > 0) {
-                try {
-                    networkDiagnostics.record(
-                        kind = NetworkEventKind.REQUEST_UNAVAILABLE,
-                        operation = "mesh.relay",
-                        result = "RELAY_CLAIM_TIMEOUT:$recovered"
-                    )
-                } catch (_: Exception) {
-                    // Maintenance diagnostics are best effort.
+            try {
+                repository.purgeMeshState()
+                val recovered = repository.recoverStaleForwarding()
+                if (recovered > 0) {
+                    try {
+                        networkDiagnostics.record(
+                            kind = NetworkEventKind.REQUEST_UNAVAILABLE,
+                            operation = "mesh.relay",
+                            result = "RELAY_CLAIM_TIMEOUT:$recovered"
+                        )
+                    } catch (_: Exception) {
+                        // Maintenance diagnostics are best effort.
+                    }
+                    wakeChannel.trySend(Unit)
                 }
-                wakeChannel.trySend(Unit)
+                delay(MAINTENANCE_INTERVAL_MS)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                recordWorkerFailure("mesh.maintenance", failure)
+                delay(MAINTENANCE_ERROR_BACKOFF_MS)
             }
-            delay(MAINTENANCE_INTERVAL_MS)
+        }
+    }
+
+    private fun recordWorkerFailure(operation: String, failure: Exception) {
+        try {
+            networkDiagnostics.record(
+                kind = NetworkEventKind.REQUEST_FAILED,
+                operation = operation,
+                result = "WORKER_RECOVERED:${failure.javaClass.simpleName}"
+            )
+        } catch (_: Exception) {
+            // A diagnostic failure must not terminate a worker recovery path.
         }
     }
 
@@ -1973,6 +2042,9 @@ class MeshEngine(context: Context) {
         private const val RELAY_LOOP_ERROR_BACKOFF_MS = 1_000L
         private const val MAX_PROCESSING_RETRIES = 3
         private const val MAINTENANCE_INTERVAL_MS = 30_000L
+        private const val ORIGIN_LOOP_ERROR_BACKOFF_MS = 1_000L
+        private const val ATTACHMENT_LOOP_ERROR_BACKOFF_MS = 2_000L
+        private const val MAINTENANCE_ERROR_BACKOFF_MS = 2_000L
         private const val SNAPSHOT_INTERVAL_MS = 2_000L
         private const val WIFI_START_RETRY_MS = 15_000L
         private const val MAX_ORIGIN_BATCH = 8

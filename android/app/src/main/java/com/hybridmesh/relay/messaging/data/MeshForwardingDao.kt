@@ -64,6 +64,9 @@ interface MeshForwardingDao {
     @Query("UPDATE mesh_forwarding SET state = 'EXPIRED', nextAttemptAt = NULL, lastError = :error WHERE packetId = :packetId")
     suspend fun markInvalid(packetId: String, error: String): Int
 
+    @Query("UPDATE mesh_forwarding SET state = 'PENDING', nextAttemptAt = :nextAttemptAt, claimedAt = NULL, lastError = 'DUPLICATE_FORWARD_REPAIRED' WHERE packetId = :packetId AND state = 'EXPIRED' AND expiresAt > :now")
+    suspend fun repairExpired(packetId: String, now: Long, nextAttemptAt: Long): Int
+
     @Query("UPDATE mesh_forwarding SET state = 'PENDING', nextAttemptAt = :nextAttemptAt, claimedAt = NULL, lastError = :error WHERE packetId = :packetId AND state = 'FORWARDING'")
     suspend fun scheduleRetry(packetId: String, nextAttemptAt: Long, error: String): Int
 

@@ -760,6 +760,11 @@ class MessagingRepository private constructor(context: Context) {
     suspend fun markForwardInvalid(packetId: String, error: String = "INVALID_FORWARDING_STATE") =
         forwarding.markInvalid(packetId, error)
 
+    suspend fun repairExpiredForwarding(
+        packetId: String,
+        now: Long = System.currentTimeMillis()
+    ): Boolean = forwarding.repairExpired(packetId, now, now) == 1
+
     suspend fun scheduleForwardRetry(packetId: String, nextAttemptAt: Long, error: String) =
         forwarding.scheduleRetry(packetId, nextAttemptAt, error)
 
