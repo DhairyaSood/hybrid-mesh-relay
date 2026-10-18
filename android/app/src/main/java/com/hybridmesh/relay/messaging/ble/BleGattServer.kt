@@ -22,6 +22,8 @@ import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.messaging.protocol.GattPacketCodec
 import com.hybridmesh.relay.model.MessageType
+import com.hybridmesh.relay.network.NetworkDiagnostics
+import com.hybridmesh.relay.network.NetworkEventKind
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -97,12 +99,17 @@ class BleGattServer(context: Context) {
     fun start(): Boolean {
         if (server != null) return isReady
         val currentGeneration = ++serverGeneration
-        val manager = bluetoothManager ?: return false
+        val manager = bluetoothManager ?: run {
+            recordServerDiagnostic("open", "BLUETOOTH_MANAGER_UNAVAILABLE generation=$currentGeneration")
+            return false
+        }
 
         return try {
-            val opened =
-                manager.openGattServer(appContext, callbackFor(currentGeneration))
-                    ?: return false
+            val opened = manager.openGattServer(appContext, callbackFor(currentGeneration))
+                ?: run {
+                    recordServerDiagnostic("open", "OPEN_GATT_SERVER_RETURNED_NULL")
+                    return false
+                }
 
             val readySignal = CompletableDeferred<Boolean>()
             readiness = readySignal
@@ -160,7 +167,12 @@ class BleGattServer(context: Context) {
 
             startAssemblyCleanup()
 
-            if (!opened.addService(service)) {
+            val addServiceAccepted = opened.addService(service)
+            recordServerDiagnostic(
+                "add_service",
+                "request_${if (addServiceAccepted) "accepted" else "rejected"} uuid=${BleGattConstants.SERVICE_UUID} generation=$currentGeneration"
+            )
+            if (!addServiceAccepted) {
                 readiness?.complete(false)
                 readiness = null
                 opened.close()
@@ -174,6 +186,7 @@ class BleGattServer(context: Context) {
 
             true
         } catch (_: SecurityException) {
+            recordServerDiagnostic("open", "PERMISSION_DENIED generation=$currentGeneration")
             readiness?.complete(false)
             readiness = null
             closeServerSafely()
@@ -182,7 +195,11 @@ class BleGattServer(context: Context) {
             txCharacteristic = null
             identityCharacteristic = null
             false
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            recordServerDiagnostic(
+                "open",
+                "EXCEPTION=${error.javaClass.simpleName} generation=$currentGeneration"
+            )
             readiness?.complete(false)
             readiness = null
             closeServerSafely()
@@ -203,6 +220,7 @@ class BleGattServer(context: Context) {
     @SuppressLint("MissingPermission")
     @Synchronized
     fun stop() {
+        val wasRunning = server != null || isReady
         serverGeneration += 1L
         isReady = false
         readiness?.complete(false)
@@ -220,6 +238,7 @@ class BleGattServer(context: Context) {
         rxCharacteristic = null
         txCharacteristic = null
         identityCharacteristic = null
+        if (wasRunning) recordServerDiagnostic("stop", "STOPPED generation=$serverGeneration")
     }
 
     private fun startAssemblyCleanup() {
@@ -245,6 +264,15 @@ class BleGattServer(context: Context) {
         if (hasConnectPermission()) {
             runCatching { server?.close() }
         }
+    }
+
+    private fun recordServerDiagnostic(operationSuffix: String, result: String) {
+        NetworkDiagnostics.getInstance().record(
+            kind = NetworkEventKind.CONNECTION_STAGE,
+            operation = "ble.gatt.server.$operationSuffix",
+            transport = "BLE_GATT",
+            result = result
+        )
     }
 
     @SuppressLint("MissingPermission")
@@ -273,6 +301,10 @@ class BleGattServer(context: Context) {
                 val success = status == BluetoothGatt.GATT_SUCCESS
                 isReady = success && server != null
                 readiness?.complete(success)
+                recordServerDiagnostic(
+                    "service_added",
+                    "status=$status ready=$isReady uuid=${service.uuid} generation=$callbackGeneration"
+                )
 
                 if (!success) {
                     readiness = null
@@ -292,6 +324,10 @@ class BleGattServer(context: Context) {
                 newState: Int
             ) {
                 if (callbackGeneration != serverGeneration) return
+                recordServerDiagnostic(
+                    "peer_connection",
+                    "status=$status state=$newState server_ready=$isReady generation=$callbackGeneration"
+                )
                 if (newState != BluetoothProfile.STATE_CONNECTED) {
                     val prefix = "${safeAddress(device)}|"
                     assemblies.keys.removeIf { it.startsWith(prefix) }
