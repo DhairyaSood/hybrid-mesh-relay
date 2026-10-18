@@ -196,19 +196,23 @@ class BleGattClient(context: Context) {
         device: BluetoothDevice,
         manifest: AttachmentTransferManifest,
         file: File,
+        immediateHopSenderNodeId: String,
+        attachmentFrameProtocolVersion: Int,
         runtimeGeneration: Long,
         isRuntimeGenerationCurrent: () -> Boolean,
         onProgress: suspend (Long) -> Unit = {},
         onState: (GattTransportSnapshot) -> Unit = {}
     ): BleAttachmentSendResult {
         val firstAttempt = sendAttachmentAttempt(
-            device, manifest, file, runtimeGeneration, isRuntimeGenerationCurrent, onProgress, onState
+            device, manifest, file, immediateHopSenderNodeId, attachmentFrameProtocolVersion,
+            runtimeGeneration, isRuntimeGenerationCurrent, onProgress, onState
         )
         if (!shouldRetryAttachmentDiscovery(firstAttempt)) return firstAttempt
 
         delay(BleGattConstants.ATTACHMENT_DISCOVERY_RETRY_DELAY_MS)
         return sendAttachmentAttempt(
-            device, manifest, file, runtimeGeneration, isRuntimeGenerationCurrent, onProgress, onState
+            device, manifest, file, immediateHopSenderNodeId, attachmentFrameProtocolVersion,
+            runtimeGeneration, isRuntimeGenerationCurrent, onProgress, onState
         ).copy(
             discoveryAttempts = 2,
             firstAttemptFailureCode = firstAttempt.failureCode,
@@ -232,6 +236,8 @@ class BleGattClient(context: Context) {
         device: BluetoothDevice,
         manifest: AttachmentTransferManifest,
         file: File,
+        immediateHopSenderNodeId: String,
+        attachmentFrameProtocolVersion: Int,
         runtimeGeneration: Long,
         isRuntimeGenerationCurrent: () -> Boolean,
         onProgress: suspend (Long) -> Unit = {},
@@ -255,6 +261,7 @@ class BleGattClient(context: Context) {
             acknowledgedBytes = acknowledgedBytes,
             estimatedGattWrites = estimatedGattWrites,
             retryable = retryableFailure,
+            attachmentFrameProtocolVersion = attachmentFrameProtocolVersion,
             snapshot = session.snapshot()
         )
 
@@ -265,6 +272,16 @@ class BleGattClient(context: Context) {
         if (manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) {
             retryableFailure = false
             return failed("BLE_SIZE_LIMIT")
+        }
+        if (attachmentFrameProtocolVersion != BleAttachmentFrameCodec.LEGACY_PROTOCOL_VERSION &&
+            attachmentFrameProtocolVersion != BleAttachmentFrameCodec.HOP_IDENTITY_PROTOCOL_VERSION) {
+            retryableFailure = false
+            return failed("UNSUPPORTED_ATTACHMENT_PROTOCOL")
+        }
+        if (attachmentFrameProtocolVersion == BleAttachmentFrameCodec.HOP_IDENTITY_PROTOCOL_VERSION &&
+            !com.hybridmesh.relay.data.NodeIdGenerator.isValid(immediateHopSenderNodeId)) {
+            retryableFailure = false
+            return failed("INVALID_LOCAL_HOP_IDENTITY")
         }
         if (!file.isFile || file.length() != manifest.sizeBytes ||
             runCatching { AttachmentFileStore.sha256(file) }.getOrNull() != manifest.sha256) {
@@ -348,7 +365,16 @@ class BleGattClient(context: Context) {
             }
 
             transferStage = "BEGIN"
-            val beginAck = sendFrame(BleAttachmentFrameCodec.encodeBegin(streamId, manifest))
+            val beginAck = sendFrame(
+                BleAttachmentFrameCodec.encodeBegin(
+                    transferId = streamId,
+                    manifest = manifest,
+                    protocolVersion = attachmentFrameProtocolVersion,
+                    immediateHopSenderNodeId = immediateHopSenderNodeId.takeIf {
+                        attachmentFrameProtocolVersion == BleAttachmentFrameCodec.HOP_IDENTITY_PROTOCOL_VERSION
+                    }
+                )
+            )
                 ?: return failed(frameFailureCode ?: "ACK_MISSING")
             val resumeOffset = beginAck.offset ?: run {
                 session.fail(GattTransportError.PROTOCOL_ERROR)
@@ -366,9 +392,11 @@ class BleGattClient(context: Context) {
             // and FINISH exactly. Each application frame is packetized separately
             // and rounded up to whole GATT writes.
             val chunkHeaderBytes = BleAttachmentFrameCodec.encodeChunk(
-                streamId, manifest.messageId, 0L, byteArrayOf(0)
+                streamId, manifest.messageId, 0L, byteArrayOf(0), attachmentFrameProtocolVersion
             ).size - 1
-            val finishFrameBytes = BleAttachmentFrameCodec.encodeFinish(streamId, manifest.messageId).size
+            val finishFrameBytes = BleAttachmentFrameCodec.encodeFinish(
+                streamId, manifest.messageId, attachmentFrameProtocolVersion
+            ).size
             fun writeCount(frameBytes: Long): Long =
                 (frameBytes + payloadBytes - 1L) / payloadBytes
             var bytesLeftToEstimate = remainingBytes
@@ -406,7 +434,7 @@ class BleGattClient(context: Context) {
                     }
                     val nextOffset = offset + read
                     val appFrame = BleAttachmentFrameCodec.encodeChunk(
-                        streamId, manifest.messageId, offset, buffer.copyOf(read)
+                        streamId, manifest.messageId, offset, buffer.copyOf(read), attachmentFrameProtocolVersion
                     )
                     transferStage = "DATA"
                     if (sendFrame(appFrame, nextOffset) == null) {
@@ -419,7 +447,10 @@ class BleGattClient(context: Context) {
             }
 
             transferStage = "FINISH"
-            val finish = sendFrame(BleAttachmentFrameCodec.encodeFinish(streamId, manifest.messageId), manifest.sizeBytes)
+            val finish = sendFrame(
+                BleAttachmentFrameCodec.encodeFinish(streamId, manifest.messageId, attachmentFrameProtocolVersion),
+                manifest.sizeBytes
+            )
                 ?: return failed(frameFailureCode ?: "ACK_MISSING")
             session.transition(GattTransportState.COMPLETED)
             return BleAttachmentSendResult(
@@ -427,6 +458,7 @@ class BleGattClient(context: Context) {
                 failureCode = if (finish.accepted) null else "ACK_REJECTED",
                 stage = "COMPLETE",
                 acknowledgedBytes = acknowledgedBytes,
+                attachmentFrameProtocolVersion = attachmentFrameProtocolVersion,
                 snapshot = session.snapshot()
             )
         } catch (_: CancellationException) {

@@ -24,7 +24,9 @@ enum class BleAttachmentRejection(
     RECEIVER_TIMEOUT(17, true),
     RECEIVER_ERROR(18, true),
     ASSEMBLY_LIMIT(19, true),
-    ASSEMBLY_INVALID(20, true);
+    ASSEMBLY_INVALID(20, true),
+    INVALID_HOP_IDENTITY(21, false),
+    ATTACHMENT_PROTOCOL_MISMATCH(22, false);
 
     companion object {
         fun fromWireCode(code: Int?): BleAttachmentRejection? =

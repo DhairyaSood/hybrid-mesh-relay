@@ -289,7 +289,8 @@ class BleAdvertiser(context: Context) {
                 )
                 put(
                     (BleConstants.CAPABILITY_CAN_RELAY.toInt() or
-                        BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt()).toByte()
+                        BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() or
+                        BleConstants.CAPABILITY_ATTACHMENT_HOP_IDENTITY.toInt()).toByte()
                 )
                 put(BleConstants.MESH_PROTOCOL_VERSION)
                 put(nicknameBytes.size.toByte())

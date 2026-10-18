@@ -18,6 +18,7 @@ data class MeshPeer(
     val lastSeen: Long = 0L,
     val bleProtocolVersion: Int = 0,
     val wifiProtocolVersion: Int = 0,
+    val bleSupportsAttachmentHopIdentity: Boolean = false,
     val bleCanRelay: Boolean = false,
     val bleCanStoreForward: Boolean = false,
     val wifiCanRelay: Boolean = false,
@@ -47,7 +48,8 @@ data class MeshPeer(
     fun toTransportPeer(): MeshTransportPeer = MeshTransportPeer(
         nodeId = nodeId,
         bleAddress = bleAddress,
-        wifiAddress = wifiAddress ?: wifiHost?.let { "$it:${wifiPort ?: 0}" }
+        wifiAddress = wifiAddress ?: wifiHost?.let { "$it:${wifiPort ?: 0}" },
+        bleSupportsAttachmentHopIdentity = bleSupportsAttachmentHopIdentity
     )
 
     fun hasAnyEndpoint(): Boolean =
@@ -90,6 +92,7 @@ class MeshPeerDirectory {
             val updated = if (ble == null) old.copy(
                 bleAddress = null,
                 bleProtocolVersion = 0,
+                bleSupportsAttachmentHopIdentity = false,
                 bleCanRelay = false,
                 bleCanStoreForward = false,
                 rssi = -127
@@ -99,6 +102,7 @@ class MeshPeerDirectory {
                 rssi = ble.rssi,
                 lastSeen = maxOf(old.lastSeen, ble.lastSeen),
                 bleProtocolVersion = ble.meshProtocolVersion,
+                bleSupportsAttachmentHopIdentity = ble.supportsAttachmentHopIdentity,
                 bleCanRelay = ble.canRelay,
                 bleCanStoreForward = ble.canStoreForward
             )
@@ -118,6 +122,7 @@ class MeshPeerDirectory {
                 lastSeen = maxOf(previous?.lastSeen ?: 0L, ble.lastSeen),
                 bleProtocolVersion = ble.meshProtocolVersion,
                 wifiProtocolVersion = previous?.wifiProtocolVersion ?: 0,
+                bleSupportsAttachmentHopIdentity = ble.supportsAttachmentHopIdentity,
                 bleCanRelay = ble.canRelay,
                 bleCanStoreForward = ble.canStoreForward,
                 wifiCanRelay = previous?.wifiCanRelay ?: false,
@@ -151,6 +156,7 @@ class MeshPeerDirectory {
             lastSeen = maxOf(previous?.lastSeen ?: 0L, observedAt),
             bleProtocolVersion = previous?.bleProtocolVersion ?: 0,
             wifiProtocolVersion = protocolVersion,
+            bleSupportsAttachmentHopIdentity = previous?.bleSupportsAttachmentHopIdentity ?: false,
             bleCanRelay = previous?.bleCanRelay ?: false,
             bleCanStoreForward = previous?.bleCanStoreForward ?: false,
             wifiCanRelay = canRelay,

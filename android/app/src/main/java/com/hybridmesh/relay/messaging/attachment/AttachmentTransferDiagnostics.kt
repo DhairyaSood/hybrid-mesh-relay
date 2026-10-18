@@ -109,6 +109,7 @@ object AttachmentTransferDiagnostics {
         "ble_endpoints" -> "Peers with BLE endpoints"
         "ble_limit_bytes" -> "BLE attachment limit"
         "transport" -> "Transport"
+        "attachment_frame_version" -> "Attachment frame version"
         "reason" -> "Reason"
         else -> key.replace('_', ' ').replaceFirstChar { it.uppercase() }
     }
@@ -116,8 +117,10 @@ object AttachmentTransferDiagnostics {
     private fun String.safeField(): String = replace('|', '/').replace('\n', ' ').replace('\r', ' ')
 
     private fun remoteRejectionExplanation(reason: String): String = when (reason) {
-        "UNKNOWN_PEER_IDENTITY" -> "The receiver could not associate this BLE address with a nearby mesh identity. It will retry after discovery refreshes."
+        "UNKNOWN_PEER_IDENTITY" -> "This legacy BLE peer could not map the sender through discovery. Refresh BLE discovery or update both devices to the hop-identity attachment protocol."
         "SENDER_IDENTITY_MISMATCH" -> "The receiver saw a different mesh identity than the sender declared. It will retry so the peer mapping can refresh."
+        "INVALID_HOP_IDENTITY" -> "The BLE attachment did not contain a valid identity for the device sending this mesh hop."
+        "ATTACHMENT_PROTOCOL_MISMATCH" -> "A BLE attachment frame used a different protocol version from its BEGIN frame. Restart the attachment transfer."
         "INVALID_MANIFEST" -> "The receiver rejected the attachment metadata as invalid."
         "SIZE_LIMIT_EXCEEDED" -> "The receiver rejected this file because it exceeds BLE's attachment size limit."
         "HOP_LIMIT_EXCEEDED" -> "The receiver cannot relay this attachment because it reached the hop limit."

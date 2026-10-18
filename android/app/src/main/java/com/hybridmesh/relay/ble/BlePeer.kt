@@ -11,5 +11,6 @@ data class BlePeer(
     val lastSeen: Long,
     val meshProtocolVersion: Int = 0,
     val canRelay: Boolean = false,
-    val canStoreForward: Boolean = false
+    val canStoreForward: Boolean = false,
+    val supportsAttachmentHopIdentity: Boolean = false
 )

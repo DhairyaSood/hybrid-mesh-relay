@@ -14,6 +14,8 @@ object BleConstants {
     const val LEGACY_MESH_PROTOCOL_VERSION: Byte = 1
     const val CAPABILITY_CAN_RELAY: Byte = 0x01
     const val CAPABILITY_CAN_STORE_FORWARD: Byte = 0x02
+    // Attachment frame v2 includes the immediate sender identity for each mesh hop.
+    const val CAPABILITY_ATTACHMENT_HOP_IDENTITY: Byte = 0x04
     const val MANUFACTURER_ID = 0xFFFF
 
     const val DEVICE_TYPE_PHONE: Byte = 1

@@ -103,8 +103,16 @@ class MeshEngine(context: Context) {
     private val activeFanoutJobs = ConcurrentHashMap.newKeySet<Job>()
     private data class AttachmentRateWindow(val startedAtNanos: Long, val initialBytes: Long)
     private val attachmentRateWindows = ConcurrentHashMap<String, AttachmentRateWindow>()
-    private data class BleAttachmentIngressKey(val address: String, val messageId: String)
-    private data class BleAttachmentIngressBinding(val nodeId: String, val lastActivityAt: Long)
+    private data class BleAttachmentIngressKey(
+        val address: String,
+        val messageId: String,
+        val transferId: Long
+    )
+    private data class BleAttachmentIngressBinding(
+        val nodeId: String,
+        val protocolVersion: Int,
+        val lastActivityAt: Long
+    )
     private val bleAttachmentIngressBindings = ConcurrentHashMap<BleAttachmentIngressKey, BleAttachmentIngressBinding>()
 
     private val _snapshot = MutableStateFlow(MeshRuntimeSnapshot())
@@ -278,20 +286,26 @@ class MeshEngine(context: Context) {
             ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.INVALID_FRAME)
         return when (frame) {
             is BleAttachmentFrameCodec.Frame.Begin -> {
-                // Resolve BEGIN against the observed peer identity, with a short
-                // address-history grace period for GATT setup after discovery expires.
-                val sourceNodeId = resolveBleAttachmentSource(address, frame.manifest.messageId)
+                val resolution = resolveBleAttachmentBeginSource(address, frame)
+                resolution.rejection?.let { return BleAttachmentReceiveResult.Rejected(it) }
+                val sourceNodeId = resolution.nodeId
                     ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
                 val result = prepareIncomingAttachmentBegin(sourceNodeId, frame.manifest, MeshTransportKind.BLE_GATT)
                 if (result is BleAttachmentReceiveResult.Accepted) {
-                    rememberBleAttachmentSource(address, frame.manifest.messageId, sourceNodeId)
+                    rememberBleAttachmentSource(
+                        address, frame.manifest.messageId, frame.transferId,
+                        sourceNodeId, frame.protocolVersion
+                    )
                 }
                 result
             }
             is BleAttachmentFrameCodec.Frame.Chunk -> {
-                val sourceNodeId = resolveBleAttachmentSource(
-                    address, frame.messageId, preferExistingBinding = true
-                ) ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
+                val resolution = resolveBleAttachmentSource(
+                    address, frame.messageId, frame.transferId, frame.protocolVersion
+                )
+                resolution.rejection?.let { return BleAttachmentReceiveResult.Rejected(it) }
+                val sourceNodeId = resolution.nodeId
+                    ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
                 val record = repository.getAttachment(frame.messageId)
                     ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVE_STATE_MISSING)
                 if (!record.receivedFromNodeId.equals(sourceNodeId, true)) {
@@ -305,13 +319,18 @@ class MeshEngine(context: Context) {
                     frame.bytes,
                     MeshTransportKind.BLE_GATT
                 ) ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.CHUNK_REJECTED)
-                rememberBleAttachmentSource(address, frame.messageId, sourceNodeId)
+                rememberBleAttachmentSource(
+                    address, frame.messageId, frame.transferId, sourceNodeId, frame.protocolVersion
+                )
                 BleAttachmentReceiveResult.Accepted(nextOffset)
             }
             is BleAttachmentFrameCodec.Frame.Finish -> {
-                val sourceNodeId = resolveBleAttachmentSource(
-                    address, frame.messageId, preferExistingBinding = true
-                ) ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
+                val resolution = resolveBleAttachmentSource(
+                    address, frame.messageId, frame.transferId, frame.protocolVersion
+                )
+                resolution.rejection?.let { return BleAttachmentReceiveResult.Rejected(it) }
+                val sourceNodeId = resolution.nodeId
+                    ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
                 val record = repository.getAttachment(frame.messageId)
                     ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVE_STATE_MISSING)
                 if (!record.receivedFromNodeId.equals(sourceNodeId, true)) {
@@ -319,7 +338,9 @@ class MeshEngine(context: Context) {
                 }
                 val manifest = record.toAttachmentManifest()
                 if (onAttachmentFinish(sourceNodeId, manifest, MeshTransportKind.BLE_GATT)) {
-                    rememberBleAttachmentSource(address, frame.messageId, sourceNodeId)
+                    rememberBleAttachmentSource(
+                        address, frame.messageId, frame.transferId, sourceNodeId, frame.protocolVersion
+                    )
                     BleAttachmentReceiveResult.Accepted(manifest.sizeBytes)
                 } else {
                     BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.FINISH_REJECTED)
@@ -328,27 +349,56 @@ class MeshEngine(context: Context) {
         }
     }
 
+    private fun resolveBleAttachmentBeginSource(
+        address: String,
+        frame: BleAttachmentFrameCodec.Frame.Begin
+    ): BleAttachmentIdentityPolicy.Resolution {
+        pruneBleAttachmentIngressBindings()
+        val key = BleAttachmentIngressKey(
+            address.trim().uppercase(), frame.manifest.messageId, frame.transferId
+        )
+        val binding = bleAttachmentIngressBindings[key]
+        val observedNodeId = peerDirectory.findNodeIdByBleAddress(address)
+        return BleAttachmentIdentityPolicy.resolveBegin(
+            protocolVersion = frame.protocolVersion,
+            claimedHopNodeId = frame.immediateHopSenderNodeId,
+            observedNodeId = observedNodeId,
+            boundNodeId = binding?.nodeId,
+            boundProtocolVersion = binding?.protocolVersion
+        )
+    }
+
     private fun resolveBleAttachmentSource(
         address: String,
         messageId: String,
-        preferExistingBinding: Boolean = false
-    ): String? {
+        transferId: Long,
+        protocolVersion: Int
+    ): BleAttachmentIdentityPolicy.Resolution {
         pruneBleAttachmentIngressBindings()
-        val key = BleAttachmentIngressKey(address.trim().uppercase(), messageId)
+        val key = BleAttachmentIngressKey(address.trim().uppercase(), messageId, transferId)
         val binding = bleAttachmentIngressBindings[key]
         val observedNodeId = peerDirectory.findNodeIdByBleAddress(address)
-        val sourceNodeId = if (preferExistingBinding) {
-            binding?.nodeId ?: observedNodeId
-        } else {
-            observedNodeId ?: binding?.nodeId
-        } ?: return null
-        rememberBleAttachmentSource(address, messageId, sourceNodeId)
-        return sourceNodeId
+        return BleAttachmentIdentityPolicy.resolveContinuation(
+            protocolVersion = protocolVersion,
+            observedNodeId = observedNodeId,
+            boundNodeId = binding?.nodeId,
+            boundProtocolVersion = binding?.protocolVersion
+        )
     }
 
-    private fun rememberBleAttachmentSource(address: String, messageId: String, nodeId: String) {
-        val key = BleAttachmentIngressKey(address.trim().uppercase(), messageId)
-        bleAttachmentIngressBindings[key] = BleAttachmentIngressBinding(nodeId, System.currentTimeMillis())
+    private fun rememberBleAttachmentSource(
+        address: String,
+        messageId: String,
+        transferId: Long,
+        nodeId: String,
+        protocolVersion: Int
+    ) {
+        val key = BleAttachmentIngressKey(address.trim().uppercase(), messageId, transferId)
+        bleAttachmentIngressBindings[key] = BleAttachmentIngressBinding(
+            nodeId = nodeId,
+            protocolVersion = protocolVersion,
+            lastActivityAt = System.currentTimeMillis()
+        )
         pruneBleAttachmentIngressBindings()
     }
 
@@ -1337,6 +1387,7 @@ class MeshEngine(context: Context) {
                         MeshTransportKind.BLE_GATT -> {
                             val result = bleTransport.sendAttachment(
                                 nextHop.toTransportPeer(), manifest, file,
+                                immediateHopSenderNodeId = identityStore.getIdentity().nodeId,
                                 onProgress = { sent ->
                                     latestTransferredBytes = sent
                                     val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
@@ -1355,6 +1406,7 @@ class MeshEngine(context: Context) {
                                         "error" to result.failureCode,
                                         "stage" to result.stage,
                                         "transport" to "BLE_GATT",
+                                        "attachment_frame_version" to result.attachmentFrameProtocolVersion,
                                         "transferred_bytes" to result.acknowledgedBytes,
                                         "retryable" to result.retryable,
                                         "attachment_bytes" to manifest.sizeBytes,

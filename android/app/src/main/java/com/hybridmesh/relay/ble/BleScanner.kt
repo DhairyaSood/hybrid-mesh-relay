@@ -184,6 +184,7 @@ class BleScanner(
             val meshProtocolVersion: Int
             val canRelay: Boolean
             val canStoreForward: Boolean
+            val supportsAttachmentHopIdentity: Boolean
             val nameLength: Int
 
             when (discoveryVersion.toInt()) {
@@ -194,6 +195,8 @@ class BleScanner(
                     canRelay = capabilities and BleConstants.CAPABILITY_CAN_RELAY.toInt() != 0
                     canStoreForward =
                         capabilities and BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() != 0
+                    supportsAttachmentHopIdentity =
+                        capabilities and BleConstants.CAPABILITY_ATTACHMENT_HOP_IDENTITY.toInt() != 0
                     nameLength = buffer.get().toInt() and 0xFF
                 }
                 3 -> {
@@ -203,12 +206,14 @@ class BleScanner(
                     canRelay = capabilities and BleConstants.CAPABILITY_CAN_RELAY.toInt() != 0
                     canStoreForward =
                         capabilities and BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() != 0
+                    supportsAttachmentHopIdentity = false
                     nameLength = buffer.get().toInt() and 0xFF
                 }
                 else -> {
                     meshProtocolVersion = 0
                     canRelay = false
                     canStoreForward = false
+                    supportsAttachmentHopIdentity = false
                     nameLength = buffer.get().toInt() and 0xFF
                 }
             }
@@ -232,7 +237,8 @@ class BleScanner(
                     lastSeen = seenAt,
                     meshProtocolVersion = meshProtocolVersion,
                     canRelay = canRelay,
-                    canStoreForward = canStoreForward
+                    canStoreForward = canStoreForward,
+                    supportsAttachmentHopIdentity = supportsAttachmentHopIdentity
                 ).let { fresh ->
                     // Preserve first-seen ordering. RSSI is telemetry, not the list sort key.
                     if (previous == null) fresh else fresh
