@@ -24,7 +24,11 @@ data class NetworkState(
     val peers: List<BlePeer>,
     val scanResultCount: Long,
     val lastScanResultAt: Long?,
-    val runtimeGeneration: Long
+    val runtimeGeneration: Long,
+    val rawScanResultCount: Long = 0L,
+    val lastRawScanResultAt: Long? = null,
+    val scanRecoveryCount: Long = 0L,
+    val lastScanRecoveryAt: Long? = null
 ) {
     val nearbyDeviceCount: Int
         get() = peers.size

@@ -13,6 +13,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.model.NodeType
 import java.nio.ByteBuffer
@@ -42,12 +43,40 @@ class BleScanner(
     val scanResultCount: StateFlow<Long> = _scanResultCount.asStateFlow()
     private val _lastResultAt = MutableStateFlow<Long?>(null)
     val lastResultAt: StateFlow<Long?> = _lastResultAt.asStateFlow()
+    private val _rawScanResultCount = MutableStateFlow(0L)
+    val rawScanResultCount: StateFlow<Long> = _rawScanResultCount.asStateFlow()
+    private val _lastRawResultAt = MutableStateFlow<Long?>(null)
+    val lastRawResultAt: StateFlow<Long?> = _lastRawResultAt.asStateFlow()
 
     private val discoveredPeers = linkedMapOf<String, BlePeer>()
     private val generation = AtomicLong(0L)
     @Volatile private var scanning = false
+    @Volatile private var scanStartedElapsedRealtime = 0L
+    @Volatile private var lastRawResultElapsedRealtime: Long? = null
 
+    @Synchronized
     fun startScanning() {
+        startScanningInternal(resetResults = true)
+    }
+
+    /** Restarts only the Android scan registration while preserving peers and session counters. */
+    @Synchronized
+    fun restartScanningPreservingResults(): Boolean {
+        if (_state.value != BleOperationState.ACTIVE || !scanning) return false
+
+        val oldCallback = activeCallback
+        generation.incrementAndGet()
+        scanning = false
+        _state.value = BleOperationState.STOPPING
+        if (oldCallback != null) {
+            runCatching { bluetoothAdapter?.bluetoothLeScanner?.stopScan(oldCallback) }
+        }
+        activeCallback = null
+        startScanningInternal(resetResults = false)
+        return _state.value == BleOperationState.ACTIVE
+    }
+
+    private fun startScanningInternal(resetResults: Boolean) {
         if (!hasScanPermission()) {
             setError(ERROR_PERMISSION)
             return
@@ -72,9 +101,15 @@ class BleScanner(
         }
 
         val sessionGeneration = generation.incrementAndGet()
-        clearPeers()
-        _scanResultCount.value = 0L
-        _lastResultAt.value = null
+        if (resetResults) {
+            clearPeers()
+            _scanResultCount.value = 0L
+            _lastResultAt.value = null
+            _rawScanResultCount.value = 0L
+            _lastRawResultAt.value = null
+            lastRawResultElapsedRealtime = null
+        }
+        scanStartedElapsedRealtime = SystemClock.elapsedRealtime()
         _errorCode.value = null
         _state.value = BleOperationState.STARTING
         scanning = true
@@ -109,6 +144,7 @@ class BleScanner(
     }
 
     @SuppressLint("MissingPermission")
+    @Synchronized
     fun stopScanning(clearPeers: Boolean = true) {
         generation.incrementAndGet()
         scanning = false
@@ -143,11 +179,15 @@ class BleScanner(
         object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 if (generation.get() != sessionGeneration || !scanning) return
+                recordRawScanResult()
                 handleScanResult(result, sessionGeneration)
             }
             override fun onBatchScanResults(results: MutableList<ScanResult>) {
                 if (generation.get() != sessionGeneration || !scanning) return
-                results.forEach { handleScanResult(it, sessionGeneration) }
+                results.forEach {
+                    recordRawScanResult()
+                    handleScanResult(it, sessionGeneration)
+                }
             }
             override fun onScanFailed(errorCode: Int) {
                 if (generation.get() != sessionGeneration) return
@@ -157,6 +197,18 @@ class BleScanner(
                 clearPeers()
             }
         }.also { activeCallback = it }
+
+    private fun recordRawScanResult() {
+        _rawScanResultCount.value += 1L
+        _lastRawResultAt.value = System.currentTimeMillis()
+        lastRawResultElapsedRealtime = SystemClock.elapsedRealtime()
+    }
+
+    fun scanSilenceDurationMs(nowElapsedRealtime: Long = SystemClock.elapsedRealtime()): Long? {
+        if (!scanning) return null
+        val reference = lastRawResultElapsedRealtime ?: scanStartedElapsedRealtime
+        return (nowElapsedRealtime - reference).coerceAtLeast(0L)
+    }
 
     private fun handleScanResult(result: ScanResult, sessionGeneration: Long) {
         if (generation.get() != sessionGeneration || !scanning) return

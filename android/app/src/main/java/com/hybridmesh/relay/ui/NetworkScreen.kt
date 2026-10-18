@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -485,10 +486,14 @@ private fun DiagnoseNetworkDialog(
                         MetricLine("GATT SERVER", if (state.gattServerReady) "READY" else "NOT READY", "Local BLE GATT service")
                         MetricLine("SCANNING", state.scanningState.name, bleErrorDetail(state.scanningErrorCode, BleErrorSource.SCAN))
                         MetricLine("ADVERTISING", state.advertisingState.name, bleErrorDetail(state.advertisingErrorCode, BleErrorSource.ADVERTISE))
-                        MetricLine("SCAN RESULTS", state.scanResultCount.toString(), "last result ${state.lastScanResultAt?.let { java.text.DateFormat.getTimeInstance().format(java.util.Date(it)) } ?: "—"}")
+                        MetricLine("VALID SCAN RESULTS", state.scanResultCount.toString(), "last valid peer ${state.lastScanResultAt?.let { java.text.DateFormat.getTimeInstance().format(java.util.Date(it)) } ?: "—"}")
+                        MetricLine("RAW SCAN CALLBACKS", state.rawScanResultCount.toString(), "last callback ${state.lastRawScanResultAt?.let { java.text.DateFormat.getTimeInstance().format(java.util.Date(it)) } ?: "—"}")
+                        MetricLine("SCAN RECOVERIES", state.scanRecoveryCount.toString(), "last restart ${state.lastScanRecoveryAt?.let { java.text.DateFormat.getTimeInstance().format(java.util.Date(it)) } ?: "—"}")
                         if (state.peers.isEmpty()) Text("No live BLE peers are currently discovered.", color = RelayTextMuted)
-                        state.peers.forEach { peer ->
-                            MetricLine(peer.deviceName, peer.nodeId, "${peer.address} · ${peer.rssi} dBm · protocol ${peer.meshProtocolVersion} · relay ${peer.canRelay} · store-forward ${peer.canStoreForward}")
+                        if (state.peers.isNotEmpty()) DiagnosticListScroller(state.peers.size) {
+                            state.peers.forEach { peer ->
+                                MetricLine(peer.deviceName, peer.nodeId, "${peer.address} · ${peer.rssi} dBm · protocol ${peer.meshProtocolVersion} · relay ${peer.canRelay} · store-forward ${peer.canStoreForward}")
+                            }
                         }
                     }
                 }
@@ -516,8 +521,10 @@ private fun DiagnoseNetworkDialog(
                         }
                         if (mesh.wifiDirectCandidates.isNotEmpty()) {
                             Text("DISCOVERED CANDIDATES", color = RelayTextMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                            mesh.wifiDirectCandidates.asReversed().forEach { candidate ->
-                                MetricLine(candidate.deviceName, candidate.decision, "${candidate.deviceAddress} · protocol ${candidate.protocolVersion ?: "pending"} · seen ${ageLabel(candidate.lastSeen)} ago")
+                            DiagnosticListScroller(mesh.wifiDirectCandidates.size) {
+                                mesh.wifiDirectCandidates.asReversed().forEach { candidate ->
+                                    MetricLine(candidate.deviceName, candidate.decision, "${candidate.deviceAddress} · protocol ${candidate.protocolVersion ?: "pending"} · seen ${ageLabel(candidate.lastSeen)} ago")
+                                }
                             }
                         }
                     }
@@ -526,12 +533,14 @@ private fun DiagnoseNetworkDialog(
                     SectionCard("UNIFIED MESH PEERS") {
                         MetricLine("UNIQUE PEERS", peers.size.toString(), "One identity can expose one or both radio links")
                         if (peers.isEmpty()) Text("No unified peers are currently known.", color = RelayTextMuted)
-                        peers.forEach { peer ->
-                            val links = buildList {
-                                if (!peer.bleAddress.isNullOrBlank()) add("BLE ${peer.bleAddress} · ${peer.rssi} dBm")
-                                if (!peer.wifiHost.isNullOrBlank() && (peer.wifiPort ?: 0) > 0) add("Wi-Fi ${peer.wifiHost}:${peer.wifiPort}")
-                            }.ifEmpty { listOf("No active endpoint") }.joinToString(" · ")
-                            MetricLine(peer.deviceName.ifBlank { peer.nodeId }, peer.nodeId, "$links · BLE/Wi-Fi protocol ${peer.bleProtocolVersion}/${peer.wifiProtocolVersion} · relay ${peer.canRelay} · store-forward ${peer.canStoreForward}")
+                        if (peers.isNotEmpty()) DiagnosticListScroller(peers.size) {
+                            peers.forEach { peer ->
+                                val links = buildList {
+                                    if (!peer.bleAddress.isNullOrBlank()) add("BLE ${peer.bleAddress} · ${peer.rssi} dBm")
+                                    if (!peer.wifiHost.isNullOrBlank() && (peer.wifiPort ?: 0) > 0) add("Wi-Fi ${peer.wifiHost}:${peer.wifiPort}")
+                                }.ifEmpty { listOf("No active endpoint") }.joinToString(" · ")
+                                MetricLine(peer.deviceName.ifBlank { peer.nodeId }, peer.nodeId, "$links · BLE/Wi-Fi protocol ${peer.bleProtocolVersion}/${peer.wifiProtocolVersion} · relay ${peer.canRelay} · store-forward ${peer.canStoreForward}")
+                            }
                         }
                     }
                 }
@@ -556,9 +565,11 @@ private fun DiagnoseNetworkDialog(
                         MetricLine("ATTACHMENT TRANSFER", if (mesh.attachmentTransferActive) "ACTIVE" else "IDLE", "transport ${mesh.attachmentTransport ?: "—"} · rate ${mesh.currentAttachmentThroughputMbps?.let { "${it.twoDecimal()} Mbps" } ?: mesh.lastAttachmentThroughputMbps?.let { "last ${it.twoDecimal()} Mbps" } ?: "—"}")
                         val recentAttachments = attachments.sortedByDescending { it.updatedAt }.take(12)
                         if (recentAttachments.isEmpty()) Text("No attachment transfer records.", color = RelayTextMuted)
-                        recentAttachments.forEach { attachment ->
-                            val progress = if (attachment.sizeBytes > 0L) (attachment.transferredBytes * 100 / attachment.sizeBytes).coerceIn(0L, 100L) else 0L
-                            MetricLine(attachment.displayName, "${attachment.status} · $progress%", "${formatBytes(attachment.transferredBytes)} / ${formatBytes(attachment.sizeBytes)} · hops ${attachment.hopCount} · ${attachment.lastError ?: "no recorded error"}")
+                        if (recentAttachments.isNotEmpty()) DiagnosticListScroller(recentAttachments.size) {
+                            recentAttachments.forEach { attachment ->
+                                val progress = if (attachment.sizeBytes > 0L) (attachment.transferredBytes * 100 / attachment.sizeBytes).coerceIn(0L, 100L) else 0L
+                                MetricLine(attachment.displayName, "${attachment.status} · $progress%", "${formatBytes(attachment.transferredBytes)} / ${formatBytes(attachment.sizeBytes)} · hops ${attachment.hopCount} · ${attachment.lastError ?: "no recorded error"}")
+                            }
                         }
                     }
                 }
@@ -568,8 +579,10 @@ private fun DiagnoseNetworkDialog(
                         MetricLine("TERMINAL SEND ATTEMPTS", completedRequests.toString(), "mesh sends that succeeded, failed, or had no available carrier")
                         MetricLine("EVENTS SHOWN", recentEvents.size.toString(), "latest events · select one for full correlation and result details")
                         if (recentEvents.isEmpty()) Text("No network events have been recorded in this process yet.", color = RelayTextMuted)
-                        recentEvents.forEach { event ->
-                            EventRow(event, active = event.id in activeEventIds) { selectedEvent = event }
+                        if (recentEvents.isNotEmpty()) DiagnosticListScroller(recentEvents.size) {
+                            recentEvents.forEach { event ->
+                                EventRow(event, active = event.id in activeEventIds) { selectedEvent = event }
+                            }
                         }
                     }
                 }
@@ -747,6 +760,26 @@ private fun SectionCard(title: String, content: @Composable () -> Unit) {
     ) {
         Text(title, style = TechnicalTextStyle, color = RelayTextMuted, fontWeight = FontWeight.Bold)
         content()
+    }
+}
+
+@Composable
+private fun DiagnosticListScroller(itemCount: Int, content: @Composable () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        if (itemCount > 6) {
+            Text("Scroll inside to see all $itemCount entries", color = RelayTextMuted, style = MaterialTheme.typography.labelSmall)
+        }
+        Column(
+            Modifier.fillMaxWidth()
+                .heightIn(max = 380.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            content()
+        }
     }
 }
 

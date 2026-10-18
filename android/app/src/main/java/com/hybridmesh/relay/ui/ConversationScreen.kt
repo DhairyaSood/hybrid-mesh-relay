@@ -59,6 +59,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
@@ -103,6 +104,8 @@ import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
@@ -126,6 +129,8 @@ fun ConversationScreen(peerNodeId: String) {
     val messages by viewModel.observeConversation(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
     val attachments by viewModel.observeConversationAttachments(peerNodeId).collectAsStateWithLifecycle(initialValue = emptyList())
     val conversationListState = rememberLazyListState()
+    var followLatestMessage by remember(peerNodeId) { mutableStateOf(true) }
+    var positionedAtLatestMessage by remember(peerNodeId) { mutableStateOf(false) }
     val locationManager = remember { LocationManager(context) }
     val notificationCoordinator = remember { MessagingNotificationCoordinator.getInstance(context) }
     val scope = rememberCoroutineScope()
@@ -208,11 +213,32 @@ fun ConversationScreen(peerNodeId: String) {
         wifiHealth = wifiHealth
     )
 
+    LaunchedEffect(peerNodeId, conversationListState) {
+        var previousItemCount: Int? = null
+        snapshotFlow {
+            val layoutInfo = conversationListState.layoutInfo
+            val isAtLatestItem = layoutInfo.visibleItemsInfo.lastOrNull()?.index == layoutInfo.totalItemsCount - 1
+            layoutInfo.totalItemsCount to isAtLatestItem
+        }.collect { (itemCount, isAtLatestItem) ->
+            // Keep the user's previous follow state while a message is appended;
+            // the new last item is not visible until the follow-up scroll runs.
+            if (previousItemCount == null || previousItemCount == itemCount) {
+                followLatestMessage = isAtLatestItem
+            }
+            previousItemCount = itemCount
+        }
+    }
+
     LaunchedEffect(peerNodeId, messages.size) {
         if (messages.isNotEmpty()) {
             val dateMarkerCount = messages.map { conversationDateKey(it.createdAt) }.distinct().size
-            val lastItemIndex = messages.size + dateMarkerCount - 1
-            conversationListState.scrollToItem(lastItemIndex)
+            val expectedItemCount = messages.size + dateMarkerCount
+            snapshotFlow { conversationListState.layoutInfo.totalItemsCount }
+                .first { itemCount -> itemCount == expectedItemCount }
+            if (!positionedAtLatestMessage || followLatestMessage) {
+                conversationListState.scrollToItem(expectedItemCount - 1)
+            }
+            positionedAtLatestMessage = true
         }
     }
 

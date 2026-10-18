@@ -11,6 +11,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.SystemClock
 import com.hybridmesh.relay.ble.BleAdvertiser
 import com.hybridmesh.relay.ble.BleOperationState
 import com.hybridmesh.relay.ble.BleScanner
@@ -57,6 +58,9 @@ class NetworkManager private constructor(context: Context) {
     private val _gattServerReady = MutableStateFlow(false)
     private val _runtimeGeneration = MutableStateFlow(0L)
     private val _runtimeEvents = MutableSharedFlow<BleRuntimeEvent>(extraBufferCapacity = 16)
+    private val _scanRecoveryCount = MutableStateFlow(0L)
+    private val _lastScanRecoveryAt = MutableStateFlow<Long?>(null)
+    @Volatile private var lastScanRecoveryElapsedRealtime = 0L
 
     private val _state = MutableStateFlow(buildState())
     val state: StateFlow<NetworkState> = _state.asStateFlow()
@@ -67,6 +71,7 @@ class NetworkManager private constructor(context: Context) {
     @Volatile private var runtimeStarted = false
     private val runtimeJobs = mutableListOf<Job>()
     private var expiryJob: Job? = null
+    private var scanHealthJob: Job? = null
     private var recoveryJob: Job? = null
     private var bluetoothReceiverRegistered = false
     private var connectivityCallbackRegistered = false
@@ -170,6 +175,14 @@ class NetworkManager private constructor(context: Context) {
         }
 
         runtimeJobs += scope.launch {
+            bleScanner.rawScanResultCount.collect { publishState() }
+        }
+
+        runtimeJobs += scope.launch {
+            bleScanner.lastRawResultAt.collect { publishState() }
+        }
+
+        runtimeJobs += scope.launch {
             _gattServerReady.collect { ready ->
                 publishState()
                 if (!ready && isBleRuntimeUsable()) {
@@ -198,6 +211,13 @@ class NetworkManager private constructor(context: Context) {
             }
         }
 
+        scanHealthJob = scope.launch {
+            while (runtimeStarted) {
+                recoverQuietScanner()
+                delay(SCAN_HEALTH_CHECK_INTERVAL_MS)
+            }
+        }
+
         refresh()
     }
 
@@ -217,6 +237,8 @@ class NetworkManager private constructor(context: Context) {
 
         expiryJob?.cancel()
         expiryJob = null
+        scanHealthJob?.cancel()
+        scanHealthJob = null
 
         runCatching {
             if (bluetoothReceiverRegistered) {
@@ -259,6 +281,12 @@ class NetworkManager private constructor(context: Context) {
         reconcileRuntime()
         updateInitializationState()
         publishState()
+    }
+
+    /** Refreshes runtime state on app resume and repairs a scan session that has gone quiet. */
+    fun onForegroundResumed() {
+        refresh()
+        scope.launch { recoverQuietScanner() }
     }
 
     fun setGattLifecycle(
@@ -423,6 +451,32 @@ class NetworkManager private constructor(context: Context) {
                     }
                 }
             }
+        }
+    }
+
+    private suspend fun recoverQuietScanner() {
+        if (!isBleRuntimeUsable() || bleScanner.state.value != BleOperationState.ACTIVE) return
+        if ((bleScanner.scanSilenceDurationMs() ?: return) < SCAN_QUIET_RECOVERY_THRESHOLD_MS) return
+
+        recoveryMutex.withLock {
+            if (!isBleRuntimeUsable() || bleScanner.state.value != BleOperationState.ACTIVE) return@withLock
+            if ((bleScanner.scanSilenceDurationMs() ?: return@withLock) < SCAN_QUIET_RECOVERY_THRESHOLD_MS) return@withLock
+
+            val now = SystemClock.elapsedRealtime()
+            if (
+                _scanRecoveryCount.value > 0L &&
+                now - lastScanRecoveryElapsedRealtime < SCAN_RECOVERY_COOLDOWN_MS
+            ) return@withLock
+
+            lastScanRecoveryElapsedRealtime = now
+            _scanRecoveryCount.value += 1L
+            _lastScanRecoveryAt.value = System.currentTimeMillis()
+            publishState()
+
+            // Restart only the scanner registration. The advertiser, GATT server,
+            // runtime generation, peers, and transport preferences remain intact.
+            bleScanner.restartScanningPreservingResults()
+            publishState()
         }
     }
 
@@ -736,7 +790,11 @@ class NetworkManager private constructor(context: Context) {
         peers = bleScanner.peers.value,
         scanResultCount = bleScanner.scanResultCount.value,
         lastScanResultAt = bleScanner.lastResultAt.value,
-        runtimeGeneration = _runtimeGeneration.value
+        runtimeGeneration = _runtimeGeneration.value,
+        rawScanResultCount = bleScanner.rawScanResultCount.value,
+        lastRawScanResultAt = bleScanner.lastRawResultAt.value,
+        scanRecoveryCount = _scanRecoveryCount.value,
+        lastScanRecoveryAt = _lastScanRecoveryAt.value
     )
 
     private fun publishState() {
@@ -850,6 +908,9 @@ class NetworkManager private constructor(context: Context) {
     companion object {
         private const val SCANNER_START_WAIT_MS = 1_500L
         private const val ADVERTISER_START_WAIT_MS = 2_000L
+        private const val SCAN_QUIET_RECOVERY_THRESHOLD_MS = 60_000L
+        private const val SCAN_RECOVERY_COOLDOWN_MS = 5 * 60_000L
+        private const val SCAN_HEALTH_CHECK_INTERVAL_MS = 30_000L
 
         @Volatile
         private var INSTANCE: NetworkManager? = null

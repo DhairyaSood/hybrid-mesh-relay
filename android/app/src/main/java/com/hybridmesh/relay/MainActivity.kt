@@ -174,7 +174,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
             if (event == Lifecycle.Event.ON_RESUME) {
                 foregroundCycle += 1
                 wifiDirectLocationModeEnabled = PermissionManager.wifiDirectLocationModeEnabled(context)
-                networkManager.refresh()
+                networkManager.onForegroundResumed()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
