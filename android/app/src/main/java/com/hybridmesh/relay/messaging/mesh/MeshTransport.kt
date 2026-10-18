@@ -16,7 +16,8 @@ enum class MeshTransportKind(val persistedName: String, val traceCode: Int) {
 data class MeshTransportPeer(
     val nodeId: String,
     val bleAddress: String? = null,
-    val wifiAddress: String? = null
+    val wifiAddress: String? = null,
+    val bleSupportsAttachmentHopIdentity: Boolean = false
 )
 
 sealed interface MeshTransportSendResult {

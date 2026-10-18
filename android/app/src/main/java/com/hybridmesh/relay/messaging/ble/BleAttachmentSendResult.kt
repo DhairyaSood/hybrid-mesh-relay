@@ -16,6 +16,7 @@ data class BleAttachmentSendResult(
     val firstAttemptDiscoveryStatus: Int? = null,
     val firstAttemptDiscoveredServices: String? = null,
     val firstAttemptMissingAttributes: String? = null,
+    val attachmentFrameProtocolVersion: Int? = null,
     val snapshot: GattTransportSnapshot
 ) {
     companion object {
@@ -32,6 +33,7 @@ data class BleAttachmentSendResult(
             firstAttemptDiscoveryStatus: Int? = null,
             firstAttemptDiscoveredServices: String? = null,
             firstAttemptMissingAttributes: String? = null,
+            attachmentFrameProtocolVersion: Int? = null,
             snapshot: GattTransportSnapshot = GattTransportSnapshot(messageId = messageId)
         ) = BleAttachmentSendResult(
             succeeded = false,
@@ -46,6 +48,7 @@ data class BleAttachmentSendResult(
             firstAttemptDiscoveryStatus = firstAttemptDiscoveryStatus,
             firstAttemptDiscoveredServices = firstAttemptDiscoveredServices,
             firstAttemptMissingAttributes = firstAttemptMissingAttributes,
+            attachmentFrameProtocolVersion = attachmentFrameProtocolVersion,
             snapshot = snapshot
         )
     }

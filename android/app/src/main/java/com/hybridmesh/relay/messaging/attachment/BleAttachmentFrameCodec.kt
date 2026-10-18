@@ -8,7 +8,8 @@ import java.nio.ByteOrder
 /** Small application frames carried by the existing reliable BLE/GATT session. */
 object BleAttachmentFrameCodec {
     private val MAGIC = byteArrayOf(0x4E, 0x59, 0x41, 0x31) // NYA1
-    private const val VERSION: Byte = 1
+    const val LEGACY_PROTOCOL_VERSION = 1
+    const val HOP_IDENTITY_PROTOCOL_VERSION = 2
     private const val BEGIN: Byte = 1
     private const val CHUNK: Byte = 2
     private const val FINISH: Byte = 3
@@ -17,15 +18,43 @@ object BleAttachmentFrameCodec {
 
     sealed interface Frame {
         val transferId: Long
-        data class Begin(override val transferId: Long, val manifest: AttachmentTransferManifest) : Frame
-        data class Chunk(override val transferId: Long, val messageId: String, val offset: Long, val bytes: ByteArray) : Frame
-        data class Finish(override val transferId: Long, val messageId: String) : Frame
+        val protocolVersion: Int
+        data class Begin(
+            override val transferId: Long,
+            override val protocolVersion: Int,
+            val manifest: AttachmentTransferManifest,
+            val immediateHopSenderNodeId: String?
+        ) : Frame
+        data class Chunk(
+            override val transferId: Long,
+            override val protocolVersion: Int,
+            val messageId: String,
+            val offset: Long,
+            val bytes: ByteArray
+        ) : Frame
+        data class Finish(
+            override val transferId: Long,
+            override val protocolVersion: Int,
+            val messageId: String
+        ) : Frame
     }
 
     fun isFrame(bytes: ByteArray): Boolean = bytes.size >= MAGIC.size &&
         MAGIC.indices.all { bytes[it] == MAGIC[it] }
 
-    fun encodeBegin(transferId: Long, manifest: AttachmentTransferManifest): ByteArray {
+    fun encodeBegin(
+        transferId: Long,
+        manifest: AttachmentTransferManifest,
+        protocolVersion: Int = LEGACY_PROTOCOL_VERSION,
+        immediateHopSenderNodeId: String? = null
+    ): ByteArray {
+        require(protocolVersion == LEGACY_PROTOCOL_VERSION ||
+            protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION)
+        if (protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION) {
+            require(!immediateHopSenderNodeId.isNullOrBlank() && immediateHopSenderNodeId.length <= 64)
+        } else {
+            require(immediateHopSenderNodeId == null)
+        }
         val body = ByteArrayOutputStream().also { output ->
             DataOutputStream(output).use { data ->
                 data.writeUtf8(manifest.messageId, 160)
@@ -37,29 +66,46 @@ object BleAttachmentFrameCodec {
                 data.writeUtf8(manifest.sha256, 64)
                 data.writeLong(manifest.createdAt)
                 data.writeInt(manifest.hopCount)
+                if (protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION) {
+                    data.writeUtf8(immediateHopSenderNodeId!!, 64)
+                }
             }
         }.toByteArray()
-        return encodeHeader(BEGIN, transferId, body)
+        return encodeHeader(BEGIN, transferId, protocolVersion, body)
     }
 
-    fun encodeChunk(transferId: Long, messageId: String, offset: Long, bytes: ByteArray): ByteArray {
+    fun encodeChunk(
+        transferId: Long,
+        messageId: String,
+        offset: Long,
+        bytes: ByteArray,
+        protocolVersion: Int = LEGACY_PROTOCOL_VERSION
+    ): ByteArray {
         require(messageId.isNotBlank() && messageId.length <= 160)
         require(offset >= 0L && bytes.isNotEmpty() && bytes.size <= MAX_CHUNK_BYTES)
+        require(protocolVersion == LEGACY_PROTOCOL_VERSION ||
+            protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION)
         val id = messageId.toByteArray(Charsets.UTF_8)
         return ByteBuffer.allocate(4 + 1 + 1 + 8 + 8 + 2 + id.size + bytes.size)
             .order(ByteOrder.BIG_ENDIAN)
             .apply {
-                put(MAGIC); put(VERSION); put(CHUNK); putLong(transferId); putLong(offset)
+                put(MAGIC); put(protocolVersion.toByte()); put(CHUNK); putLong(transferId); putLong(offset)
                 putShort(id.size.toShort()); put(id); put(bytes)
             }.array()
     }
 
-    fun encodeFinish(transferId: Long, messageId: String): ByteArray {
+    fun encodeFinish(
+        transferId: Long,
+        messageId: String,
+        protocolVersion: Int = LEGACY_PROTOCOL_VERSION
+    ): ByteArray {
         val id = messageId.toByteArray(Charsets.UTF_8)
         require(id.isNotEmpty() && id.size <= 160)
+        require(protocolVersion == LEGACY_PROTOCOL_VERSION ||
+            protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION)
         return ByteBuffer.allocate(4 + 1 + 1 + 8 + 2 + id.size)
             .order(ByteOrder.BIG_ENDIAN)
-            .apply { put(MAGIC); put(VERSION); put(FINISH); putLong(transferId); putShort(id.size.toShort()); put(id) }
+            .apply { put(MAGIC); put(protocolVersion.toByte()); put(FINISH); putLong(transferId); putShort(id.size.toShort()); put(id) }
             .array()
     }
 
@@ -68,7 +114,9 @@ object BleAttachmentFrameCodec {
         return runCatching {
             val input = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
             input.position(MAGIC.size)
-            if (input.get() != VERSION) return null
+            val protocolVersion = input.get().toInt() and 0xFF
+            if (protocolVersion != LEGACY_PROTOCOL_VERSION &&
+                protocolVersion != HOP_IDENTITY_PROTOCOL_VERSION) return null
             val type = input.get()
             val transferId = input.long
             when (type) {
@@ -81,11 +129,19 @@ object BleAttachmentFrameCodec {
                     if (input.remaining() < 8) return null
                     val size = input.long
                     val hash = input.readUtf8(64)
-                    if (input.remaining() != 12) return null
+                    if (input.remaining() < 12) return null
                     val createdAt = input.long
                     val hops = input.int
+                    val immediateHopSenderNodeId = if (protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION) {
+                        input.readUtf8(64)
+                    } else null
                     if (input.hasRemaining()) return null
-                    Frame.Begin(transferId, AttachmentTransferManifest(messageId, sender, recipient, mime, name, size, hash, createdAt, hops))
+                    Frame.Begin(
+                        transferId,
+                        protocolVersion,
+                        AttachmentTransferManifest(messageId, sender, recipient, mime, name, size, hash, createdAt, hops),
+                        immediateHopSenderNodeId
+                    )
                 }
                 CHUNK -> {
                     if (input.remaining() < 10) return null
@@ -95,21 +151,21 @@ object BleAttachmentFrameCodec {
                     val id = ByteArray(idLength).also { input.get(it) }.toString(Charsets.UTF_8)
                     val chunk = ByteArray(input.remaining()).also { input.get(it) }
                     if (offset < 0L || chunk.size > MAX_CHUNK_BYTES) return null
-                    Frame.Chunk(transferId, id, offset, chunk)
+                    Frame.Chunk(transferId, protocolVersion, id, offset, chunk)
                 }
                 FINISH -> {
                     val id = input.readUtf8(160)
                     if (input.hasRemaining()) return null
-                    Frame.Finish(transferId, id)
+                    Frame.Finish(transferId, protocolVersion, id)
                 }
                 else -> null
             }
         }.getOrNull()
     }
 
-    private fun encodeHeader(type: Byte, transferId: Long, body: ByteArray): ByteArray =
+    private fun encodeHeader(type: Byte, transferId: Long, protocolVersion: Int, body: ByteArray): ByteArray =
         ByteBuffer.allocate(4 + 1 + 1 + 8 + body.size).order(ByteOrder.BIG_ENDIAN)
-            .apply { put(MAGIC); put(VERSION); put(type); putLong(transferId); put(body) }.array()
+            .apply { put(MAGIC); put(protocolVersion.toByte()); put(type); putLong(transferId); put(body) }.array()
 
     private fun DataOutputStream.writeUtf8(value: String, maxBytes: Int) {
         val bytes = value.toByteArray(Charsets.UTF_8)

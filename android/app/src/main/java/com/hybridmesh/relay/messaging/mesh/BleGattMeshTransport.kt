@@ -6,6 +6,7 @@ import android.content.Context
 import com.hybridmesh.relay.messaging.ble.BleAttachmentSendResult
 import com.hybridmesh.relay.messaging.ble.BleGattClient
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
+import com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
 import com.hybridmesh.relay.network.BluetoothState
 import com.hybridmesh.relay.network.MeshTransportPreferences
@@ -102,6 +103,7 @@ internal class BleGattMeshTransport(
         peer: MeshTransportPeer,
         manifest: AttachmentTransferManifest,
         file: File,
+        immediateHopSenderNodeId: String,
         onProgress: suspend (Long) -> Unit
     ): BleAttachmentSendResult {
         fun failed(code: String, stage: String = "ROUTE") = BleAttachmentSendResult.failed(
@@ -125,6 +127,12 @@ internal class BleGattMeshTransport(
                 device = device,
                 manifest = manifest,
                 file = file,
+                immediateHopSenderNodeId = immediateHopSenderNodeId,
+                attachmentFrameProtocolVersion = if (peer.bleSupportsAttachmentHopIdentity) {
+                    BleAttachmentFrameCodec.HOP_IDENTITY_PROTOCOL_VERSION
+                } else {
+                    BleAttachmentFrameCodec.LEGACY_PROTOCOL_VERSION
+                },
                 runtimeGeneration = generation,
                 isRuntimeGenerationCurrent = {
                     networkManager.runtimeGeneration.value == generation && isAvailable()
