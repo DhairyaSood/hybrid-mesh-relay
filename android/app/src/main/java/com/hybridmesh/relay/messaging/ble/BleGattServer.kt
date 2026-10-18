@@ -27,6 +27,7 @@ import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,6 +67,7 @@ class BleGattServer(context: Context) {
 
     private companion object {
         const val MESH_ACCEPTANCE_TIMEOUT_MS = 4_000L
+        const val MESH_ATTACHMENT_ACCEPTANCE_TIMEOUT_MS = 15_000L
         const val ASSEMBLY_TIMEOUT_MS = 15_000L
         const val ASSEMBLY_CLEANUP_INTERVAL_MS = 5_000L
         const val MAX_CONCURRENT_ASSEMBLIES = 32
@@ -76,13 +78,13 @@ class BleGattServer(context: Context) {
     private var packetReceiver: (suspend (BluetoothDevice, ByteArray) -> Boolean)? = null
 
     @Volatile
-    private var attachmentReceiver: (suspend (BluetoothDevice, ByteArray) -> Long?)? = null
+    private var attachmentReceiver: (suspend (BluetoothDevice, ByteArray) -> BleAttachmentReceiveResult)? = null
 
     fun setPacketReceiver(receiver: (suspend (BluetoothDevice, ByteArray) -> Boolean)?) {
         packetReceiver = receiver
     }
 
-    fun setAttachmentReceiver(receiver: (suspend (BluetoothDevice, ByteArray) -> Long?)?) {
+    fun setAttachmentReceiver(receiver: (suspend (BluetoothDevice, ByteArray) -> BleAttachmentReceiveResult)?) {
         attachmentReceiver = receiver
     }
 
@@ -455,7 +457,8 @@ class BleGattServer(context: Context) {
             sendAck(
                 device,
                 frame.transferId,
-                accepted = false
+                accepted = false,
+                rejection = BleAttachmentRejection.ASSEMBLY_LIMIT
             )
             return
         }
@@ -472,7 +475,8 @@ class BleGattServer(context: Context) {
             sendAck(
                 device,
                 frame.transferId,
-                accepted = false
+                accepted = false,
+                rejection = BleAttachmentRejection.ASSEMBLY_INVALID
             )
             return
         }
@@ -492,7 +496,8 @@ class BleGattServer(context: Context) {
                 sendAck(
                     device,
                     frame.transferId,
-                    accepted = false
+                    accepted = false,
+                    rejection = BleAttachmentRejection.ASSEMBLY_INVALID
                 )
                 return
             }
@@ -538,7 +543,8 @@ class BleGattServer(context: Context) {
             sendAck(
                 device,
                 frame.transferId,
-                accepted = false
+                accepted = false,
+                rejection = if (isAttachmentFrame) BleAttachmentRejection.RECEIVER_UNAVAILABLE else null
             )
             return
         }
@@ -549,7 +555,8 @@ class BleGattServer(context: Context) {
                     sendAck(
                         device,
                         frame.transferId,
-                        accepted = false
+                        accepted = false,
+                        rejection = if (isAttachmentFrame) BleAttachmentRejection.RECEIVER_BUSY else null
                     )
                 }
                 return@launch
@@ -557,10 +564,26 @@ class BleGattServer(context: Context) {
 
             try {
                 if (isAttachmentFrame) {
-                    val offset = withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
-                        try { attachmentReceiver?.invoke(device, combined) } catch (_: Exception) { null }
+                    val result = withTimeoutOrNull(MESH_ATTACHMENT_ACCEPTANCE_TIMEOUT_MS) {
+                        try {
+                            attachmentReceiver?.invoke(device, combined)
+                                ?: BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVER_UNAVAILABLE)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVER_ERROR)
+                        }
+                    } ?: BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVER_TIMEOUT)
+                    if (callbackGeneration == serverGeneration) {
+                        when (result) {
+                            is BleAttachmentReceiveResult.Accepted -> sendAck(
+                                device, frame.transferId, accepted = true, offset = result.offset
+                            )
+                            is BleAttachmentReceiveResult.Rejected -> sendAck(
+                                device, frame.transferId, accepted = false, rejection = result.reason
+                            )
+                        }
                     }
-                    if (callbackGeneration == serverGeneration) sendAck(device, frame.transferId, offset != null, offset)
                 } else {
                     val accepted = withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
                         try { packetReceiver?.invoke(device, combined) == true } catch (_: Exception) { false }
@@ -578,13 +601,19 @@ class BleGattServer(context: Context) {
         device: BluetoothDevice,
         transferId: Long,
         accepted: Boolean,
-        offset: Long? = null
+        offset: Long? = null,
+        rejection: BleAttachmentRejection? = null
     ): Boolean {
         if (!subscribedDevices.contains(safeAddress(device))) return false
 
         val characteristic = txCharacteristic ?: return false
         val currentServer = server ?: return false
-        val value = GattPacketCodec.encodeAck(transferId, accepted, offset)
+        val value = GattPacketCodec.encodeAck(
+            transferId = transferId,
+            accepted = accepted,
+            offset = offset,
+            rejectionCode = rejection?.wireCode
+        )
 
         val success = try {
             if (Build.VERSION.SDK_INT >= 33) {

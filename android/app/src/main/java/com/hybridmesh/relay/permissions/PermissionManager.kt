@@ -3,7 +3,9 @@ package com.hybridmesh.relay.permissions
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Build
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.network.MeshTransportSelection
 
@@ -89,6 +91,19 @@ object PermissionManager {
     /** Android 13 introduced NEARBY_WIFI_DEVICES for apps targeting API 33+. */
     fun requiresNearbyWifiDevicesPermission(context: Context): Boolean =
         Build.VERSION.SDK_INT >= 33 && context.applicationContext.applicationInfo.targetSdkVersion >= 33
+
+    /** Wi-Fi P2P discovery also requires Android's system Location Mode to be enabled. */
+    fun wifiDirectLocationModeEnabled(context: Context): Boolean = runCatching {
+        val appContext = context.applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            appContext.getSystemService(LocationManager::class.java)?.isLocationEnabled == true
+        } else {
+            Settings.Secure.getInt(
+                appContext.contentResolver,
+                Settings.Secure.LOCATION_MODE
+            ) != Settings.Secure.LOCATION_MODE_OFF
+        }
+    }.getOrDefault(false)
 
     fun wifiDirectPermissionGranted(context: Context): Boolean {
         val appContext = context.applicationContext

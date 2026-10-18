@@ -210,19 +210,28 @@ class BleGattClient(context: Context) {
         var transferStage = "VALIDATE"
         var acknowledgedBytes = 0L
         var estimatedGattWrites: Long? = null
+        var retryableFailure = true
         fun failed(code: String): BleAttachmentSendResult = BleAttachmentSendResult.failed(
             code = code,
             stage = transferStage,
             messageId = manifest.messageId,
             acknowledgedBytes = acknowledgedBytes,
             estimatedGattWrites = estimatedGattWrites,
+            retryable = retryableFailure,
             snapshot = session.snapshot()
         )
 
-        if (!manifest.isValid()) return failed("INVALID_MANIFEST")
-        if (manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) return failed("BLE_SIZE_LIMIT")
+        if (!manifest.isValid()) {
+            retryableFailure = false
+            return failed("INVALID_MANIFEST")
+        }
+        if (manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) {
+            retryableFailure = false
+            return failed("BLE_SIZE_LIMIT")
+        }
         if (!file.isFile || file.length() != manifest.sizeBytes ||
             runCatching { AttachmentFileStore.sha256(file) }.getOrNull() != manifest.sha256) {
+            retryableFailure = false
             return failed("LOCAL_FILE_MISSING_OR_CHANGED")
         }
 
@@ -274,7 +283,7 @@ class BleGattClient(context: Context) {
                 }
                 session.transition(GattTransportState.WAITING_ACK, null)
                 val ack = try {
-                    withTimeout(BleGattConstants.ACK_TIMEOUT_MS) {
+                    withTimeout(BleGattConstants.ATTACHMENT_ACK_TIMEOUT_MS) {
                         select<GattPacketCodec.AckFrame> {
                             session.ack.onAwait { it }
                             session.failure.onAwait { throw GattTransportException(session.error) }
@@ -286,7 +295,10 @@ class BleGattClient(context: Context) {
                     return null
                 }
                 if (!ack.accepted) {
-                    frameFailureCode = "ACK_REJECTED"
+                    val rejection = BleAttachmentRejection.fromWireCode(ack.rejectionCode)
+                    frameFailureCode = rejection?.let { "REMOTE_REJECTED_${it.name}" }
+                        ?: if (ack.rejectionCode == null) "ACK_REJECTED" else "REMOTE_REJECTED_UNKNOWN"
+                    retryableFailure = rejection?.retryable ?: true
                     session.fail(GattTransportError.ACK_REJECTED)
                     return null
                 }

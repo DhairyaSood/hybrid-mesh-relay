@@ -47,7 +47,7 @@ import com.hybridmesh.relay.ui.viewmodel.ProfileViewModel
 import com.hybridmesh.relay.ui.components.NodeIdText
 
 @Composable
-fun ProfileScreen() {
+fun ProfileScreen(onLocationModeRequired: () -> Unit) {
     val context = LocalContext.current
     val viewModel: ProfileViewModel = viewModel()
     val identity by viewModel.identity.collectAsStateWithLifecycle()
@@ -55,8 +55,15 @@ fun ProfileScreen() {
     val transportPreferences = MeshTransportPreferences.getInstance(context)
     val selection by transportPreferences.selection.collectAsStateWithLifecycle()
     val networkManager = NetworkManager.getInstance(context)
+    var waitingForWifiDirectPermissionResult by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         networkManager.refresh()
+        if (waitingForWifiDirectPermissionResult) {
+            waitingForWifiDirectPermissionResult = false
+            if (transportPreferences.selection.value.wifiDirectEnabled &&
+                !PermissionManager.wifiDirectLocationModeEnabled(context)
+            ) onLocationModeRequired()
+        }
     }
     var deviceName by remember(identity.deviceName) { mutableStateOf(identity.deviceName) }
     val cleanedUsername = NicknamePolicy.clean(deviceName)
@@ -138,7 +145,12 @@ fun ProfileScreen() {
                         if (enabled) {
                             val desired = selection.copy(wifiDirectEnabled = true)
                             val missing = PermissionManager.missingEnabledMeshPermissions(context, desired)
-                            if (missing.isNotEmpty()) permissionLauncher.launch(missing)
+                            if (missing.isNotEmpty()) {
+                                waitingForWifiDirectPermissionResult = true
+                                permissionLauncher.launch(missing)
+                            } else if (!PermissionManager.wifiDirectLocationModeEnabled(context)) {
+                                onLocationModeRequired()
+                            }
                         }
                     }
                 )

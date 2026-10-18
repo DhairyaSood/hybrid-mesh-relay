@@ -21,6 +21,7 @@ object BleGattConstants {
     const val MTU_TIMEOUT_MS = 3_500L
     const val WRITE_TIMEOUT_MS = 4_000L
     const val ACK_TIMEOUT_MS = 6_000L
+    const val ATTACHMENT_ACK_TIMEOUT_MS = 20_000L
     const val IDENTITY_READ_TIMEOUT_MS = 4_000L
 
     const val IDENTITY_VERSION: Byte = 1

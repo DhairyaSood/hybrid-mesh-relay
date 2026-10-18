@@ -9,6 +9,7 @@ data class BleAttachmentSendResult(
     val stage: String,
     val acknowledgedBytes: Long = 0L,
     val estimatedGattWrites: Long? = null,
+    val retryable: Boolean = true,
     val snapshot: GattTransportSnapshot
 ) {
     companion object {
@@ -18,6 +19,7 @@ data class BleAttachmentSendResult(
             messageId: String,
             acknowledgedBytes: Long = 0L,
             estimatedGattWrites: Long? = null,
+            retryable: Boolean = true,
             snapshot: GattTransportSnapshot = GattTransportSnapshot(messageId = messageId)
         ) = BleAttachmentSendResult(
             succeeded = false,
@@ -25,6 +27,7 @@ data class BleAttachmentSendResult(
             stage = stage,
             acknowledgedBytes = acknowledgedBytes,
             estimatedGattWrites = estimatedGattWrites,
+            retryable = retryable,
             snapshot = snapshot
         )
     }
