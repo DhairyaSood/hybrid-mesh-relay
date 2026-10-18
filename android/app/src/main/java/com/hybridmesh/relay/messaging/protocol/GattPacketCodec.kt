@@ -27,6 +27,7 @@ object GattPacketCodec {
     const val ACK_BYTES = 13
     const val MIN_ATT_MTU = 23
     const val ATT_PROTOCOL_OVERHEAD = 3
+    const val MAX_ATTRIBUTE_VALUE_BYTES = 512
     const val ENVELOPE_VERSION: Byte = 1
     const val MAX_CHUNKS = 65_535
 
@@ -51,9 +52,12 @@ object GattPacketCodec {
         val content: String
     )
 
+    fun maxCharacteristicValueBytes(mtu: Int): Int =
+        (mtu.coerceAtLeast(MIN_ATT_MTU) - ATT_PROTOCOL_OVERHEAD)
+            .coerceAtMost(MAX_ATTRIBUTE_VALUE_BYTES)
+
     fun safePayloadBytes(mtu: Int): Int =
-        (mtu.coerceAtLeast(MIN_ATT_MTU) - ATT_PROTOCOL_OVERHEAD - DATA_HEADER_BYTES)
-            .coerceAtLeast(1)
+        (maxCharacteristicValueBytes(mtu) - DATA_HEADER_BYTES).coerceAtLeast(1)
 
     fun encodeMessageEnvelope(
         senderNodeId: String,

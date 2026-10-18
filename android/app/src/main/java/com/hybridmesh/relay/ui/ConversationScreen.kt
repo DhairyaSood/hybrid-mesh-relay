@@ -1,6 +1,8 @@
 package com.hybridmesh.relay.ui
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
@@ -141,8 +143,9 @@ fun ConversationScreen(peerNodeId: String) {
     var selectedLocation by remember { mutableStateOf<LocationPayload?>(null) }
     var locationActionError by remember { mutableStateOf<String?>(null) }
 
-    val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) {
+    val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val uri = result.data?.data
+        if (result.resultCode == Activity.RESULT_OK && uri != null) {
             attachmentError = null
             viewModel.sendAttachment(peerNodeId, uri) { success, error ->
                 if (!success) attachmentError = error ?: "Could not add this attachment."
@@ -409,7 +412,16 @@ fun ConversationScreen(peerNodeId: String) {
                         placeholder = { Text("Message") },
                         trailingIcon = {
                             IconButton(
-                                onClick = { attachmentPicker.launch(arrayOf("image/*", "video/*")) },
+                                onClick = {
+                                    val mediaIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                                        type = "*/*"
+                                        addCategory(Intent.CATEGORY_OPENABLE)
+                                        putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+                                    }
+                                    attachmentPicker.launch(
+                                        Intent.createChooser(mediaIntent, "Choose a media app")
+                                    )
+                                },
                                 modifier = Modifier.size(40.dp)
                             ) {
                                 Icon(
@@ -449,6 +461,7 @@ fun ConversationScreen(peerNodeId: String) {
         if (selectedMessage != null) {
             MessageDiagnosticsDialog(
                 message = selectedMessage,
+                attachment = attachments.firstOrNull { it.messageId == messageId },
                 events = traceEvents,
                 localNodeId = identity.nodeId,
                 onDismiss = { diagnosticsMessageId = null }

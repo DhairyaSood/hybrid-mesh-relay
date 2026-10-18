@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.isActive
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.messaging.ble.BleGattClient
+import com.hybridmesh.relay.messaging.ble.BleGattConstants
 import com.hybridmesh.relay.messaging.data.MeshForwardingRecordEntity
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MeshSeenPacketEntity
@@ -18,6 +19,7 @@ import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor
 import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferDiagnostics
 import com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
@@ -99,6 +101,9 @@ class MeshEngine(context: Context) {
     private val activeFanoutJobs = ConcurrentHashMap.newKeySet<Job>()
     private data class AttachmentRateWindow(val startedAtNanos: Long, val initialBytes: Long)
     private val attachmentRateWindows = ConcurrentHashMap<String, AttachmentRateWindow>()
+    private data class BleAttachmentIngressKey(val address: String, val messageId: String)
+    private data class BleAttachmentIngressBinding(val nodeId: String, val lastActivityAt: Long)
+    private val bleAttachmentIngressBindings = ConcurrentHashMap<BleAttachmentIngressKey, BleAttachmentIngressBinding>()
 
     private val _snapshot = MutableStateFlow(MeshRuntimeSnapshot())
     val snapshot: StateFlow<MeshRuntimeSnapshot> = _snapshot.asStateFlow()
@@ -248,7 +253,7 @@ class MeshEngine(context: Context) {
         if (BleAttachmentFrameCodec.isFrame(payload)) {
             return onBleAttachmentFrame(address, payload) != null
         }
-        val sourceNodeId = peerDirectory.findByBleAddress(address)?.nodeId
+        val sourceNodeId = peerDirectory.findLiveNodeIdByBleAddress(address)
         return onTransportPacket(
             sourceNodeId = sourceNodeId,
             sourceAddress = address,
@@ -265,14 +270,23 @@ class MeshEngine(context: Context) {
     /** BLE attachment frames are accepted one bounded block at a time and persisted before ACK. */
     private suspend fun onBleAttachmentFrame(address: String, payload: ByteArray): Long? {
         if (!started || !transportPreferences.selection.value.bleEnabled) return null
-        val sourceNodeId = peerDirectory.findByBleAddress(address)?.nodeId ?: return null
         val frame = BleAttachmentFrameCodec.decode(payload) ?: return null
         return when (frame) {
             is BleAttachmentFrameCodec.Frame.Begin -> {
+                // Resolve BEGIN against the observed peer identity, with a short
+                // address-history grace period for GATT setup after discovery expires.
+                val sourceNodeId = resolveBleAttachmentSource(address, frame.manifest.messageId)
+                    ?: return null
                 if (frame.manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) return null
-                onAttachmentBegin(sourceNodeId, frame.manifest, MeshTransportKind.BLE_GATT)
+                val resumeOffset = onAttachmentBegin(sourceNodeId, frame.manifest, MeshTransportKind.BLE_GATT)
+                    ?: return null
+                rememberBleAttachmentSource(address, frame.manifest.messageId, sourceNodeId)
+                resumeOffset
             }
             is BleAttachmentFrameCodec.Frame.Chunk -> {
+                val sourceNodeId = resolveBleAttachmentSource(
+                    address, frame.messageId, preferExistingBinding = true
+                ) ?: return null
                 val record = repository.getAttachment(frame.messageId) ?: return null
                 if (!record.receivedFromNodeId.equals(sourceNodeId, true)) return null
                 val manifest = record.toAttachmentManifest()
@@ -283,14 +297,59 @@ class MeshEngine(context: Context) {
                     frame.bytes,
                     MeshTransportKind.BLE_GATT
                 ) ?: return null
+                rememberBleAttachmentSource(address, frame.messageId, sourceNodeId)
                 nextOffset
             }
             is BleAttachmentFrameCodec.Frame.Finish -> {
+                val sourceNodeId = resolveBleAttachmentSource(
+                    address, frame.messageId, preferExistingBinding = true
+                ) ?: return null
                 val record = repository.getAttachment(frame.messageId) ?: return null
                 if (!record.receivedFromNodeId.equals(sourceNodeId, true)) return null
                 val manifest = record.toAttachmentManifest()
-                if (onAttachmentFinish(sourceNodeId, manifest, MeshTransportKind.BLE_GATT)) manifest.sizeBytes else null
+                if (onAttachmentFinish(sourceNodeId, manifest, MeshTransportKind.BLE_GATT)) {
+                    rememberBleAttachmentSource(address, frame.messageId, sourceNodeId)
+                    manifest.sizeBytes
+                } else null
             }
+        }
+    }
+
+    private fun resolveBleAttachmentSource(
+        address: String,
+        messageId: String,
+        preferExistingBinding: Boolean = false
+    ): String? {
+        pruneBleAttachmentIngressBindings()
+        val key = BleAttachmentIngressKey(address.trim().uppercase(), messageId)
+        val binding = bleAttachmentIngressBindings[key]
+        val observedNodeId = peerDirectory.findNodeIdByBleAddress(address)
+        val sourceNodeId = if (preferExistingBinding) {
+            binding?.nodeId ?: observedNodeId
+        } else {
+            observedNodeId ?: binding?.nodeId
+        } ?: return null
+        rememberBleAttachmentSource(address, messageId, sourceNodeId)
+        return sourceNodeId
+    }
+
+    private fun rememberBleAttachmentSource(address: String, messageId: String, nodeId: String) {
+        val key = BleAttachmentIngressKey(address.trim().uppercase(), messageId)
+        bleAttachmentIngressBindings[key] = BleAttachmentIngressBinding(nodeId, System.currentTimeMillis())
+        pruneBleAttachmentIngressBindings()
+    }
+
+    private fun pruneBleAttachmentIngressBindings() {
+        val now = System.currentTimeMillis()
+        bleAttachmentIngressBindings.entries.removeIf {
+            now - it.value.lastActivityAt > BLE_INGRESS_BINDING_RETENTION_MS
+        }
+        val excess = bleAttachmentIngressBindings.size - MAX_BLE_INGRESS_BINDINGS
+        if (excess > 0) {
+            bleAttachmentIngressBindings.entries
+                .sortedBy { it.value.lastActivityAt }
+                .take(excess)
+                .forEach { bleAttachmentIngressBindings.remove(it.key, it.value) }
         }
     }
 
@@ -1132,10 +1191,13 @@ class MeshEngine(context: Context) {
                     continue
                 }
 
-                val candidatePeers = peerDirectory.snapshot.value
+                val visiblePeers = peerDirectory.snapshot.value
                     .asSequence()
                     .filter { attachment.receivedFromNodeId.isNullOrBlank() || !it.nodeId.equals(attachment.receivedFromNodeId, true) }
                     .filter { !it.nodeId.equals(attachment.senderNodeId, true) }
+                    .toList()
+                val candidatePeers = visiblePeers
+                    .asSequence()
                     .map { peer ->
                         val transports = buildList {
                             if (wifiDirectManager.hasPeer(peer.nodeId)) add(MeshTransportKind.WIFI_DIRECT)
@@ -1160,10 +1222,36 @@ class MeshEngine(context: Context) {
                             attachment.hopCount + 1 < AttachmentTransferManifest.MAX_HOPS
                     }
                 if (nextHopCandidate == null) {
+                    val wifiDirectPeerCount = visiblePeers.count { wifiDirectManager.hasPeer(it.nodeId) }
+                    val bleEndpointCount = visiblePeers.count { bleTransport.canReach(it.toTransportPeer()) }
+                    val bleReadiness = bleTransport.availabilityFailure() ?: "READY"
+                    val waitCode = when {
+                        visiblePeers.isEmpty() -> "NO_DISCOVERED_PEER"
+                        candidatePeers.isNotEmpty() &&
+                            candidatePeers.none { it.first.nodeId.equals(attachment.recipientNodeId, true) } ->
+                            "NO_RELAY_CAPABLE_PEER"
+                        attachment.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES && wifiDirectPeerCount == 0 ->
+                            "BLE_SIZE_LIMIT"
+                        bleReadiness != "READY" && wifiDirectPeerCount == 0 -> "BLE_RUNTIME_NOT_READY"
+                        bleEndpointCount == 0 && wifiDirectPeerCount == 0 -> "BLE_ENDPOINT_UNAVAILABLE"
+                        else -> "NO_COMPATIBLE_LINK"
+                    }
+                    val waitDiagnostic = AttachmentTransferDiagnostics.encode(
+                        waitCode,
+                        mapOf(
+                            "visible_peers" to visiblePeers.size,
+                            "wifi_direct" to if (wifiDirectPeerCount == 0) "no_connected_route" else "connected_peers=$wifiDirectPeerCount",
+                            "ble_ready" to bleReadiness,
+                            "ble_endpoints" to bleEndpointCount,
+                            "attachment_bytes" to attachment.sizeBytes,
+                            "ble_limit_bytes" to AttachmentTransferManifest.MAX_BLE_BYTES
+                        )
+                    )
                     repository.updateAttachmentProgress(
                         attachment.messageId,
                         if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
-                        attachment.transferredBytes
+                        attachment.transferredBytes,
+                        waitDiagnostic
                     )
                     continue
                 }
@@ -1197,31 +1285,78 @@ class MeshEngine(context: Context) {
                 )
                 val nextHop = nextHopCandidate.first
                 var successfulTransport: MeshTransportKind? = null
+                var lastAttemptedTransport = nextHopCandidate.second.first()
+                var latestTransferredBytes = attachment.transferredBytes
+                var transferFailureDiagnostic: String = AttachmentTransferDiagnostics.encode(
+                    "ATTACHMENT_TRANSFER_INTERRUPTED",
+                    mapOf("stage" to "ROUTE", "transport" to "unknown")
+                )
                 for (transport in nextHopCandidate.second) {
+                    lastAttemptedTransport = transport
                     val forwarded = when (transport) {
-                        MeshTransportKind.WIFI_DIRECT -> wifiDirectManager.sendAttachmentToPeer(
-                            nextHop.nodeId, manifest, file,
-                            onProgress = { sent ->
-                                val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
-                                    AttachmentRateWindow(System.nanoTime(), sent)
+                        MeshTransportKind.WIFI_DIRECT -> {
+                            val sentSuccessfully = wifiDirectManager.sendAttachmentToPeer(
+                                nextHop.nodeId, manifest, file,
+                                onProgress = { sent ->
+                                    latestTransferredBytes = sent
+                                    val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
+                                        AttachmentRateWindow(System.nanoTime(), sent)
+                                    }
+                                    publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
+                                    repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
                                 }
-                                publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
-                                repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
+                            )
+                            if (!sentSuccessfully) {
+                                transferFailureDiagnostic = AttachmentTransferDiagnostics.encode(
+                                    "WIFI_DIRECT_TRANSFER_FAILED",
+                                    mapOf(
+                                        "stage" to "TRANSPORT",
+                                        "transport" to "WIFI_DIRECT",
+                                        "transferred_bytes" to latestTransferredBytes,
+                                        "attachment_bytes" to manifest.sizeBytes
+                                    )
+                                )
                             }
-                        )
-                        MeshTransportKind.BLE_GATT -> bleTransport.sendAttachment(
-                            nextHop.toTransportPeer(), manifest, file,
-                            onProgress = { sent ->
-                                val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
-                                    AttachmentRateWindow(System.nanoTime(), sent)
+                            sentSuccessfully
+                        }
+                        MeshTransportKind.BLE_GATT -> {
+                            val result = bleTransport.sendAttachment(
+                                nextHop.toTransportPeer(), manifest, file,
+                                onProgress = { sent ->
+                                    latestTransferredBytes = sent
+                                    val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
+                                        AttachmentRateWindow(System.nanoTime(), sent)
+                                    }
+                                    publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
+                                    repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
                                 }
-                                publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
-                                repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
+                            )
+                            if (!result.succeeded) {
+                                val snapshot = result.snapshot
+                                transferFailureDiagnostic = AttachmentTransferDiagnostics.encode(
+                                    "BLE_ATTACHMENT_SEND_FAILED",
+                                    mapOf(
+                                        "error" to result.failureCode,
+                                        "stage" to result.stage,
+                                        "transport" to "BLE_GATT",
+                                        "transferred_bytes" to result.acknowledgedBytes,
+                                        "attachment_bytes" to manifest.sizeBytes,
+                                        "mtu" to snapshot.mtu,
+                                        "gatt_state" to snapshot.state.name,
+                                        "estimated_gatt_writes" to result.estimatedGattWrites,
+                                        "gatt_write_limit" to result.estimatedGattWrites?.let { BleGattConstants.MAX_ATTACHMENT_GATT_WRITES },
+                                        "frame" to if (snapshot.frameIndex != null && snapshot.frameCount != null) {
+                                            "${snapshot.frameIndex + 1}/${snapshot.frameCount}"
+                                        } else null,
+                                        "gatt_bytes" to snapshot.bytesSent.takeIf { snapshot.frameCount != null }
+                                    )
+                                )
                             }
-                        )
+                            result.succeeded
+                        }
                         MeshTransportKind.LORA -> false
                     }
-                if (forwarded) {
+                    if (forwarded) {
                         successfulTransport = transport
                         break
                     }
@@ -1235,16 +1370,16 @@ class MeshEngine(context: Context) {
                     repository.markAttachmentForwarded(attachment, nextHop.nodeId.equals(attachment.recipientNodeId, true))
                 } else {
                     publishAttachmentThroughput(
-                        attachment.transferredBytes,
+                        latestTransferredBytes,
                         attachmentRateWindows.remove(attachment.messageId),
                         active = false,
-                        transport = nextHopCandidate.second.first()
+                        transport = lastAttemptedTransport
                     )
                     repository.updateAttachmentProgress(
                         attachment.messageId,
                         if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
-                        attachment.transferredBytes,
-                        "ATTACHMENT_TRANSFER_INTERRUPTED"
+                        latestTransferredBytes,
+                        transferFailureDiagnostic
                     )
                 }
             }
@@ -1521,6 +1656,8 @@ class MeshEngine(context: Context) {
         private const val MAX_FORWARD_BATCH = 16
         private const val MAX_CONCURRENT_FORWARD_PACKETS = 4
         private const val MAX_TRACKED_RECEIVE_TIMESTAMPS = 1_024
+        private const val BLE_INGRESS_BINDING_RETENTION_MS = 60 * 60 * 1_000L
+        private const val MAX_BLE_INGRESS_BINDINGS = 128
         private const val ATTACHMENT_RETRY_MS = 15_000L
         private const val MAX_CLOCK_SKEW_MS = 2 * 60 * 1000L
         private const val DELIVERY_ACK_TYPE = "DELIVERY_ACK"
