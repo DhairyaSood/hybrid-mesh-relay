@@ -15,7 +15,8 @@ import java.util.UUID
  * transport header is repeated for each BLE write.
  *
  * ACK frame:
- *   magic(2) version(1) type(1) transferId(8) accepted(1)
+ *   magic(2) version(1) type(1) transferId(8) accepted(1) detail?(4)
+ * The optional detail is a resume offset on acceptance and a reason code on rejection.
  */
 object GattPacketCodec {
     private const val MAGIC: Short = 0x484D // "HM"
@@ -41,7 +42,8 @@ object GattPacketCodec {
     data class AckFrame(
         val transferId: Long,
         val accepted: Boolean,
-        val offset: Long? = null
+        val offset: Long? = null,
+        val rejectionCode: Int? = null
     )
 
     data class MessageEnvelope(
@@ -151,19 +153,33 @@ object GattPacketCodec {
         }.getOrNull()
     }
 
-    fun encodeAck(transferId: Long, accepted: Boolean, offset: Long? = null): ByteArray =
-        ByteBuffer.allocate(ACK_BYTES + if (offset == null) 0 else 4)
+    /**
+     * The optional four-byte ACK detail is an accepted resume offset for an
+     * accepted attachment frame, or a rejection reason code for a NACK. Older
+     * peers already accept both packet lengths and ignore the detail on NACK.
+     */
+    fun encodeAck(
+        transferId: Long,
+        accepted: Boolean,
+        offset: Long? = null,
+        rejectionCode: Int? = null
+    ): ByteArray {
+        require(accepted || offset == null) { "A rejected ACK cannot contain a resume offset" }
+        require(rejectionCode == null || !accepted) { "An accepted ACK cannot contain a rejection code" }
+        val detail = if (accepted) offset else rejectionCode?.toLong()
+        return ByteBuffer.allocate(ACK_BYTES + if (detail == null) 0 else 4)
             .order(ByteOrder.BIG_ENDIAN)
             .apply {
-                require(offset == null || offset in 0..0xFFFF_FFFFL)
+                require(detail == null || detail in 0..0xFFFF_FFFFL)
                 putShort(MAGIC)
                 put(VERSION)
                 put(TYPE_ACK)
                 putLong(transferId)
                 put(if (accepted) 1 else 0)
-                if (offset != null) putInt(offset.toInt())
+                if (detail != null) putInt(detail.toInt())
             }
             .array()
+    }
 
     /**
      * Preserves the logical message-id shape used by Room while making the
@@ -210,8 +226,14 @@ object GattPacketCodec {
         val transferId = buffer.long
         val acceptedByte = buffer.get().toInt()
         if (acceptedByte !in 0..1) return null
-        val offset = if (buffer.hasRemaining()) buffer.int.toLong() and 0xFFFF_FFFFL else null
-        return AckFrame(transferId, acceptedByte == 1, offset)
+        val detail = if (buffer.hasRemaining()) buffer.int.toLong() and 0xFFFF_FFFFL else null
+        val accepted = acceptedByte == 1
+        return AckFrame(
+            transferId = transferId,
+            accepted = accepted,
+            offset = detail.takeIf { accepted },
+            rejectionCode = detail?.toInt()?.takeIf { !accepted }
+        )
     }
 
     private fun nodeUuid(nodeId: String): UUID =

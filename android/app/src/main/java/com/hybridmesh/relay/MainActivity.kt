@@ -2,7 +2,10 @@ package com.hybridmesh.relay
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
+import android.location.LocationManager as AndroidLocationManager
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
@@ -14,6 +17,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -127,13 +131,22 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     var notificationRequestedCycle by rememberSaveable { mutableIntStateOf(-1) }
     var radioPromptShownForOffState by rememberSaveable { mutableStateOf(false) }
     var showRadioPrompt by rememberSaveable { mutableStateOf(false) }
+    var showLocationModePrompt by remember { mutableStateOf(false) }
+    var locationPromptShownForOffState by remember { mutableStateOf(false) }
+    var previousWifiDirectEnabled by remember { mutableStateOf(transportSelection.wifiDirectEnabled) }
+    var wifiDirectLocationModeEnabled by remember(context) {
+        mutableStateOf(PermissionManager.wifiDirectLocationModeEnabled(context))
+    }
     var meshPermissionRequestLaunched by remember { mutableStateOf(false) }
+    var meshPermissionRequestInProgress by remember { mutableStateOf(false) }
+    var notificationPermissionRequestInProgress by remember { mutableStateOf(false) }
     var showPermissionRecovery by remember { mutableStateOf(false) }
     val hasAnyMeshTransportPermission = PermissionManager.hasEnabledMeshTransportPermissionGranted(context, transportSelection)
 
     val blePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
+        meshPermissionRequestInProgress = false
         PermissionManager.markMeshPermissionRequestCompleted(context)
         networkManager.refresh()
         // A denied bearer must not block the other one. Show recovery only when
@@ -145,6 +158,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
+        notificationPermissionRequestInProgress = false
         PermissionManager.markNotificationRequestCompleted(context, result.values.any { it })
         networkManager.refresh()
     }
@@ -159,11 +173,30 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 foregroundCycle += 1
+                wifiDirectLocationModeEnabled = PermissionManager.wifiDirectLocationModeEnabled(context)
                 networkManager.refresh()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    DisposableEffect(context) {
+        val appContext = context.applicationContext
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: Intent?) {
+                if (intent?.action == AndroidLocationManager.MODE_CHANGED_ACTION) {
+                    wifiDirectLocationModeEnabled = PermissionManager.wifiDirectLocationModeEnabled(appContext)
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            appContext,
+            receiver,
+            IntentFilter(AndroidLocationManager.MODE_CHANGED_ACTION),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        onDispose { appContext.unregisterReceiver(receiver) }
     }
 
     LaunchedEffect(foregroundCycle, networkState.blePermissions, transportSelection, identity.deviceName) {
@@ -176,6 +209,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
             // Completion is persisted only after Android returns a result, so a
             // process death while the dialog is open does not strand permissions.
             meshPermissionRequestLaunched = true
+            meshPermissionRequestInProgress = true
             blePermissionLauncher.launch(missing)
         }
     }
@@ -206,6 +240,7 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
             notificationRequestedCycle != foregroundCycle
         ) {
             notificationRequestedCycle = foregroundCycle
+            notificationPermissionRequestInProgress = true
             notificationPermissionLauncher.launch(PermissionManager.notificationPermissionsToRequest())
         }
     }
@@ -236,6 +271,42 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
                 radioPromptShownForOffState = true
                 showRadioPrompt = true
             }
+        }
+    }
+
+    LaunchedEffect(
+        foregroundCycle,
+        transportSelection.wifiDirectEnabled,
+        wifiDirectLocationModeEnabled,
+        identity.deviceName,
+        meshPermissionRequestInProgress,
+        notificationPermissionRequestInProgress,
+        showPermissionRecovery,
+        showRadioPrompt
+    ) {
+        val wifiDirectJustEnabled = transportSelection.wifiDirectEnabled && !previousWifiDirectEnabled
+        previousWifiDirectEnabled = transportSelection.wifiDirectEnabled
+
+        if (!transportSelection.wifiDirectEnabled) {
+            showLocationModePrompt = false
+            locationPromptShownForOffState = false
+            return@LaunchedEffect
+        }
+        if (wifiDirectLocationModeEnabled) {
+            showLocationModePrompt = false
+            locationPromptShownForOffState = false
+            return@LaunchedEffect
+        }
+        // ProfileScreen sequences its permission request first and invokes the
+        // same prompt callback after the user returns from that request.
+        if (wifiDirectJustEnabled || identity.deviceName.isBlank() ||
+            meshPermissionRequestInProgress || notificationPermissionRequestInProgress ||
+            showPermissionRecovery || showRadioPrompt
+        ) return@LaunchedEffect
+
+        if (!locationPromptShownForOffState) {
+            locationPromptShownForOffState = true
+            showLocationModePrompt = true
         }
     }
 
@@ -321,7 +392,12 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
                     )
                     AppScreen.DEVICES -> DevicesScreen()
                     AppScreen.CONVERSATION -> selectedPeerNodeId?.let { ConversationScreen(peerNodeId = it) }
-                    AppScreen.PROFILE -> ProfileScreen()
+                    AppScreen.PROFILE -> ProfileScreen(
+                        onLocationModeRequired = {
+                            locationPromptShownForOffState = true
+                            showLocationModePrompt = true
+                        }
+                    )
                 }
             }
         }
@@ -365,6 +441,25 @@ fun HybridMeshRelayApp(openPeerRequest: MutableStateFlow<String?>) {
                     }) { Text("BLUETOOTH") }
                     TextButton(onClick = { showRadioPrompt = false }) { Text("LATER") }
                 }
+            }
+        )
+    }
+
+    if (showLocationModePrompt && transportSelection.wifiDirectEnabled && !wifiDirectLocationModeEnabled) {
+        AlertDialog(
+            onDismissRequest = { showLocationModePrompt = false },
+            title = { Text("Turn on Location for Wi-Fi Direct") },
+            text = {
+                Text("Android requires the device's Location setting to be on for Wi-Fi Direct discovery. This is separate from Neyra's runtime permission. Turn it on in Settings, then return to Neyra.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLocationModePrompt = false
+                    context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                }) { Text("LOCATION SETTINGS") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLocationModePrompt = false }) { Text("NOT NOW") }
             }
         )
     }

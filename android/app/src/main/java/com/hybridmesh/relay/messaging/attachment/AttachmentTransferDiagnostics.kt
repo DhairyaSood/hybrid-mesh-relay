@@ -57,6 +57,7 @@ object AttachmentTransferDiagnostics {
         "WIFI_DIRECT_REQUIRED_FOR_LARGE_ATTACHMENT" -> "This file is over the BLE size limit and needs a Wi-Fi Direct link."
         "ACK_TIMEOUT" -> "The peer did not acknowledge this BLE block before the timeout."
         "ACK_REJECTED" -> "The peer rejected this BLE block."
+        "REMOTE_REJECTED_UNKNOWN" -> "The peer rejected this BLE attachment block but did not provide a recognized reason. The transfer remains retryable."
         "WRITE_FAILED", "WRITE_REJECTED" -> "A BLE GATT write failed before the block reached the peer."
         "CONNECTION_FAILED", "DISCONNECTED" -> "The BLE connection failed or disconnected during the transfer."
         "SERVICE_DISCOVERY_FAILED", "CHARACTERISTIC_MISSING" -> "The peer did not expose the expected BLE transfer service."
@@ -69,7 +70,11 @@ object AttachmentTransferDiagnostics {
         "INVALID_MANIFEST" -> "The attachment metadata failed validation before the BLE transfer started."
         "LOCAL_FILE_MISSING_OR_CHANGED" -> "The local attachment file is missing or no longer matches its saved checksum."
         "FILE_READ_FAILED", "FILE_SEEK_FAILED" -> "The local attachment file could not be read at the required offset."
-        else -> code.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
+        else -> if (code.startsWith("REMOTE_REJECTED_")) {
+            remoteRejectionExplanation(code.removePrefix("REMOTE_REJECTED_"))
+        } else {
+            code.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
+        }
     }
 
     fun detailLabel(key: String): String = when (key) {
@@ -83,6 +88,7 @@ object AttachmentTransferDiagnostics {
         "gatt_bytes" -> "Bytes in current GATT frame"
         "estimated_gatt_writes" -> "Estimated BLE writes for attachment"
         "gatt_write_limit" -> "BLE write safety limit"
+        "retryable" -> "Will retry"
         "visible_peers" -> "Known nearby peers"
         "wifi_direct" -> "Wi-Fi Direct route"
         "ble_ready" -> "BLE runtime"
@@ -94,4 +100,28 @@ object AttachmentTransferDiagnostics {
     }
 
     private fun String.safeField(): String = replace('|', '/').replace('\n', ' ').replace('\r', ' ')
+
+    private fun remoteRejectionExplanation(reason: String): String = when (reason) {
+        "UNKNOWN_PEER_IDENTITY" -> "The receiver could not associate this BLE address with a nearby mesh identity. It will retry after discovery refreshes."
+        "SENDER_IDENTITY_MISMATCH" -> "The receiver saw a different mesh identity than the sender declared. It will retry so the peer mapping can refresh."
+        "INVALID_MANIFEST" -> "The receiver rejected the attachment metadata as invalid."
+        "SIZE_LIMIT_EXCEEDED" -> "The receiver rejected this file because it exceeds BLE's attachment size limit."
+        "HOP_LIMIT_EXCEEDED" -> "The receiver cannot relay this attachment because it reached the hop limit."
+        "CLOCK_SKEW" -> "The receiver rejected the attachment timestamp because it is too far in the future."
+        "ATTACHMENT_EXPIRED" -> "The receiver rejected this attachment because its timestamp has expired."
+        "STORAGE_UNAVAILABLE" -> "The receiver could not prepare durable storage for this attachment. It will retry."
+        "ATTACHMENT_METADATA_CONFLICT" -> "The receiver already has different metadata stored for this attachment ID."
+        "RECEIVE_STATE_MISSING" -> "The receiver has no saved BEGIN state for this block. It will retry from the attachment setup frame."
+        "RECEIVE_SOURCE_MISMATCH" -> "The receiver's saved attachment state is bound to a different BLE peer identity. It will retry after discovery refreshes."
+        "CHUNK_REJECTED" -> "The receiver could not append this block at the requested offset. It will retry from the saved resume point."
+        "FINISH_REJECTED" -> "The receiver could not verify or finalize the completed file. It will retry."
+        "INVALID_FRAME" -> "The receiver could not decode the BLE attachment frame."
+        "RECEIVER_UNAVAILABLE" -> "The receiver's attachment handler was unavailable. It will retry."
+        "RECEIVER_BUSY" -> "The receiver was processing other mesh traffic. It will retry."
+        "RECEIVER_TIMEOUT" -> "The receiver did not finish processing this block before its acceptance timeout. It will retry."
+        "RECEIVER_ERROR" -> "The receiver encountered an internal error while processing this attachment block. It will retry."
+        "ASSEMBLY_LIMIT" -> "The receiver had reached its temporary limit for concurrent BLE frames. It will retry."
+        "ASSEMBLY_INVALID" -> "The receiver could not assemble a valid BLE frame. It will retry."
+        else -> "The peer rejected this BLE attachment block ($reason). It will retry."
+    }
 }

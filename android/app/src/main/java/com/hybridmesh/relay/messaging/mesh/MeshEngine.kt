@@ -11,6 +11,8 @@ import kotlinx.coroutines.isActive
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.messaging.ble.BleGattClient
 import com.hybridmesh.relay.messaging.ble.BleGattConstants
+import com.hybridmesh.relay.messaging.ble.BleAttachmentReceiveResult
+import com.hybridmesh.relay.messaging.ble.BleAttachmentRejection
 import com.hybridmesh.relay.messaging.data.MeshForwardingRecordEntity
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MeshSeenPacketEntity
@@ -251,7 +253,7 @@ class MeshEngine(context: Context) {
     suspend fun onBleTransportPacket(device: BluetoothDevice, payload: ByteArray): Boolean {
         val address = runCatching { device.address }.getOrDefault("Unknown")
         if (BleAttachmentFrameCodec.isFrame(payload)) {
-            return onBleAttachmentFrame(address, payload) != null
+            return onBleAttachmentFrame(address, payload) is BleAttachmentReceiveResult.Accepted
         }
         val sourceNodeId = peerDirectory.findLiveNodeIdByBleAddress(address)
         return onTransportPacket(
@@ -262,33 +264,39 @@ class MeshEngine(context: Context) {
         )
     }
 
-    suspend fun onBleAttachmentFrame(device: BluetoothDevice, payload: ByteArray): Long? {
+    suspend fun onBleAttachmentFrame(device: BluetoothDevice, payload: ByteArray): BleAttachmentReceiveResult {
         val address = runCatching { device.address }.getOrDefault("Unknown")
         return onBleAttachmentFrame(address, payload)
     }
 
     /** BLE attachment frames are accepted one bounded block at a time and persisted before ACK. */
-    private suspend fun onBleAttachmentFrame(address: String, payload: ByteArray): Long? {
-        if (!started || !transportPreferences.selection.value.bleEnabled) return null
-        val frame = BleAttachmentFrameCodec.decode(payload) ?: return null
+    private suspend fun onBleAttachmentFrame(address: String, payload: ByteArray): BleAttachmentReceiveResult {
+        if (!started || !transportPreferences.selection.value.bleEnabled) {
+            return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVER_UNAVAILABLE)
+        }
+        val frame = BleAttachmentFrameCodec.decode(payload)
+            ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.INVALID_FRAME)
         return when (frame) {
             is BleAttachmentFrameCodec.Frame.Begin -> {
                 // Resolve BEGIN against the observed peer identity, with a short
                 // address-history grace period for GATT setup after discovery expires.
                 val sourceNodeId = resolveBleAttachmentSource(address, frame.manifest.messageId)
-                    ?: return null
-                if (frame.manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) return null
-                val resumeOffset = onAttachmentBegin(sourceNodeId, frame.manifest, MeshTransportKind.BLE_GATT)
-                    ?: return null
-                rememberBleAttachmentSource(address, frame.manifest.messageId, sourceNodeId)
-                resumeOffset
+                    ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
+                val result = prepareIncomingAttachmentBegin(sourceNodeId, frame.manifest, MeshTransportKind.BLE_GATT)
+                if (result is BleAttachmentReceiveResult.Accepted) {
+                    rememberBleAttachmentSource(address, frame.manifest.messageId, sourceNodeId)
+                }
+                result
             }
             is BleAttachmentFrameCodec.Frame.Chunk -> {
                 val sourceNodeId = resolveBleAttachmentSource(
                     address, frame.messageId, preferExistingBinding = true
-                ) ?: return null
-                val record = repository.getAttachment(frame.messageId) ?: return null
-                if (!record.receivedFromNodeId.equals(sourceNodeId, true)) return null
+                ) ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
+                val record = repository.getAttachment(frame.messageId)
+                    ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVE_STATE_MISSING)
+                if (!record.receivedFromNodeId.equals(sourceNodeId, true)) {
+                    return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVE_SOURCE_MISMATCH)
+                }
                 val manifest = record.toAttachmentManifest()
                 val nextOffset = onAttachmentChunk(
                     sourceNodeId,
@@ -296,21 +304,26 @@ class MeshEngine(context: Context) {
                     frame.offset,
                     frame.bytes,
                     MeshTransportKind.BLE_GATT
-                ) ?: return null
+                ) ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.CHUNK_REJECTED)
                 rememberBleAttachmentSource(address, frame.messageId, sourceNodeId)
-                nextOffset
+                BleAttachmentReceiveResult.Accepted(nextOffset)
             }
             is BleAttachmentFrameCodec.Frame.Finish -> {
                 val sourceNodeId = resolveBleAttachmentSource(
                     address, frame.messageId, preferExistingBinding = true
-                ) ?: return null
-                val record = repository.getAttachment(frame.messageId) ?: return null
-                if (!record.receivedFromNodeId.equals(sourceNodeId, true)) return null
+                ) ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.UNKNOWN_PEER_IDENTITY)
+                val record = repository.getAttachment(frame.messageId)
+                    ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVE_STATE_MISSING)
+                if (!record.receivedFromNodeId.equals(sourceNodeId, true)) {
+                    return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVE_SOURCE_MISMATCH)
+                }
                 val manifest = record.toAttachmentManifest()
                 if (onAttachmentFinish(sourceNodeId, manifest, MeshTransportKind.BLE_GATT)) {
                     rememberBleAttachmentSource(address, frame.messageId, sourceNodeId)
-                    manifest.sizeBytes
-                } else null
+                    BleAttachmentReceiveResult.Accepted(manifest.sizeBytes)
+                } else {
+                    BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.FINISH_REJECTED)
+                }
             }
         }
     }
@@ -1287,6 +1300,7 @@ class MeshEngine(context: Context) {
                 var successfulTransport: MeshTransportKind? = null
                 var lastAttemptedTransport = nextHopCandidate.second.first()
                 var latestTransferredBytes = attachment.transferredBytes
+                var allAttemptedFailuresPermanent = true
                 var transferFailureDiagnostic: String = AttachmentTransferDiagnostics.encode(
                     "ATTACHMENT_TRANSFER_INTERRUPTED",
                     mapOf("stage" to "ROUTE", "transport" to "unknown")
@@ -1307,6 +1321,7 @@ class MeshEngine(context: Context) {
                                 }
                             )
                             if (!sentSuccessfully) {
+                                allAttemptedFailuresPermanent = false
                                 transferFailureDiagnostic = AttachmentTransferDiagnostics.encode(
                                     "WIFI_DIRECT_TRANSFER_FAILED",
                                     mapOf(
@@ -1332,6 +1347,7 @@ class MeshEngine(context: Context) {
                                 }
                             )
                             if (!result.succeeded) {
+                                allAttemptedFailuresPermanent = allAttemptedFailuresPermanent && !result.retryable
                                 val snapshot = result.snapshot
                                 transferFailureDiagnostic = AttachmentTransferDiagnostics.encode(
                                     "BLE_ATTACHMENT_SEND_FAILED",
@@ -1340,6 +1356,7 @@ class MeshEngine(context: Context) {
                                         "stage" to result.stage,
                                         "transport" to "BLE_GATT",
                                         "transferred_bytes" to result.acknowledgedBytes,
+                                        "retryable" to result.retryable,
                                         "attachment_bytes" to manifest.sizeBytes,
                                         "mtu" to snapshot.mtu,
                                         "gatt_state" to snapshot.state.name,
@@ -1354,7 +1371,10 @@ class MeshEngine(context: Context) {
                             }
                             result.succeeded
                         }
-                        MeshTransportKind.LORA -> false
+                        MeshTransportKind.LORA -> {
+                            allAttemptedFailuresPermanent = false
+                            false
+                        }
                     }
                     if (forwarded) {
                         successfulTransport = transport
@@ -1377,7 +1397,8 @@ class MeshEngine(context: Context) {
                     )
                     repository.updateAttachmentProgress(
                         attachment.messageId,
-                        if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
+                        if (allAttemptedFailuresPermanent) AttachmentTransferStatus.FAILED
+                        else if (isOrigin) AttachmentTransferStatus.WAITING_WIFI else AttachmentTransferStatus.RELAY_QUEUED,
                         latestTransferredBytes,
                         transferFailureDiagnostic
                     )
@@ -1404,6 +1425,69 @@ class MeshEngine(context: Context) {
         if (!repository.prepareIncomingAttachment(manifest, finalPath, resumeOffset, sourceNodeId, localCanRelay = true)) return null
         attachmentRateWindows[manifest.messageId] = AttachmentRateWindow(System.nanoTime(), resumeOffset)
         return resumeOffset
+    }
+
+    private fun incomingAttachmentBeginRejection(
+        sourceNodeId: String,
+        manifest: AttachmentTransferManifest,
+        transport: MeshTransportKind
+    ): BleAttachmentRejection? {
+        val isFinalRecipient = manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)
+        if (!manifest.isValid()) return BleAttachmentRejection.INVALID_MANIFEST
+        if (manifest.hopCount <= 1 && !manifest.senderNodeId.equals(sourceNodeId, true)) {
+            return BleAttachmentRejection.SENDER_IDENTITY_MISMATCH
+        }
+        if (transport == MeshTransportKind.BLE_GATT && manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) {
+            return BleAttachmentRejection.SIZE_LIMIT_EXCEEDED
+        }
+        if (!isFinalRecipient && manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS) {
+            return BleAttachmentRejection.HOP_LIMIT_EXCEEDED
+        }
+        val now = System.currentTimeMillis()
+        if (manifest.createdAt > now + MAX_CLOCK_SKEW_MS) return BleAttachmentRejection.CLOCK_SKEW
+        if (isExpired(manifest.createdAt, now)) return BleAttachmentRejection.ATTACHMENT_EXPIRED
+        return null
+    }
+
+    private suspend fun prepareIncomingAttachmentBegin(
+        sourceNodeId: String,
+        manifest: AttachmentTransferManifest,
+        transport: MeshTransportKind
+    ): BleAttachmentReceiveResult {
+        incomingAttachmentBeginRejection(sourceNodeId, manifest, transport)?.let {
+            return BleAttachmentReceiveResult.Rejected(it)
+        }
+        val resumeOffset = try {
+            AttachmentFileStore.prepareReceive(appContext, manifest)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } ?: return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.STORAGE_UNAVAILABLE)
+        val finalPath = AttachmentFileStore.receivedFile(appContext, manifest.messageId).absolutePath
+        val persisted = try {
+            repository.prepareIncomingAttachment(manifest, finalPath, resumeOffset, sourceNodeId, localCanRelay = true)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+        if (!persisted) {
+            val existing = repository.getAttachment(manifest.messageId)
+            val conflicts = existing != null && (
+                !existing.senderNodeId.equals(manifest.senderNodeId, true) ||
+                    !existing.recipientNodeId.equals(manifest.recipientNodeId, true) ||
+                    existing.sizeBytes != manifest.sizeBytes ||
+                    !existing.sha256.equals(manifest.sha256, true) ||
+                    !existing.mimeType.equals(manifest.mimeType, true)
+                )
+            return BleAttachmentReceiveResult.Rejected(
+                if (conflicts) BleAttachmentRejection.ATTACHMENT_METADATA_CONFLICT
+                else BleAttachmentRejection.STORAGE_UNAVAILABLE
+            )
+        }
+        attachmentRateWindows[manifest.messageId] = AttachmentRateWindow(System.nanoTime(), resumeOffset)
+        return BleAttachmentReceiveResult.Accepted(resumeOffset)
     }
 
     private suspend fun onAttachmentChunk(
