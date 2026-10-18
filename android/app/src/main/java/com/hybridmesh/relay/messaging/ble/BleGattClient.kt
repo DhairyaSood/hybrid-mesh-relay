@@ -199,11 +199,7 @@ class BleGattClient(context: Context) {
         isRuntimeGenerationCurrent: () -> Boolean,
         onProgress: suspend (Long) -> Unit = {},
         onState: (GattTransportSnapshot) -> Unit = {}
-    ): Boolean {
-        if (!manifest.isValid() || manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES ||
-            !file.isFile || file.length() != manifest.sizeBytes ||
-            runCatching { AttachmentFileStore.sha256(file) }.getOrNull() != manifest.sha256) return false
-
+    ): BleAttachmentSendResult {
         val session = ClientSession(
             address = safeAddress(device),
             messageId = manifest.messageId,
@@ -211,25 +207,56 @@ class BleGattClient(context: Context) {
             isRuntimeGenerationCurrent = isRuntimeGenerationCurrent,
             publish = onState
         )
+        var transferStage = "VALIDATE"
+        var acknowledgedBytes = 0L
+        var estimatedGattWrites: Long? = null
+        fun failed(code: String): BleAttachmentSendResult = BleAttachmentSendResult.failed(
+            code = code,
+            stage = transferStage,
+            messageId = manifest.messageId,
+            acknowledgedBytes = acknowledgedBytes,
+            estimatedGattWrites = estimatedGattWrites,
+            snapshot = session.snapshot()
+        )
+
+        if (!manifest.isValid()) return failed("INVALID_MANIFEST")
+        if (manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) return failed("BLE_SIZE_LIMIT")
+        if (!file.isFile || file.length() != manifest.sizeBytes ||
+            runCatching { AttachmentFileStore.sha256(file) }.getOrNull() != manifest.sha256) {
+            return failed("LOCAL_FILE_MISSING_OR_CHANGED")
+        }
+
+        transferStage = "CONNECT"
         val gatt = try { connect(device, session) } catch (_: CancellationException) { throw CancellationException() }
-            ?: return false
+            ?: return failed(session.error.takeIf { it != GattTransportError.NONE }?.name ?: "CONNECTION_FAILED")
 
         try {
             session.requireRuntime()
+            transferStage = "SERVICE_DISCOVERY"
             session.transition(GattTransportState.DISCOVERING_SERVICES)
             discoverServices(gatt, session)
+            transferStage = "NOTIFICATIONS"
             session.transition(GattTransportState.SETTING_UP_NOTIFICATIONS)
             enableNotifications(gatt, session)
+            transferStage = "MTU_NEGOTIATION"
             session.transition(GattTransportState.NEGOTIATING_MTU)
-            val mtu = negotiateMtu(gatt, session)
+            // Bulk media benefits from a shorter connection interval. Stacks that
+            // reject this request continue with their existing connection policy.
+            runCatching { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
+            val mtu = negotiateMtu(gatt, session, BleGattConstants.TARGET_ATTACHMENT_MTU)
             val payloadBytes = GattPacketCodec.safePayloadBytes(mtu)
             session.transition(GattTransportState.READY)
             val streamId = UUID.randomUUID().leastSignificantBits
+            var frameFailureCode: String? = null
 
             suspend fun sendFrame(bytes: ByteArray, expectedOffset: Long? = null): GattPacketCodec.AckFrame? {
                 val frameTransferId = UUID.randomUUID().leastSignificantBits
                 val count = ((bytes.size + payloadBytes - 1) / payloadBytes).coerceAtLeast(1)
-                if (count > GattPacketCodec.MAX_CHUNKS) return null
+                if (count > GattPacketCodec.MAX_CHUNKS) {
+                    frameFailureCode = "FRAME_TOO_LARGE"
+                    session.fail(GattTransportError.FRAME_TOO_LARGE)
+                    return null
+                }
                 session.expectedTransferId = frameTransferId
                 session.ack = CompletableDeferred()
                 session.frameCount = count
@@ -253,24 +280,68 @@ class BleGattClient(context: Context) {
                             session.failure.onAwait { throw GattTransportException(session.error) }
                         }
                     }
-                } catch (_: kotlinx.coroutines.TimeoutCancellationException) { return null }
-                if (!ack.accepted) return null
-                if (expectedOffset != null && ack.offset != expectedOffset) return null
+                } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                    frameFailureCode = "ACK_TIMEOUT"
+                    session.fail(GattTransportError.ACK_TIMEOUT)
+                    return null
+                }
+                if (!ack.accepted) {
+                    frameFailureCode = "ACK_REJECTED"
+                    session.fail(GattTransportError.ACK_REJECTED)
+                    return null
+                }
+                if (expectedOffset != null && ack.offset != expectedOffset) {
+                    frameFailureCode = "PROTOCOL_ERROR"
+                    session.fail(GattTransportError.PROTOCOL_ERROR)
+                    return null
+                }
                 return ack
             }
 
-            val beginAck = sendFrame(BleAttachmentFrameCodec.encodeBegin(streamId, manifest)) ?: return false
-            val resumeOffset = beginAck.offset ?: return false
-            if (resumeOffset !in 0..manifest.sizeBytes) return false
+            transferStage = "BEGIN"
+            val beginAck = sendFrame(BleAttachmentFrameCodec.encodeBegin(streamId, manifest))
+                ?: return failed(frameFailureCode ?: "ACK_MISSING")
+            val resumeOffset = beginAck.offset ?: run {
+                session.fail(GattTransportError.PROTOCOL_ERROR)
+                return failed("PROTOCOL_ERROR")
+            }
+            if (resumeOffset !in 0..manifest.sizeBytes) {
+                session.fail(GattTransportError.PROTOCOL_ERROR)
+                return failed("PROTOCOL_ERROR")
+            }
             var offset = resumeOffset
+            acknowledgedBytes = offset
             onProgress(offset)
+            val remainingBytes = manifest.sizeBytes - resumeOffset
+            // BEGIN is already acknowledged, so count each resumed DATA frame
+            // and FINISH exactly. Each application frame is packetized separately
+            // and rounded up to whole GATT writes.
+            val chunkHeaderBytes = BleAttachmentFrameCodec.encodeChunk(
+                streamId, manifest.messageId, 0L, byteArrayOf(0)
+            ).size - 1
+            val finishFrameBytes = BleAttachmentFrameCodec.encodeFinish(streamId, manifest.messageId).size
+            fun writeCount(frameBytes: Long): Long =
+                (frameBytes + payloadBytes - 1L) / payloadBytes
+            var bytesLeftToEstimate = remainingBytes
+            var writeEstimate = writeCount(finishFrameBytes.toLong())
+            while (bytesLeftToEstimate > 0L) {
+                val chunkBytes = minOf(BleAttachmentFrameCodec.MAX_CHUNK_BYTES.toLong(), bytesLeftToEstimate)
+                writeEstimate += writeCount(chunkBytes + chunkHeaderBytes)
+                bytesLeftToEstimate -= chunkBytes
+            }
+            estimatedGattWrites = writeEstimate
+            if (estimatedGattWrites!! > BleGattConstants.MAX_ATTACHMENT_GATT_WRITES) {
+                transferStage = "LINK_CAPACITY_CHECK"
+                session.fail(GattTransportError.ATTACHMENT_LINK_TOO_SLOW)
+                return failed("ATTACHMENT_LINK_TOO_SLOW")
+            }
 
             file.inputStream().buffered().use { input ->
                 var skipped = 0L
                 while (skipped < offset) {
                     val count = input.skip(offset - skipped)
                     if (count <= 0L) {
-                        if (input.read() < 0) return false
+                        if (input.read() < 0) return failed("FILE_SEEK_FAILED")
                         skipped++
                     } else skipped += count
                 }
@@ -281,27 +352,42 @@ class BleGattClient(context: Context) {
                     var read = 0
                     while (read < wanted) {
                         val count = input.read(buffer, read, wanted - read)
-                        if (count < 0) return false
+                        if (count < 0) return failed("FILE_READ_FAILED")
                         if (count > 0) read += count
                     }
                     val nextOffset = offset + read
                     val appFrame = BleAttachmentFrameCodec.encodeChunk(
                         streamId, manifest.messageId, offset, buffer.copyOf(read)
                     )
-                    if (sendFrame(appFrame, nextOffset) == null) return false
+                    transferStage = "DATA"
+                    if (sendFrame(appFrame, nextOffset) == null) {
+                        return failed(frameFailureCode ?: "ACK_MISSING")
+                    }
                     offset = nextOffset
+                    acknowledgedBytes = offset
                     onProgress(offset)
                 }
             }
 
+            transferStage = "FINISH"
             val finish = sendFrame(BleAttachmentFrameCodec.encodeFinish(streamId, manifest.messageId), manifest.sizeBytes)
-                ?: return false
+                ?: return failed(frameFailureCode ?: "ACK_MISSING")
             session.transition(GattTransportState.COMPLETED)
-            return finish.accepted
+            return BleAttachmentSendResult(
+                succeeded = finish.accepted,
+                failureCode = if (finish.accepted) null else "ACK_REJECTED",
+                stage = "COMPLETE",
+                acknowledgedBytes = acknowledgedBytes,
+                snapshot = session.snapshot()
+            )
         } catch (_: CancellationException) {
             throw CancellationException()
+        } catch (e: GattTransportException) {
+            session.fail(e.error)
+            return failed(e.error.name)
         } catch (_: Exception) {
-            return false
+            session.fail(GattTransportError.INTERNAL_ERROR)
+            return failed(session.error.takeIf { it != GattTransportError.NONE }?.name ?: "INTERNAL_ERROR")
         } finally {
             session.markDisconnecting()
             closeGatt(gatt)
@@ -607,11 +693,15 @@ class BleGattClient(context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private suspend fun negotiateMtu(gatt: BluetoothGatt, session: ClientSession): Int {
+    private suspend fun negotiateMtu(
+        gatt: BluetoothGatt,
+        session: ClientSession,
+        targetMtu: Int = BleGattConstants.TARGET_MTU
+    ): Int {
         session.requireRuntime()
         session.mtu = GattPacketCodec.MIN_ATT_MTU
         val accepted = runCatching {
-            gatt.requestMtu(BleGattConstants.TARGET_MTU)
+            gatt.requestMtu(targetMtu)
         }.getOrDefault(false)
 
         if (!accepted) {
@@ -636,7 +726,7 @@ class BleGattClient(context: Context) {
         val characteristic = session.rx
             ?: throw GattTransportException(GattTransportError.CHARACTERISTIC_MISSING)
 
-        if (value.size > (session.mtu - GattPacketCodec.ATT_PROTOCOL_OVERHEAD)) {
+        if (value.size > GattPacketCodec.maxCharacteristicValueBytes(session.mtu)) {
             throw GattTransportException(GattTransportError.FRAME_TOO_LARGE)
         }
 

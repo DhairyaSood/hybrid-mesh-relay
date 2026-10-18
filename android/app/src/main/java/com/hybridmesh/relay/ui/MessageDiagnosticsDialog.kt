@@ -32,8 +32,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MessageTraceEventEntity
+import com.hybridmesh.relay.messaging.data.AttachmentRecordEntity
+import com.hybridmesh.relay.messaging.attachment.AttachmentTransferDiagnostics
 import com.hybridmesh.relay.messaging.mesh.MeshTransportKind
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
+import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.ui.components.NodeIdText
 import java.text.DateFormat
 import java.util.Date
@@ -42,6 +45,7 @@ import android.widget.Toast
 @Composable
 fun MessageDiagnosticsDialog(
     message: MessageRecordEntity,
+    attachment: AttachmentRecordEntity? = null,
     events: List<MessageTraceEventEntity>,
     localNodeId: String,
     onDismiss: () -> Unit
@@ -49,6 +53,16 @@ fun MessageDiagnosticsDialog(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val isOutgoing = message.senderNodeId.equals(localNodeId, ignoreCase = true)
+    val isAttachmentMessage = message.messageType == MessageType.ATTACHMENT.name
+    val attachmentDiagnostic = AttachmentTransferDiagnostics.parse(attachment?.lastError)
+    val attachmentErrorSummary = when {
+        attachmentDiagnostic != null -> AttachmentTransferDiagnostics.explanation(attachmentDiagnostic.code)
+        !attachment?.lastError.isNullOrBlank() -> AttachmentTransferDiagnostics.explanation(attachment?.lastError.orEmpty())
+        else -> "No transfer error recorded"
+    }
+    val attachmentTransportError = attachmentDiagnostic?.details
+        ?.firstOrNull { it.first == "error" }
+        ?.second
     val routeCodes = message.routeTrace.orEmpty().split(',').mapNotNull { it.toIntOrNull() }
     val routeNames = routeCodes.mapNotNull(MeshTransportKind::fromTraceCode).map {
         when (it) {
@@ -83,6 +97,17 @@ fun MessageDiagnosticsDialog(
         appendLine("Relay hops: ${message.deliveryHopCount?.toString() ?: "Unknown"}")
         appendLine("Attempts: ${message.attemptCount}")
         appendLine("Last error: ${message.lastError ?: "None recorded"}")
+        if (isAttachmentMessage) {
+            appendLine("Attachment status: ${attachment?.status ?: "No local transfer record"}")
+            appendLine("Attachment progress: ${attachment?.transferredBytes ?: 0L} / ${attachment?.sizeBytes ?: 0L} bytes")
+            appendLine("Attachment error: $attachmentErrorSummary")
+            attachmentTransportError?.let {
+                appendLine("Transport failure detail: ${AttachmentTransferDiagnostics.explanation(it)}")
+            }
+            attachmentDiagnostic?.details?.forEach { (key, value) ->
+                appendLine("${AttachmentTransferDiagnostics.detailLabel(key)}: $value")
+            }
+        }
         appendLine("Events:")
         events.forEach { event ->
             appendLine("${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(event.occurredAt))} ${event.eventType} transport=${event.transport ?: "-"} peer=${event.peerNodeId ?: "-"} result=${event.resultCode ?: "-"} duration=${event.durationMs?.let { "${it}ms" } ?: "-"}")
@@ -128,6 +153,31 @@ fun MessageDiagnosticsDialog(
                 DiagnosticRow("Relay hops", message.deliveryHopCount?.toString() ?: "Unknown")
                 DiagnosticRow("Route trace", when { message.routeTrace.isNullOrBlank() -> "Unavailable"; message.routeTraceComplete -> "Complete"; else -> "Partial" })
                 DiagnosticRow("Recorded attempts", message.attemptCount.toString())
+                if (isAttachmentMessage) {
+                    Divider()
+                    Text("ATTACHMENT TRANSFER", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    if (attachment == null) {
+                        Text(
+                            "No local attachment transfer record is associated with this message on this device.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        DiagnosticRow("Transfer status", attachment.status.replace('_', ' '))
+                        DiagnosticRow(
+                            "Progress",
+                            "${formatAttachmentBytes(attachment.transferredBytes)} / ${formatAttachmentBytes(attachment.sizeBytes)}"
+                        )
+                        DiagnosticRow("Relay hops", attachment.hopCount.toString())
+                        DiagnosticRow("Last updated", DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(attachment.updatedAt)))
+                        DiagnosticRow("Last error", attachmentErrorSummary)
+                        attachmentTransportError?.let {
+                            DiagnosticRow("Transport failure detail", AttachmentTransferDiagnostics.explanation(it))
+                        }
+                        attachmentDiagnostic?.details?.forEach { (key, value) ->
+                            DiagnosticRow(AttachmentTransferDiagnostics.detailLabel(key), value)
+                        }
+                    }
+                }
                 Divider()
                 Text("DELIVERY ROUTE · ${when { routeCodes.isEmpty() -> "UNAVAILABLE"; message.routeTraceComplete -> "COMPLETE TRACE"; else -> "PARTIAL TRACE" }}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (routeNames.isEmpty()) {
@@ -172,6 +222,13 @@ fun MessageDiagnosticsDialog(
             TextButton(onClick = { clipboard.setText(AnnotatedString(report)) }) { Text("COPY REPORT") }
         },
     )
+}
+
+private fun formatAttachmentBytes(bytes: Long): String {
+    if (bytes < 1024L) return "$bytes B"
+    val kibibytes = bytes / 1024.0
+    if (kibibytes < 1024.0) return String.format(java.util.Locale.ROOT, "%.1f KiB", kibibytes)
+    return String.format(java.util.Locale.ROOT, "%.1f MiB", kibibytes / 1024.0)
 }
 
 @Composable

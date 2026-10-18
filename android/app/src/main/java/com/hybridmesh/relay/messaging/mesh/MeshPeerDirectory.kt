@@ -59,12 +59,31 @@ data class MeshPeer(
  * Endpoint observations are runtime-only; Room schema and persisted identity stay unchanged.
  */
 class MeshPeerDirectory {
+    private data class RememberedBleAddress(
+        val nodeId: String,
+        val lastSeen: Long
+    )
+
     private val lock = Any()
     private val peers = LinkedHashMap<String, MeshPeer>()
+    // Keep just the recent address-to-identity association for ingress. Live route
+    // snapshots still drop peers at the scanner's shorter stale timeout.
+    private val recentBleAddresses = LinkedHashMap<String, RememberedBleAddress>()
     private val _snapshot = MutableStateFlow<List<MeshPeer>>(emptyList())
     val snapshot: StateFlow<List<MeshPeer>> = _snapshot.asStateFlow()
 
     fun replaceBlePeers(observed: List<BlePeer>) = synchronized(lock) {
+        val now = System.currentTimeMillis()
+        observed.forEach { ble ->
+            val address = ble.address.takeUnless { it.isBlank() || it.equals("Unknown", true) }
+                ?: return@forEach
+            recentBleAddresses[address.normalizedAddress()] = RememberedBleAddress(
+                nodeId = ble.nodeId,
+                lastSeen = ble.lastSeen.takeIf { it > 0L } ?: now
+            )
+        }
+        pruneRecentBleAddresses(now)
+
         val byNode = observed.associateBy { it.nodeId.normalized() }
         peers.entries.toList().forEach { (key, old) ->
             val ble = byNode[key]
@@ -155,8 +174,19 @@ class MeshPeerDirectory {
         publishLocked()
     }
 
-    fun findByBleAddress(address: String): MeshPeer? = synchronized(lock) {
+    fun findLiveNodeIdByBleAddress(address: String): String? = synchronized(lock) {
         peers.values.firstOrNull { it.bleAddress.equals(address, ignoreCase = true) }
+            ?.nodeId
+    }
+
+    fun findNodeIdByBleAddress(address: String): String? = synchronized(lock) {
+        val key = address.normalizedAddress()
+        findLiveNodeIdByBleAddress(address)
+            ?: run {
+                val now = System.currentTimeMillis()
+                pruneRecentBleAddresses(now)
+                recentBleAddresses[key]?.nodeId
+            }
     }
 
     fun findByNodeId(nodeId: String): MeshPeer? = synchronized(lock) {
@@ -169,5 +199,19 @@ class MeshPeerDirectory {
             .sortedBy { it.nodeId.lowercase(Locale.US) }
     }
 
+    private fun pruneRecentBleAddresses(now: Long) {
+        recentBleAddresses.entries.removeIf { now - it.value.lastSeen > BLE_INGRESS_IDENTITY_RETENTION_MS }
+        while (recentBleAddresses.size > MAX_REMEMBERED_BLE_ADDRESSES) {
+            val oldest = recentBleAddresses.minByOrNull { it.value.lastSeen } ?: break
+            recentBleAddresses.remove(oldest.key)
+        }
+    }
+
     private fun String.normalized(): String = trim().lowercase(Locale.US)
+    private fun String.normalizedAddress(): String = trim().uppercase(Locale.US)
+
+    private companion object {
+        const val BLE_INGRESS_IDENTITY_RETENTION_MS = 2 * 60 * 1_000L
+        const val MAX_REMEMBERED_BLE_ADDRESSES = 256
+    }
 }
