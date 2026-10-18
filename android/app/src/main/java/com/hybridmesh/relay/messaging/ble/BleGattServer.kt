@@ -21,6 +21,7 @@ import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.messaging.protocol.GattPacketCodec
+import com.hybridmesh.relay.messaging.mesh.MeshPacketCodec
 import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.network.NetworkDiagnostics
 import com.hybridmesh.relay.network.NetworkEventKind
@@ -622,7 +623,22 @@ class BleGattServer(context: Context) {
                     }
                 } else {
                     val accepted = withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
-                        try { packetReceiver?.invoke(device, combined) == true } catch (_: Exception) { false }
+                        try {
+                            packetReceiver?.invoke(device, combined) == true
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            val packet = MeshPacketCodec.decode(combined)
+                            NetworkDiagnostics.getInstance().record(
+                                kind = NetworkEventKind.REQUEST_FAILED,
+                                operation = "ble.gatt.receive",
+                                correlationId = packet?.messageId,
+                                transport = "BLE_MESH",
+                                peerNodeId = safeAddress(device),
+                                result = "RECEIVER_EXCEPTION:${failure.javaClass.simpleName}"
+                            )
+                            false
+                        }
                     } ?: false
                     if (callbackGeneration == serverGeneration) sendAck(device, frame.transferId, accepted)
                 }

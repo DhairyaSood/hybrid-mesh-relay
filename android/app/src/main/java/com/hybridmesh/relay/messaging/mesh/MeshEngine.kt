@@ -52,6 +52,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -608,14 +609,64 @@ class MeshEngine(context: Context) {
             } else {
                 // Several independent packets can make progress concurrently, but
                 // the semaphore bounds per-device database/radio pressure.
-                coroutineScope {
+                supervisorScope {
                     candidates.map { record ->
-                        async { forwardingSlots.withPermit { processForwardRecord(record, now) } }
+                        async {
+                            forwardingSlots.withPermit {
+                                processForwardRecordSafely(record, now)
+                            }
+                        }
                     }.awaitAll().any { it }
                 }
             }
 
             if (!worked) waitForWake(forwardWaitTime(now))
+        }
+    }
+
+    private suspend fun processForwardRecordSafely(
+        record: MeshForwardingRecordEntity,
+        now: Long
+    ): Boolean {
+        return try {
+            processForwardRecord(record, now)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            val error = failure.javaClass.simpleName.ifBlank { "UNKNOWN_EXCEPTION" }
+            val retryError = "RELAY_PROCESSING_FAILED:$error"
+            try {
+                repository.scheduleForwardRetry(
+                    packetId = record.packetId,
+                    nextAttemptAt = System.currentTimeMillis() + forwardRetryDelay(record.attemptCount),
+                    error = retryError
+                )
+            } catch (recoveryFailure: Exception) {
+                networkDiagnostics.record(
+                    kind = NetworkEventKind.REQUEST_FAILED,
+                    operation = "mesh.relay",
+                    correlationId = record.messageId,
+                    peerNodeId = record.receivedFromNodeId,
+                    result = "RELAY_RECOVERY_FAILED:${recoveryFailure.javaClass.simpleName}"
+                )
+            }
+            networkDiagnostics.record(
+                kind = NetworkEventKind.REQUEST_FAILED,
+                operation = "mesh.relay",
+                correlationId = record.messageId,
+                transport = null,
+                peerNodeId = record.receivedFromNodeId,
+                result = retryError
+            )
+            repository.recordTraceEvent(
+                messageId = record.messageId,
+                packetId = record.packetId,
+                eventType = "RELAY_PROCESSING_FAILED",
+                peerNodeId = record.receivedFromNodeId,
+                resultCode = "REQUEUED",
+                detail = error
+            )
+            true
         }
     }
 
@@ -671,6 +722,11 @@ class MeshEngine(context: Context) {
                 now + FORWARD_NO_PEER_RETRY_MS,
                 "NO_MESH_NEIGHBOR"
             )
+            recordRelayDiagnostic(
+                packet = packet,
+                peerNodeId = activeRecord.receivedFromNodeId,
+                result = "NO_ELIGIBLE_PEER"
+            )
             return true
         }
 
@@ -685,6 +741,11 @@ class MeshEngine(context: Context) {
         }
 
         val forwardedPacket = packet.copy(ttl = packet.ttl - 1, hopCount = packet.hopCount + 1)
+        recordRelayDiagnostic(
+            packet = forwardedPacket,
+            peerNodeId = peers.joinToString(",") { it.nodeId },
+            result = "FORWARD_ATTEMPT_STARTED"
+        )
         val sendStartedAt = System.nanoTime()
         val sendOutcome = sendPacketToPeers(forwardedPacket, peers)
         val sendDurationMs = ((System.nanoTime() - sendStartedAt) / 1_000_000L).coerceAtLeast(0L)
@@ -694,6 +755,11 @@ class MeshEngine(context: Context) {
         )
 
         return if (sendOutcome.accepted) {
+            recordRelayDiagnostic(
+                packet = forwardedPacket,
+                peerNodeId = peers.joinToString(",") { it.nodeId },
+                result = "FORWARD_ACCEPTED"
+            )
             val finalized = repository.markForwarded(activeRecord.packetId)
             if (finalized == 0) {
                 // A better duplicate may have arrived while the radio send was in
@@ -711,8 +777,33 @@ class MeshEngine(context: Context) {
                 System.currentTimeMillis() + forwardRetryDelay(activeRecord.attemptCount),
                 "MESH_TRANSPORT_FAILED"
             )
+            recordRelayDiagnostic(
+                packet = forwardedPacket,
+                peerNodeId = peers.joinToString(",") { it.nodeId },
+                result = "FORWARD_ATTEMPT_FAILED"
+            )
             true
         }
+    }
+
+    private fun recordRelayDiagnostic(
+        packet: MeshPacket,
+        peerNodeId: String?,
+        result: String
+    ) {
+        networkDiagnostics.record(
+            kind = when {
+                result.endsWith("FAILED") -> NetworkEventKind.REQUEST_FAILED
+                result == "NO_ELIGIBLE_PEER" -> NetworkEventKind.REQUEST_UNAVAILABLE
+                result == "FORWARD_ACCEPTED" -> NetworkEventKind.REQUEST_SUCCEEDED
+                else -> NetworkEventKind.REQUEST_STARTED
+            },
+            operation = "mesh.relay",
+            correlationId = packet.messageId,
+            transport = null,
+            peerNodeId = peerNodeId,
+            result = result
+        )
     }
 
     private suspend fun handleReceivedPacket(
@@ -730,20 +821,14 @@ class MeshEngine(context: Context) {
         if (packet.hopCount !in 0..MAX_TTL) return false
 
         val localNodeId = identityStore.getIdentity().nodeId
-        if (packet.originNodeId.equals(localNodeId, true)) {
-            // A structurally valid packet looped back to its origin is already
-            // consumed. Accept it at the transport layer to prevent retries, but
-            // still reject application packet types this node would never process.
-            return when (packet.packetType) {
-                MeshPacket.PacketType.DATA -> packet.messageType in APPLICATION_MESSAGE_TYPES
-                MeshPacket.PacketType.DELIVERY_ACK ->
-                    packet.messageType == DELIVERY_ACK_TYPE && packet.deliveryHopCount in 0..MAX_TTL
-            }
-        }
 
         return when (packet.packetType) {
             MeshPacket.PacketType.DATA -> {
                 if (packet.messageType !in APPLICATION_MESSAGE_TYPES) return false
+                if (packet.originNodeId.equals(localNodeId, true)) {
+                    // A DATA packet looped back to its origin is already consumed.
+                    return true
+                }
                 if (packet.destinationNodeId.equals(localNodeId, true)) {
                     handleDataForLocalDestination(packet, now, sourceTransport, sourceNodeId)
                 } else if (packet.ttl > 0 && packet.hopCount < MAX_TTL) {
@@ -759,6 +844,10 @@ class MeshEngine(context: Context) {
 
                 if (packet.destinationNodeId.equals(localNodeId, true)) {
                     handleDeliveryAckForOrigin(packet, now)
+                } else if (packet.originNodeId.equals(localNodeId, true)) {
+                    // A locally-created ACK that is not addressed to this node
+                    // must not be relayed back into the mesh.
+                    false
                 } else if (packet.ttl > 0 && packet.hopCount < MAX_TTL) {
                     acceptForRelay(packet, sourceNodeId, sourceAddress, sourceTransport, now)
                 } else {

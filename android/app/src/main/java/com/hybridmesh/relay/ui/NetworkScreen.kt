@@ -372,6 +372,17 @@ private fun Advanced(
                 )
                 val issueCount = diagnosticIssueCount(state, mesh, wifiRadioEnabled, wifiPermissionGranted)
                 MetricLine("CHECKS NEEDING ATTENTION", issueCount.toString(), if (issueCount == 0) "No known radio or runtime blockers" else "Some checks may share a cause; Diagnose Network shows details")
+                val relayEvents = diagnostics.events.filter { it.operation == "mesh.relay" }
+                val relayFailures = relayEvents.count { it.kind == NetworkEventKind.REQUEST_FAILED }
+                MetricLine(
+                    "RELAY PIPELINE",
+                    when {
+                        !mesh.running -> "STOPPED"
+                        relayFailures > 0 -> "CHECK EVENTS"
+                        else -> "MONITORED"
+                    },
+                    "${mesh.pendingForwarding} queued · ${relayEvents.size} retained decisions · $relayFailures failures"
+                )
             }
         }
     }
@@ -410,6 +421,10 @@ private fun DiagnoseNetworkDialog(
     val completedRequests = diagnostics.events.count {
         it.operation == "mesh.send" && isCompletedSendAttempt(it)
     }
+    val relayEvents = diagnostics.events.filter { it.operation == "mesh.relay" }
+    val recentRelayEvents = relayEvents.asReversed().take(30)
+    val relayFailures = relayEvents.count { it.kind == NetworkEventKind.REQUEST_FAILED }
+    val relayUnavailable = relayEvents.count { it.kind == NetworkEventKind.REQUEST_UNAVAILABLE }
     val bleBlocked = mesh.bleEnabled && (
         !state.bleSupported || !state.blePermissions.allGranted || state.bluetoothState != BluetoothState.ON ||
             state.scanningErrorCode != null || state.advertisingErrorCode != null ||
@@ -582,6 +597,28 @@ private fun DiagnoseNetworkDialog(
                         if (recentEvents.isNotEmpty()) DiagnosticListScroller(recentEvents.size) {
                             recentEvents.forEach { event ->
                                 EventRow(event, active = event.id in activeEventIds) { selectedEvent = event }
+                            }
+                        }
+                    }
+                }
+                item {
+                    SectionCard("RELAY PIPELINE") {
+                        Text(
+                            "Relay decisions are recorded separately from physical transport sends. This distinguishes queueing, missing next hops, send failures, and worker exceptions.",
+                            color = RelayTextMuted,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        MetricLine("RELAY EVENTS", relayEvents.size.toString(), "retained process-local relay decisions")
+                        MetricLine("RELAY FAILURES", relayFailures.toString(), "unexpected processing or transport failures")
+                        MetricLine("NO ELIGIBLE PEER", relayUnavailable.toString(), "relay attempts waiting for a usable next hop")
+                        MetricLine("PENDING FORWARDING", mesh.pendingForwarding.toString(), "durable relay records still awaiting progress")
+                        if (recentRelayEvents.isEmpty()) {
+                            Text("No relay decisions have been recorded in this process yet.", color = RelayTextMuted)
+                        } else {
+                            DiagnosticListScroller(recentRelayEvents.size) {
+                                recentRelayEvents.forEach { event ->
+                                    EventRow(event, active = false) { selectedEvent = event }
+                                }
                             }
                         }
                     }
