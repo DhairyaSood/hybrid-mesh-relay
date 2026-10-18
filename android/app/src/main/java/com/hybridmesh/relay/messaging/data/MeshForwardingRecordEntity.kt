@@ -30,6 +30,7 @@ data class MeshForwardingRecordEntity(
     val state: String,
     val attemptCount: Int,
     val nextAttemptAt: Long?,
+    @androidx.room.ColumnInfo(defaultValue = "NULL") val claimedAt: Long? = null,
     val lastError: String?,
     /** Compact comma-separated route transport codes preserved across store-and-forward. */
     @androidx.room.ColumnInfo(defaultValue = "''") val routeTrace: String = "",

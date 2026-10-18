@@ -746,7 +746,8 @@ class MessagingRepository private constructor(context: Context) {
     suspend fun getForwarding(packetId: String): MeshForwardingRecordEntity? =
         forwarding.get(packetId)
 
-    suspend fun claimForward(packetId: String): Boolean = forwarding.claim(packetId) == 1
+    suspend fun claimForward(packetId: String, now: Long = System.currentTimeMillis()): Boolean =
+        forwarding.claim(packetId, now) == 1
 
     suspend fun markForwarded(packetId: String): Int = forwarding.markForwarded(packetId)
 
@@ -764,9 +765,16 @@ class MessagingRepository private constructor(context: Context) {
 
     suspend fun resetStaleForwarding() {
         val now = System.currentTimeMillis()
-        forwarding.resetStaleForwarding(now, "SERVICE_RESTARTED")
+        forwarding.resetStaleForwarding(now, now - FORWARDING_LEASE_TIMEOUT_MS, "SERVICE_RESTARTED")
         forwarding.purgeExpired(now)
     }
+
+    suspend fun recoverStaleForwarding(now: Long = System.currentTimeMillis()): Int =
+        forwarding.resetStaleForwarding(
+            now = now,
+            staleBefore = now - FORWARDING_LEASE_TIMEOUT_MS,
+            error = "RELAY_CLAIM_TIMEOUT"
+        )
 
     suspend fun requeueForwardingOnTransportLoss() {
         val now = System.currentTimeMillis()
@@ -812,6 +820,7 @@ class MessagingRepository private constructor(context: Context) {
     companion object {
         private const val TRACE_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_TRACE_EVENTS = 5_000
+        private const val FORWARDING_LEASE_TIMEOUT_MS = 90_000L
 
         @Volatile
         private var INSTANCE: MessagingRepository? = null

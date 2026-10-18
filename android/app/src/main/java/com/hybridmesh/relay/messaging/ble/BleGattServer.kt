@@ -622,9 +622,9 @@ class BleGattServer(context: Context) {
                         }
                     }
                 } else {
-                    val accepted = withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
+                    val receiveOutcome = withTimeoutOrNull(MESH_ACCEPTANCE_TIMEOUT_MS) {
                         try {
-                            packetReceiver?.invoke(device, combined) == true
+                            packetReceiver?.invoke(device, combined) ?: false
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (failure: Exception) {
@@ -639,8 +639,24 @@ class BleGattServer(context: Context) {
                             )
                             false
                         }
-                    } ?: false
-                    if (callbackGeneration == serverGeneration) sendAck(device, frame.transferId, accepted)
+                    }
+                    val packet = MeshPacketCodec.decode(combined)
+                    val outcome = when (receiveOutcome) {
+                        null -> "RECEIVER_TIMEOUT"
+                        true -> "RECEIVER_ACCEPTED"
+                        false -> "RECEIVER_REJECTED"
+                    }
+                    NetworkDiagnostics.getInstance().record(
+                        kind = if (receiveOutcome == true) NetworkEventKind.REQUEST_SUCCEEDED else NetworkEventKind.REQUEST_FAILED,
+                        operation = "ble.gatt.receive",
+                        correlationId = packet?.messageId,
+                        transport = "BLE_MESH",
+                        peerNodeId = safeAddress(device),
+                        result = outcome
+                    )
+                    if (callbackGeneration == serverGeneration) {
+                        sendAck(device, frame.transferId, receiveOutcome == true)
+                    }
                 }
             } finally {
                 meshProcessingSlots.release()

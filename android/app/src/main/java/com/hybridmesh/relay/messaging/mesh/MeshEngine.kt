@@ -598,29 +598,44 @@ class MeshEngine(context: Context) {
 
     private suspend fun forwardingLoop() {
         while (currentCoroutineContext().isActive && started) {
-            if (meshTransports.none { it.isAvailable() }) {
-                waitForWake(5_000L)
-                continue
-            }
-            val now = System.currentTimeMillis()
-            val candidates = repository.getPendingForwards(now, MAX_FORWARD_BATCH)
-            val worked = if (candidates.isEmpty()) {
-                false
-            } else {
-                // Several independent packets can make progress concurrently, but
-                // the semaphore bounds per-device database/radio pressure.
-                supervisorScope {
-                    candidates.map { record ->
-                        async {
-                            forwardingSlots.withPermit {
-                                processForwardRecordSafely(record, now)
-                            }
-                        }
-                    }.awaitAll().any { it }
+            try {
+                if (meshTransports.none { it.isAvailable() }) {
+                    waitForWake(5_000L)
+                    continue
                 }
-            }
+                val now = System.currentTimeMillis()
+                val candidates = repository.getPendingForwards(now, MAX_FORWARD_BATCH)
+                val worked = if (candidates.isEmpty()) {
+                    false
+                } else {
+                    // Several independent packets can make progress concurrently, but
+                    // the semaphore bounds per-device database/radio pressure.
+                    supervisorScope {
+                        candidates.map { record ->
+                            async {
+                                forwardingSlots.withPermit {
+                                    processForwardRecordSafely(record, now)
+                                }
+                            }
+                        }.awaitAll().any { it }
+                    }
+                }
 
-            if (!worked) waitForWake(forwardWaitTime(now))
+                if (!worked) waitForWake(forwardWaitTime(now))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                try {
+                    networkDiagnostics.record(
+                        kind = NetworkEventKind.REQUEST_FAILED,
+                        operation = "mesh.relay",
+                        result = "RELAY_LOOP_RECOVERED:${failure.javaClass.simpleName}"
+                    )
+                } catch (_: Exception) {
+                    // Recovery diagnostics must not be able to terminate the loop.
+                }
+                delay(RELAY_LOOP_ERROR_BACKOFF_MS)
+            }
         }
     }
 
@@ -635,12 +650,17 @@ class MeshEngine(context: Context) {
         } catch (failure: Exception) {
             val error = failure.javaClass.simpleName.ifBlank { "UNKNOWN_EXCEPTION" }
             val retryError = "RELAY_PROCESSING_FAILED:$error"
+            val terminal = record.attemptCount >= MAX_PROCESSING_RETRIES
             try {
-                repository.scheduleForwardRetry(
-                    packetId = record.packetId,
-                    nextAttemptAt = System.currentTimeMillis() + forwardRetryDelay(record.attemptCount),
-                    error = retryError
-                )
+                if (terminal) {
+                    repository.markForwardInvalid(record.packetId, "RELAY_PROCESSING_RETRY_LIMIT")
+                } else {
+                    repository.scheduleForwardRetry(
+                        packetId = record.packetId,
+                        nextAttemptAt = System.currentTimeMillis() + forwardRetryDelay(record.attemptCount),
+                        error = retryError
+                    )
+                }
             } catch (recoveryFailure: Exception) {
                 networkDiagnostics.record(
                     kind = NetworkEventKind.REQUEST_FAILED,
@@ -650,21 +670,22 @@ class MeshEngine(context: Context) {
                     result = "RELAY_RECOVERY_FAILED:${recoveryFailure.javaClass.simpleName}"
                 )
             }
-            networkDiagnostics.record(
-                kind = NetworkEventKind.REQUEST_FAILED,
-                operation = "mesh.relay",
-                correlationId = record.messageId,
-                transport = null,
+            try {
+                recordRelayTrace(
+                    messageId = record.messageId,
+                    packetId = record.packetId,
+                    eventType = "RELAY_PROCESSING_FAILED",
+                    peerNodeId = record.receivedFromNodeId,
+                    resultCode = if (terminal) "EXPIRED" else "REQUEUED",
+                    detail = error
+                )
+            } catch (_: Exception) {
+                // Trace persistence must not be able to terminate the relay worker.
+            }
+            recordRelayDiagnostic(
+                packet = record.toPacket() ?: return true,
                 peerNodeId = record.receivedFromNodeId,
-                result = retryError
-            )
-            repository.recordTraceEvent(
-                messageId = record.messageId,
-                packetId = record.packetId,
-                eventType = "RELAY_PROCESSING_FAILED",
-                peerNodeId = record.receivedFromNodeId,
-                resultCode = "REQUEUED",
-                detail = error
+                result = if (terminal) "RELAY_PROCESSING_TERMINAL" else retryError
             )
             true
         }
@@ -679,7 +700,7 @@ class MeshEngine(context: Context) {
             receivedAtByPacket.remove(record.packetId)
             return true
         }
-        if (!repository.claimForward(record.packetId)) return false
+        if (!repository.claimForward(record.packetId, now)) return false
 
         // Candidate rows may be stale: a better duplicate can update the durable
         // forwarding record after the pending batch was queried but before claim.
@@ -786,24 +807,58 @@ class MeshEngine(context: Context) {
         }
     }
 
-    private fun recordRelayDiagnostic(
+    private suspend fun recordRelayDiagnostic(
         packet: MeshPacket,
         peerNodeId: String?,
         result: String
     ) {
-        networkDiagnostics.record(
-            kind = when {
-                result.endsWith("FAILED") -> NetworkEventKind.REQUEST_FAILED
-                result == "NO_ELIGIBLE_PEER" -> NetworkEventKind.REQUEST_UNAVAILABLE
-                result == "FORWARD_ACCEPTED" -> NetworkEventKind.REQUEST_SUCCEEDED
-                else -> NetworkEventKind.REQUEST_STARTED
-            },
-            operation = "mesh.relay",
-            correlationId = packet.messageId,
-            transport = null,
+        try {
+            networkDiagnostics.record(
+                kind = when {
+                    result.endsWith("FAILED") || result.contains("TERMINAL") -> NetworkEventKind.REQUEST_FAILED
+                    result == "NO_ELIGIBLE_PEER" -> NetworkEventKind.REQUEST_UNAVAILABLE
+                    result == "FORWARD_ACCEPTED" -> NetworkEventKind.REQUEST_SUCCEEDED
+                    else -> NetworkEventKind.REQUEST_STARTED
+                },
+                operation = "mesh.relay",
+                correlationId = packet.messageId,
+                transport = null,
+                peerNodeId = peerNodeId,
+                result = result
+            )
+        } catch (_: Exception) {
+            // Diagnostics are intentionally non-critical to packet custody.
+        }
+        recordRelayTrace(
+            messageId = packet.messageId,
+            packetId = packet.packetId,
+            eventType = result,
             peerNodeId = peerNodeId,
-            result = result
+            resultCode = result
         )
+    }
+
+    private suspend fun recordRelayTrace(
+        messageId: String,
+        packetId: String?,
+        eventType: String,
+        peerNodeId: String?,
+        resultCode: String,
+        detail: String? = null
+    ) {
+        try {
+            repository.recordTraceEvent(
+                messageId = messageId,
+                packetId = packetId,
+                eventType = eventType,
+                transport = null,
+                peerNodeId = peerNodeId,
+                resultCode = resultCode,
+                detail = detail
+            )
+        } catch (_: Exception) {
+            // A trace backend failure must not stop forwarding.
+        }
     }
 
     private suspend fun handleReceivedPacket(
@@ -1130,8 +1185,28 @@ class MeshEngine(context: Context) {
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
-                } catch (_: Exception) {
-                    // One peer's failure must not cancel attempts to other peers.
+                } catch (failure: Exception) {
+                    val detail = failure.javaClass.simpleName.ifBlank { "UNKNOWN_EXCEPTION" }
+                    try {
+                        networkDiagnostics.record(
+                            kind = NetworkEventKind.REQUEST_FAILED,
+                            operation = "mesh.relay.peer",
+                            correlationId = packet.messageId,
+                            transport = null,
+                            peerNodeId = peer.nodeId,
+                            result = "PEER_ATTEMPT_FAILED:$detail"
+                        )
+                        recordRelayTrace(
+                            messageId = packet.messageId,
+                            packetId = packet.packetId,
+                            eventType = "FORWARD_PEER_FAILED",
+                            peerNodeId = peer.nodeId,
+                            resultCode = "FAILED",
+                            detail = detail
+                        )
+                    } catch (_: Exception) {
+                        // Per-peer diagnostics cannot cancel sibling attempts.
+                    }
                 } finally {
                     releaseAttempt()
                 }
@@ -1734,6 +1809,19 @@ class MeshEngine(context: Context) {
     private suspend fun maintenanceLoop() {
         while (currentCoroutineContext().isActive && started) {
             repository.purgeMeshState()
+            val recovered = repository.recoverStaleForwarding()
+            if (recovered > 0) {
+                try {
+                    networkDiagnostics.record(
+                        kind = NetworkEventKind.REQUEST_UNAVAILABLE,
+                        operation = "mesh.relay",
+                        result = "RELAY_CLAIM_TIMEOUT:$recovered"
+                    )
+                } catch (_: Exception) {
+                    // Maintenance diagnostics are best effort.
+                }
+                wakeChannel.trySend(Unit)
+            }
             delay(MAINTENANCE_INTERVAL_MS)
         }
     }
@@ -1882,6 +1970,8 @@ class MeshEngine(context: Context) {
         private const val FORWARD_NO_PEER_RETRY_MS = 10_000L
         private const val FORWARD_SUPPRESSION_RECHECK_MS = 250L
         private const val FORWARD_IDLE_WAIT_MS = 2_000L
+        private const val RELAY_LOOP_ERROR_BACKOFF_MS = 1_000L
+        private const val MAX_PROCESSING_RETRIES = 3
         private const val MAINTENANCE_INTERVAL_MS = 30_000L
         private const val SNAPSHOT_INTERVAL_MS = 2_000L
         private const val WIFI_START_RETRY_MS = 15_000L

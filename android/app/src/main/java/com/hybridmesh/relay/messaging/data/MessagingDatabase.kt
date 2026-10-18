@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [PeerEntity::class, MessageRecordEntity::class, MeshForwardingRecordEntity::class, MeshSeenPacketEntity::class, MessageTraceEventEntity::class, AttachmentRecordEntity::class],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class MessagingDatabase : RoomDatabase() {
@@ -125,6 +125,13 @@ abstract class MessagingDatabase : RoomDatabase() {
                         "PRIMARY KEY(messageId))"
                 )
             }
+
+        }
+
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE mesh_forwarding ADD COLUMN claimedAt INTEGER")
+            }
         }
 
         fun getInstance(context: Context): MessagingDatabase =
@@ -142,7 +149,8 @@ abstract class MessagingDatabase : RoomDatabase() {
                         MIGRATION_5_6,
                         MIGRATION_6_7,
                         MIGRATION_7_8,
-                        MIGRATION_8_9
+                        MIGRATION_8_9,
+                        MIGRATION_9_10
                     )
                     .build()
                     .also { INSTANCE = it }
