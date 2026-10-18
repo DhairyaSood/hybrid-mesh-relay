@@ -28,6 +28,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
 
@@ -192,6 +193,42 @@ class BleGattClient(context: Context) {
     /** Streams one attachment over a single GATT session, with resumable per-block custody ACKs. */
     @SuppressLint("MissingPermission")
     suspend fun sendAttachment(
+        device: BluetoothDevice,
+        manifest: AttachmentTransferManifest,
+        file: File,
+        runtimeGeneration: Long,
+        isRuntimeGenerationCurrent: () -> Boolean,
+        onProgress: suspend (Long) -> Unit = {},
+        onState: (GattTransportSnapshot) -> Unit = {}
+    ): BleAttachmentSendResult {
+        val firstAttempt = sendAttachmentAttempt(
+            device, manifest, file, runtimeGeneration, isRuntimeGenerationCurrent, onProgress, onState
+        )
+        if (!shouldRetryAttachmentDiscovery(firstAttempt)) return firstAttempt
+
+        delay(BleGattConstants.ATTACHMENT_DISCOVERY_RETRY_DELAY_MS)
+        return sendAttachmentAttempt(
+            device, manifest, file, runtimeGeneration, isRuntimeGenerationCurrent, onProgress, onState
+        ).copy(
+            discoveryAttempts = 2,
+            firstAttemptFailureCode = firstAttempt.failureCode,
+            firstAttemptDiscoveryOutcome = firstAttempt.snapshot.serviceDiscoveryOutcome,
+            firstAttemptDiscoveryStatus = firstAttempt.snapshot.serviceDiscoveryStatus,
+            firstAttemptDiscoveredServices = firstAttempt.snapshot.discoveredServiceUuids,
+            firstAttemptMissingAttributes = firstAttempt.snapshot.missingGattAttributes
+        )
+    }
+
+    private fun shouldRetryAttachmentDiscovery(result: BleAttachmentSendResult): Boolean =
+        !result.succeeded && result.retryable && (
+            (result.failureCode == GattTransportError.SERVICE_DISCOVERY_FAILED.name &&
+                result.snapshot.serviceDiscoveryOutcome in setOf("START_REJECTED", "START_EXCEPTION", "CALLBACK_FAILED", "TIMEOUT")) ||
+                (result.failureCode == GattTransportError.GATT_DATABASE_CHANGED.name &&
+                    result.snapshot.serviceDiscoveryOutcome == "REMOTE_DATABASE_CHANGED")
+            )
+
+    @SuppressLint("MissingPermission")
+    private suspend fun sendAttachmentAttempt(
         device: BluetoothDevice,
         manifest: AttachmentTransferManifest,
         file: File,
@@ -446,7 +483,10 @@ class BleGattClient(context: Context) {
 
             val bytes = try {
                 withTimeout(BleGattConstants.IDENTITY_READ_TIMEOUT_MS) {
-                    waiter.await()
+                    select<ByteArray> {
+                        waiter.onAwait { it }
+                        session.failure.onAwait { throw GattTransportException(session.error) }
+                    }
                 }
             } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
                 throw GattTransportException(GattTransportError.IDENTITY_READ_FAILED)
@@ -510,7 +550,7 @@ class BleGattClient(context: Context) {
                 newState: Int
             ) {
                 if (!session.isRuntimeCurrent()) {
-                    session.fail(com.hybridmesh.relay.messaging.model.GattTransportError.CONNECTION_FAILED)
+                    session.fail(GattTransportError.RUNTIME_CHANGED)
                     runCatching { gatt.disconnect() }
                     runCatching { gatt.close() }
                     if (!resumed.getAndSet(true)) continuation.resume(null)
@@ -530,16 +570,41 @@ class BleGattClient(context: Context) {
             }
 
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                if (!session.isRuntimeCurrent()) return
+                if (!session.acceptsCallbacks()) return
                 if (status != BluetoothGatt.GATT_SUCCESS) {
+                    session.recordServiceDiscovery("CALLBACK_FAILED", status)
                     session.fail(GattTransportError.SERVICE_DISCOVERY_FAILED)
                     return
                 }
 
+                val discoveredServices = runCatching { gatt.services }
+                    .getOrDefault(emptyList())
+                    .map { it.uuid.toString() }
+                    .sorted()
                 val service = gatt.getService(BleGattConstants.SERVICE_UUID)
                 val rx = service?.getCharacteristic(BleGattConstants.RX_CHARACTERISTIC_UUID)
                 val tx = service?.getCharacteristic(BleGattConstants.TX_CHARACTERISTIC_UUID)
-                if (service == null || rx == null || tx == null) {
+                if (service == null) {
+                    session.recordServiceDiscovery(
+                        outcome = "EXPECTED_SERVICE_MISSING",
+                        status = status,
+                        discoveredServiceUuids = discoveredServices,
+                        missingAttributes = BleGattConstants.SERVICE_UUID.toString()
+                    )
+                    session.fail(GattTransportError.CHARACTERISTIC_MISSING)
+                    return
+                }
+                val missingAttributes = buildList {
+                    if (rx == null) add(BleGattConstants.RX_CHARACTERISTIC_UUID.toString())
+                    if (tx == null) add(BleGattConstants.TX_CHARACTERISTIC_UUID.toString())
+                }
+                if (missingAttributes.isNotEmpty()) {
+                    session.recordServiceDiscovery(
+                        outcome = "EXPECTED_CHARACTERISTIC_MISSING",
+                        status = status,
+                        discoveredServiceUuids = discoveredServices,
+                        missingAttributes = missingAttributes.joinToString(",")
+                    )
                     session.fail(GattTransportError.CHARACTERISTIC_MISSING)
                     return
                 }
@@ -547,7 +612,18 @@ class BleGattClient(context: Context) {
                 session.service = service
                 session.rx = rx
                 session.tx = tx
+                session.recordServiceDiscovery(
+                    outcome = "SUCCESS",
+                    status = status,
+                    discoveredServiceUuids = discoveredServices
+                )
                 session.servicesDiscovered.complete(Unit)
+            }
+
+            override fun onServiceChanged(gatt: BluetoothGatt) {
+                if (!session.acceptsCallbacks()) return
+                session.recordServiceDiscovery("REMOTE_DATABASE_CHANGED")
+                session.fail(GattTransportError.GATT_DATABASE_CHANGED)
             }
 
             override fun onDescriptorWrite(
@@ -555,7 +631,7 @@ class BleGattClient(context: Context) {
                 descriptor: BluetoothGattDescriptor,
                 status: Int
             ) {
-                if (!session.isRuntimeCurrent()) return
+                if (!session.acceptsCallbacks()) return
                 if (descriptor.uuid != BleGattConstants.CLIENT_CONFIG_UUID) return
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     session.notificationsReady.complete(Unit)
@@ -569,7 +645,7 @@ class BleGattClient(context: Context) {
                 gatt: BluetoothGatt,
                 characteristic: BluetoothGattCharacteristic
             ) {
-                if (!session.isRuntimeCurrent()) return
+                if (!session.acceptsCallbacks()) return
                 handleNotification(session, characteristic.value)
             }
 
@@ -578,7 +654,7 @@ class BleGattClient(context: Context) {
                 characteristic: BluetoothGattCharacteristic,
                 value: ByteArray
             ) {
-                if (!session.isRuntimeCurrent()) return
+                if (!session.acceptsCallbacks()) return
                 handleNotification(session, value)
             }
 
@@ -587,7 +663,7 @@ class BleGattClient(context: Context) {
                 characteristic: BluetoothGattCharacteristic,
                 status: Int
             ) {
-                if (!session.isRuntimeCurrent()) return
+                if (!session.acceptsCallbacks()) return
                 val waiter = session.writeWaiter
                 session.writeWaiter = null
                 if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -604,7 +680,7 @@ class BleGattClient(context: Context) {
                 characteristic: BluetoothGattCharacteristic,
                 status: Int
             ) {
-                if (!session.isRuntimeCurrent()) return
+                if (!session.acceptsCallbacks()) return
                 val waiter = session.readValue
                 session.readValue = null
                 if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -617,7 +693,7 @@ class BleGattClient(context: Context) {
             }
 
             override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-                if (!session.isRuntimeCurrent()) return
+                if (!session.acceptsCallbacks()) return
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     session.mtu = mtu.coerceAtLeast(GattPacketCodec.MIN_ATT_MTU)
                 }
@@ -652,8 +728,23 @@ class BleGattClient(context: Context) {
     @SuppressLint("MissingPermission")
     private suspend fun discoverServices(gatt: BluetoothGatt, session: ClientSession) {
         session.requireRuntime()
-        val started = runCatching { gatt.discoverServices() }.getOrDefault(false)
-        if (!started) throw GattTransportException(GattTransportError.SERVICE_DISCOVERY_FAILED)
+        session.recordServiceDiscovery("STARTING")
+        val started = try {
+            gatt.discoverServices()
+        } catch (_: SecurityException) {
+            session.recordServiceDiscovery("START_PERMISSION_DENIED")
+            throw GattTransportException(GattTransportError.PERMISSION_DENIED)
+        } catch (error: Exception) {
+            session.recordServiceDiscovery(
+                outcome = "START_EXCEPTION",
+                exceptionClass = error.javaClass.simpleName
+            )
+            throw GattTransportException(GattTransportError.SERVICE_DISCOVERY_FAILED)
+        }
+        if (!started) {
+            session.recordServiceDiscovery("START_REJECTED")
+            throw GattTransportException(GattTransportError.SERVICE_DISCOVERY_FAILED)
+        }
 
         try {
             withTimeout(BleGattConstants.SERVICE_DISCOVERY_TIMEOUT_MS) {
@@ -663,6 +754,11 @@ class BleGattClient(context: Context) {
                 }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            if (!session.isRuntimeCurrent()) {
+                session.recordServiceDiscovery("RUNTIME_CHANGED")
+                throw GattTransportException(GattTransportError.RUNTIME_CHANGED)
+            }
+            session.recordServiceDiscovery("TIMEOUT")
             throw GattTransportException(GattTransportError.SERVICE_DISCOVERY_FAILED)
         }
     }
@@ -720,10 +816,17 @@ class BleGattClient(context: Context) {
             return session.mtu
         }
 
-        runCatching {
+        try {
             withTimeout(BleGattConstants.MTU_TIMEOUT_MS) {
-                session.mtuChanged.await()
+                select<Boolean> {
+                    session.mtuChanged.onAwait { it }
+                    session.failure.onAwait { throw GattTransportException(session.error) }
+                }
             }
+        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            // ATT MTU negotiation is optional; a timeout safely falls back to 23.
+        } catch (error: GattTransportException) {
+            throw error
         }
         return session.mtu.coerceAtLeast(GattPacketCodec.MIN_ATT_MTU)
     }
@@ -767,7 +870,10 @@ class BleGattClient(context: Context) {
 
         try {
             withTimeout(BleGattConstants.WRITE_TIMEOUT_MS) {
-                waiter.await()
+                select<Unit> {
+                    waiter.onAwait { it }
+                    session.failure.onAwait { throw GattTransportException(session.error) }
+                }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
             session.writeWaiter = null
@@ -859,8 +965,18 @@ class BleGattClient(context: Context) {
         var frameIndex: Int? = null
         var frameCount: Int? = null
         var bytesSent: Int = 0
-        var error: GattTransportError = GattTransportError.NONE
-        var currentState: GattTransportState = GattTransportState.IDLE
+        @Volatile var error: GattTransportError = GattTransportError.NONE
+        @Volatile var currentState: GattTransportState = GattTransportState.IDLE
+        @Volatile var serviceDiscoveryOutcome: String? = null
+            private set
+        @Volatile var serviceDiscoveryStatus: Int? = null
+            private set
+        @Volatile var serviceDiscoveryException: String? = null
+            private set
+        @Volatile var discoveredServiceUuids: String? = null
+            private set
+        @Volatile var missingGattAttributes: String? = null
+            private set
 
         val servicesDiscovered = CompletableDeferred<Unit>()
         val notificationsReady = CompletableDeferred<Unit>()
@@ -870,11 +986,44 @@ class BleGattClient(context: Context) {
 
         fun isRuntimeCurrent(): Boolean = isRuntimeGenerationCurrent()
 
+        fun acceptsCallbacks(): Boolean {
+            if (currentState == GattTransportState.FAILED ||
+                currentState == GattTransportState.DISCONNECTING ||
+                currentState == GattTransportState.COMPLETED) return false
+            if (isRuntimeCurrent()) return true
+            if (currentState == GattTransportState.DISCOVERING_SERVICES) {
+                recordServiceDiscovery("RUNTIME_CHANGED")
+            }
+            fail(GattTransportError.RUNTIME_CHANGED)
+            return false
+        }
+
+        fun recordServiceDiscovery(
+            outcome: String,
+            status: Int? = null,
+            discoveredServiceUuids: List<String>? = null,
+            missingAttributes: String? = null,
+            exceptionClass: String? = null
+        ) {
+            serviceDiscoveryOutcome = outcome
+            if (status != null) serviceDiscoveryStatus = status
+            if (exceptionClass != null) serviceDiscoveryException = exceptionClass
+            if (discoveredServiceUuids != null) {
+                this.discoveredServiceUuids = discoveredServiceUuids.joinToString(",")
+            }
+            if (missingAttributes != null) missingGattAttributes = missingAttributes
+            publish(snapshot())
+        }
+
         fun requireRuntime() {
             if (!isRuntimeCurrent()) {
-                fail(com.hybridmesh.relay.messaging.model.GattTransportError.CONNECTION_FAILED)
-                throw GattTransportException(com.hybridmesh.relay.messaging.model.GattTransportError.CONNECTION_FAILED)
+                if (currentState == GattTransportState.DISCOVERING_SERVICES) {
+                    recordServiceDiscovery("RUNTIME_CHANGED")
+                }
+                fail(GattTransportError.RUNTIME_CHANGED)
+                throw GattTransportException(GattTransportError.RUNTIME_CHANGED)
             }
+            if (error != GattTransportError.NONE) throw GattTransportException(error)
         }
 
         fun transition(
@@ -891,10 +1040,14 @@ class BleGattClient(context: Context) {
             publish(snapshot(GattTransportState.DISCONNECTING))
         }
 
+        @Synchronized
         fun fail(newError: GattTransportError) {
+            if (currentState == GattTransportState.COMPLETED ||
+                currentState == GattTransportState.DISCONNECTING) return
             if (error == GattTransportError.NONE) error = newError
+            currentState = GattTransportState.FAILED
             if (!failure.isCompleted) failure.complete(Unit)
-            publish(snapshot(GattTransportState.FAILED))
+            publish(snapshot())
         }
 
         fun snapshot(state: GattTransportState = currentState): GattTransportSnapshot =
@@ -907,6 +1060,11 @@ class BleGattClient(context: Context) {
                 frameIndex = frameIndex,
                 frameCount = frameCount,
                 bytesSent = bytesSent,
+                serviceDiscoveryOutcome = serviceDiscoveryOutcome,
+                serviceDiscoveryStatus = serviceDiscoveryStatus,
+                serviceDiscoveryException = serviceDiscoveryException,
+                discoveredServiceUuids = discoveredServiceUuids,
+                missingGattAttributes = missingGattAttributes,
                 updatedAt = System.currentTimeMillis()
             )
     }

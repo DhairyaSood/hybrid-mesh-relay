@@ -17,6 +17,7 @@ object BleGattConstants {
 
     const val CONNECT_TIMEOUT_MS = 8_000L
     const val SERVICE_DISCOVERY_TIMEOUT_MS = 5_000L
+    const val ATTACHMENT_DISCOVERY_RETRY_DELAY_MS = 500L
     const val NOTIFICATION_SETUP_TIMEOUT_MS = 4_000L
     const val MTU_TIMEOUT_MS = 3_500L
     const val WRITE_TIMEOUT_MS = 4_000L

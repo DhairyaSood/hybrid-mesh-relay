@@ -9,5 +9,10 @@ data class GattTransportSnapshot(
     val frameIndex: Int? = null,
     val frameCount: Int? = null,
     val bytesSent: Int = 0,
+    val serviceDiscoveryOutcome: String? = null,
+    val serviceDiscoveryStatus: Int? = null,
+    val serviceDiscoveryException: String? = null,
+    val discoveredServiceUuids: String? = null,
+    val missingGattAttributes: String? = null,
     val updatedAt: Long = 0L
 )
