@@ -7,7 +7,7 @@ This firmware targets a classic ESP32 DevKit (`esp32dev`) and an AI-Thinker RA-0
 | SCK | 18 |
 | MISO | 19 |
 | MOSI | 23 |
-| NSS / CS | 27 |
+| NSS / CS | 5 |
 | RESET | 14 |
 | DIO0 | 26 |
 | DIO1 | Not connected |

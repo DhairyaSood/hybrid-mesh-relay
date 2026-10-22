@@ -28,7 +28,10 @@ int16_t LoRaManager::receive(String& message) {
 
 	const int16_t state = radio.readData(message);
 	const int16_t receiveState = radio.startReceive();
-	return state == RADIOLIB_ERR_NONE ? receiveState : state;
+	if (state != RADIOLIB_ERR_NONE) {
+		return state;
+	}
+	return receiveState;
 }
 
 float LoRaManager::lastPacketRssi() {
