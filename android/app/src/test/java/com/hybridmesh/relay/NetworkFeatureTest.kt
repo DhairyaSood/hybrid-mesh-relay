@@ -7,11 +7,52 @@ import com.hybridmesh.relay.network.NetworkDiagnosticEvent
 import com.hybridmesh.relay.network.NetworkDiagnosticsSnapshot
 import com.hybridmesh.relay.network.NetworkEventKind
 import com.hybridmesh.relay.network.connectionQuality
+import com.hybridmesh.relay.messaging.mesh.MeshPacketCodec
+import com.hybridmesh.relay.messaging.data.MessageRetentionPolicy
+import com.hybridmesh.relay.wifi.ProbeFailurePolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class NetworkFeatureTest {
+    @Test
+    fun wifiSessionInvalidationRequiresConsecutiveProbeFailures() {
+        val policy = ProbeFailurePolicy(failureThreshold = 2)
+
+        assertEquals(true, policy.isHealthy)
+        assertEquals(false, policy.record(false))
+        assertEquals(false, policy.isHealthy)
+        assertEquals(false, policy.record(true))
+        assertEquals(true, policy.isHealthy)
+        assertEquals(false, policy.record(false))
+        assertEquals(true, policy.record(false))
+        assertEquals(false, policy.isHealthy)
+    }
+
+    @Test
+    fun meshTextLimitIsMeasuredInUtf8Bytes() {
+        val ascii = "a".repeat(MeshPacketCodec.MAX_TEXT_BYTES)
+        val multibyte = "é".repeat(MeshPacketCodec.MAX_TEXT_BYTES / 2 + 1)
+
+        assertEquals(MeshPacketCodec.MAX_TEXT_BYTES, ascii.toByteArray(Charsets.UTF_8).size)
+        assertEquals(MeshPacketCodec.MAX_TEXT_BYTES + 2, multibyte.toByteArray(Charsets.UTF_8).size)
+    }
+
+    @Test
+    fun remoteMessageAdmissionRejectsGlobalSenderAndByteLimitOverflows() {
+        assertEquals(true, MessageRetentionPolicy.allowsIncomingMessage(1, 1, 10L, 10))
+        assertEquals(false, MessageRetentionPolicy.allowsIncomingMessage(MessageRetentionPolicy.MAX_REMOTE_MESSAGES, 1, 10L, 10))
+        assertEquals(false, MessageRetentionPolicy.allowsIncomingMessage(1, MessageRetentionPolicy.MAX_REMOTE_MESSAGES_PER_SENDER, 10L, 10))
+        assertEquals(false, MessageRetentionPolicy.allowsIncomingMessage(1, 1, MessageRetentionPolicy.MAX_REMOTE_MESSAGE_BYTES, 1))
+    }
+
+    @Test
+    fun remoteAttachmentAdmissionBoundsCountAndAggregateBytes() {
+        assertEquals(true, MessageRetentionPolicy.allowsIncomingAttachment(1, 10L, 10L))
+        assertEquals(false, MessageRetentionPolicy.allowsIncomingAttachment(MessageRetentionPolicy.MAX_REMOTE_ATTACHMENTS, 10L, 10L))
+        assertEquals(false, MessageRetentionPolicy.allowsIncomingAttachment(1, MessageRetentionPolicy.MAX_REMOTE_ATTACHMENT_BYTES, 1L))
+    }
+
     @Test
     fun mapsUriUsesExactCoordinates() {
         val url = LocationActions.mapsUrl(

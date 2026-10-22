@@ -40,6 +40,15 @@ interface MessageDao {
     @Query("SELECT * FROM mesh_messages WHERE messageId = :messageId LIMIT 1")
     suspend fun getById(messageId: String): MessageRecordEntity?
 
+    @Query("SELECT COUNT(*) FROM mesh_messages WHERE UPPER(senderNodeId) != UPPER(:localNodeId)")
+    suspend fun countRemoteMessages(localNodeId: String): Int
+
+    @Query("SELECT COUNT(*) FROM mesh_messages WHERE UPPER(senderNodeId) = UPPER(:senderNodeId) AND UPPER(senderNodeId) != UPPER(:localNodeId)")
+    suspend fun countRemoteMessagesFrom(localNodeId: String, senderNodeId: String): Int
+
+    @Query("SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM mesh_messages WHERE UPPER(senderNodeId) != UPPER(:localNodeId)")
+    suspend fun countRemoteMessageBytes(localNodeId: String): Long
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(message: MessageRecordEntity)
 

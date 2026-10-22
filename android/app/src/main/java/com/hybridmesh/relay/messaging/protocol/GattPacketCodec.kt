@@ -30,7 +30,11 @@ object GattPacketCodec {
     const val ATT_PROTOCOL_OVERHEAD = 3
     const val MAX_ATTRIBUTE_VALUE_BYTES = 512
     const val ENVELOPE_VERSION: Byte = 1
-    const val MAX_CHUNKS = 65_535
+    // The largest accepted complete frame is 33 KiB. At the minimum ATT MTU,
+    // a conforming sender carries at least four payload bytes per chunk.
+    const val MAX_REASSEMBLED_BYTES = 33 * 1024
+    const val MIN_ATT_PAYLOAD_BYTES = 4
+    const val MAX_CHUNKS = (MAX_REASSEMBLED_BYTES + MIN_ATT_PAYLOAD_BYTES - 1) / MIN_ATT_PAYLOAD_BYTES
 
     data class DataFrame(
         val transferId: Long,
@@ -121,6 +125,8 @@ object GattPacketCodec {
     fun encodeData(frame: DataFrame): ByteArray {
         require(frame.chunkCount in 1..MAX_CHUNKS)
         require(frame.chunkIndex in 0 until frame.chunkCount)
+        require(frame.payload.isNotEmpty()) { "DATA chunks must contain payload bytes" }
+        require(frame.payload.size <= MAX_REASSEMBLED_BYTES) { "DATA chunk is too large" }
         require(frame.payload.size <= 0xFFFF)
 
         return ByteBuffer.allocate(DATA_HEADER_BYTES + frame.payload.size)
@@ -209,8 +215,9 @@ object GattPacketCodec {
         val chunkIndex = buffer.short.toInt() and 0xFFFF
         val chunkCount = buffer.short.toInt() and 0xFFFF
 
-        if (chunkCount <= 0 || chunkIndex >= chunkCount) return null
+        if (chunkCount !in 1..MAX_CHUNKS || chunkIndex >= chunkCount) return null
         val payload = ByteArray(buffer.remaining())
+        if (payload.isEmpty() || payload.size > MAX_REASSEMBLED_BYTES) return null
         buffer.get(payload)
 
         return DataFrame(

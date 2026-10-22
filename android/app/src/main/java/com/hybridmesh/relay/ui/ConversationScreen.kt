@@ -140,6 +140,7 @@ fun ConversationScreen(peerNodeId: String) {
     var diagnosticsMessageId by remember { mutableStateOf<String?>(null) }
     var showDeleteChat by remember { mutableStateOf(false) }
     var locationError by remember { mutableStateOf<String?>(null) }
+    var messageError by remember { mutableStateOf<String?>(null) }
     var attachmentError by remember { mutableStateOf<String?>(null) }
     var selectedVideo by remember { mutableStateOf<AttachmentExportSource?>(null) }
     var selectedImage by remember { mutableStateOf<AttachmentExportSource?>(null) }
@@ -250,7 +251,10 @@ fun ConversationScreen(peerNodeId: String) {
     fun sendText() {
         val text = draft.trim()
         if (text.isBlank()) return
-        viewModel.send(peerNodeId, text, MessageType.NORMAL) { draft = "" }
+        messageError = null
+        viewModel.send(peerNodeId, text, MessageType.NORMAL) { success, error ->
+            if (success) draft = "" else messageError = error
+        }
     }
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
@@ -474,6 +478,9 @@ fun ConversationScreen(peerNodeId: String) {
                     }
                 }
 
+                if (messageError != null) {
+                    Text(messageError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 46.dp, top = 4.dp))
+                }
                 if (locationError != null) {
                     Text(locationError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 46.dp, top = 4.dp))
                 }
@@ -579,6 +586,17 @@ fun ConversationScreen(peerNodeId: String) {
             text = { Text(error) },
             confirmButton = {
                 TextButton(onClick = { attachmentError = null }) { Text("OK") }
+            }
+        )
+    }
+
+    messageError?.let { error ->
+        AlertDialog(
+            onDismissRequest = { messageError = null },
+            title = { Text("CAN’T SEND MESSAGE") },
+            text = { Text(error) },
+            confirmButton = {
+                TextButton(onClick = { messageError = null }) { Text("OK") }
             }
         )
     }
@@ -861,6 +879,7 @@ private fun MessageBubble(
                         message.status == DeliveryStatus.DELIVERED.name -> "DELIVERED"
                         message.status == DeliveryStatus.IN_FLIGHT.name -> "SENDING"
                         message.status == DeliveryStatus.QUEUED.name -> "QUEUED"
+                        message.status == DeliveryStatus.FAILED.name && message.lastError == "DELIVERY_EXPIRED" -> "EXPIRED"
                         message.status == DeliveryStatus.FAILED.name -> "FAILED"
                         else -> ""
                     }, style = MaterialTheme.typography.labelSmall, color = if (message.status == DeliveryStatus.FAILED.name) MaterialTheme.colorScheme.error else RelayTextMuted

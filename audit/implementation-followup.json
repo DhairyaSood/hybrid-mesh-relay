@@ -1,0 +1,213 @@
+{
+  "repository": "Hybrid Mesh Relay",
+  "date": "2026-10-22",
+  "baseline": {
+    "branch": "divanshi",
+    "commit": "9c4ce35",
+    "remote": "origin",
+    "upstream": null,
+    "preservedPreexistingChanges": [
+      "firmware/relay/.vscode/tasks.json",
+      "firmware/relay/.gitignore",
+      "firmware/relay/.vscode/extensions.json"
+    ]
+  },
+  "constraints": [
+    "No Markdown files were created or modified by this implementation."
+  ],
+  "meshInvestigation": {
+    "reportedSymptom": "Two phones work, third-device relay fails.",
+    "status": "Source-level routing defect fixed; physical three-device behavior remains unverified.",
+    "rootCause": {
+      "finding": "MeshEngine BLE packet ingress resolved the predecessor Node ID only from the live discovery snapshot. The scanner expires that snapshot while an established GATT connection can remain active, although MeshPeerDirectory retains the BLE-address identity for a bounded ingress window. Once the live entry expired, the packet lost its source Node ID. The forwarding policy uses that ID to exclude the predecessor, including its other bearer, so a relay could select the upstream peer again instead of propagating to the third device.",
+      "fix": "MeshEngine.onBleTransportPacket now resolves the source with findNodeIdByBleAddress, which uses the retained address-to-identity mapping for active ingress.",
+      "confidence": "Confirmed code defect and plausible contributor to the reported multihop symptom; not confirmed as the only cause on the user's physical phones.",
+      "regressionCoverage": [
+        "MeshPeerDirectoryAttachmentCapabilityTest.ingressIdentitySurvivesLivePeerExpiryForAnActiveGattConnection",
+        "MeshForwardingPolicyTest.threeDeviceRouteExcludesOriginAndUsesDestinationAtRelay"
+      ]
+    },
+    "otherTraceResults": [
+      "BLE DATA framing accepts complete nonempty message payloads within the wire packet limit; the GATT codec and server use bounded chunk reassembly.",
+      "Wi-Fi Direct session health now affects per-peer route eligibility, and BLE remains available as a fallback when the Wi-Fi session is unhealthy.",
+      "Attachment metadata is delivered through mesh messages while attachment bytes use their separate transfer paths; physical byte delivery was not exercised in this environment."
+    ],
+    "deviceValidation": {
+      "performed": false,
+      "reason": "No physical devices were accessible. The available ADB client could not connect to its local ADB server (could not read OK from ADB Server).",
+      "unverified": [
+        "BLE discovery and GATT connectivity on the user's Android models and OS versions.",
+        "Wi-Fi Direct group formation, usable TCP sessions, and automatic fallback on hardware.",
+        "End-to-end three-phone text relay and delivery acknowledgement.",
+        "Attachment byte transfer and integrity across a relay route."
+      ]
+    }
+  },
+  "findings": [
+    {
+      "id": "SEC-001",
+      "status": "unresolved; documented",
+      "result": "The app still lacks cryptographic peer authentication and message confidentiality. No hand-rolled cryptography was added. A secure fix needs an established identity/key-establishment design, user verification and trust handling, protocol versioning, and a migration/compatibility plan for existing peers.",
+      "risk": "Node IDs, source attribution, acknowledgements, and message payloads remain unauthenticated or plaintext at the application protocol level. Sender-based per-peer quotas are consequently spoofable; the global caps still bound aggregate retained message count and content bytes."
+    },
+    {
+      "id": "SEC-002",
+      "status": "fixed",
+      "result": "GattPacketCodec rejects empty DATA chunks, limits reassembled input to 33 KiB and caps chunk count at the number representable at the minimum ATT payload. BleGattServer permits at most four concurrent assemblies globally and two per remote device.",
+      "files": [
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/protocol/GattPacketCodec.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/ble/BleGattServer.kt",
+        "android/app/src/test/java/com/hybridmesh/relay/GattPacketCodecBoundsTest.kt"
+      ]
+    },
+    {
+      "id": "SEC-003",
+      "status": "fixed with bounded admission and eviction",
+      "result": "Incoming remote messages are admitted transactionally under limits of 5,000 retained remote records, 500 per claimed sender, and 32 MiB of aggregate UTF-8 content. Persistent peers are capped at 2,000; when full, the oldest unsaved peer may be evicted, while saved peers are retained. Remote attachment metadata and file transfers are admitted under limits of 2,000 retained remote attachments and 256 MiB aggregate retained bytes, in addition to the existing 10 MiB per-file limit. Message quotas are rechecked when an attachment transfer creates its destination message. Attachment quota checks cover both destination control-plane metadata insertion and transfer preparation/completion. Over-quota incoming messages or attachment metadata are not acknowledged as durably delivered.",
+      "files": [
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/AttachmentDao.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessageRetentionPolicy.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessageDao.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/PeerDao.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessagingRepository.kt",
+        "android/app/src/test/java/com/hybridmesh/relay/NetworkFeatureTest.kt"
+      ],
+      "followupReview": "The initial diff review found that attachment completion could bypass the message row quota, and that attachment metadata insertion through the destination packet path could bypass attachment admission. Both paths now use the same transactional limits. Abandoned attachment-rate bookkeeping is also capped at 128 entries, and rejected new receives remove their temporary files when no durable attachment row exists."
+    },
+    {
+      "id": "PRIV-001",
+      "status": "fixed",
+      "result": "Disabled Android backup and excluded app data domains from legacy cloud backup plus Android 12+ cloud backup and device transfer rules.",
+      "files": [
+        "android/app/src/main/AndroidManifest.xml",
+        "android/app/src/main/res/xml/backup_rules.xml",
+        "android/app/src/main/res/xml/data_extraction_rules.xml"
+      ]
+    },
+    {
+      "id": "APP-001",
+      "status": "fixed",
+      "result": "Message validation consistently uses the codec's 12 KiB UTF-8 byte limit. The ViewModel handles repository errors and the compose/conversation screens show a user-facing error while preserving the draft on failure.",
+      "files": [
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/mesh/MeshPacketCodec.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessagingRepository.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/ui/viewmodel/MessagesViewModel.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/ui/ComposeMessageScreen.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/ui/ConversationScreen.kt",
+        "android/app/src/test/java/com/hybridmesh/relay/NetworkFeatureTest.kt"
+      ]
+    },
+    {
+      "id": "MESH-001",
+      "status": "fixed by aligning user-facing copy with current queue semantics",
+      "result": "The UI now says offline messages expire if not delivered within 30 minutes, and expired messages are labeled Expired in conversation and diagnostics views. The existing wire expiration behavior is unchanged.",
+      "files": [
+        "android/app/src/main/java/com/hybridmesh/relay/ui/MessagesScreen.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/ui/ConversationScreen.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/ui/MessageDiagnosticsDialog.kt"
+      ]
+    },
+    {
+      "id": "CI-001",
+      "status": "fixed",
+      "result": "Third-party Actions in Android CI and deploy workflows are pinned to verified full commit SHAs. Workflow permissions are read-only by default; contents: write is scoped to the deploy job.",
+      "files": [
+        ".github/workflows/android-ci.yml",
+        ".github/workflows/android-deploy.yml"
+      ]
+    },
+    {
+      "id": "NET-001",
+      "status": "fixed",
+      "result": "A failed health probe immediately marks that Wi-Fi Direct session unhealthy so it is not selected. A successful probe restores eligibility; two consecutive failures close the session and allow normal reconnect/fallback behavior.",
+      "files": [
+        "android/app/src/main/java/com/hybridmesh/relay/wifi/ProbeFailurePolicy.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/wifi/WifiDirectManager.kt",
+        "android/app/src/test/java/com/hybridmesh/relay/NetworkFeatureTest.kt"
+      ]
+    },
+    {
+      "id": "CI-002",
+      "status": "fixed",
+      "result": "Android CI now runs unit tests, debug lint, and debug APK assembly.",
+      "files": [
+        ".github/workflows/android-ci.yml"
+      ]
+    },
+    {
+      "id": "BUILD-001",
+      "status": "fixed",
+      "result": "Added runtime permission checks adjacent to the Wi-Fi group-info and BLE scan-stop platform calls. Narrow MissingPermission suppressions are limited to those methods because lint does not follow the project permission helper.",
+      "files": [
+        "android/app/src/main/java/com/hybridmesh/relay/wifi/WifiDirectManager.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/ble/BleScanner.kt"
+      ]
+    }
+  ],
+  "additionalBugsDiscoveredAndFixed": [
+    {
+      "id": "SEC-003-follow-up-1",
+      "finding": "Attachment completion could insert a remote message without applying the message retention quota. Destination attachment metadata insertion could also bypass the attachment count and aggregate-byte quotas. Unique abandoned transfers could grow the in-memory rate-window map without a bound.",
+      "fix": "Apply the message quota at attachment completion; reserve attachment capacity before accepting destination metadata and during transfer preparation/completion; clean up rejected temporary receives; cap attachment rate-window bookkeeping at 128 entries.",
+      "files": [
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/AttachmentDao.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessageRetentionPolicy.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessagingRepository.kt",
+        "android/app/src/main/java/com/hybridmesh/relay/messaging/mesh/MeshEngine.kt",
+        "android/app/src/test/java/com/hybridmesh/relay/NetworkFeatureTest.kt"
+      ],
+      "regressionCoverage": [
+        "NetworkFeatureTest.remoteAttachmentAdmissionBoundsCountAndAggregateBytes"
+      ]
+    }
+  ],
+  "implementationFilesChanged": [
+    ".github/workflows/android-ci.yml",
+    ".github/workflows/android-deploy.yml",
+    "android/app/src/main/AndroidManifest.xml",
+    "android/app/src/main/java/com/hybridmesh/relay/ble/BleScanner.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/ble/BleGattServer.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/data/AttachmentDao.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessageDao.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessageRetentionPolicy.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/data/MessagingRepository.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/data/PeerDao.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/mesh/MeshEngine.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/mesh/MeshPacketCodec.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/messaging/protocol/GattPacketCodec.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/ui/ComposeMessageScreen.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/ui/ConversationScreen.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/ui/MessageDiagnosticsDialog.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/ui/MessagesScreen.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/ui/viewmodel/MessagesViewModel.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/wifi/ProbeFailurePolicy.kt",
+    "android/app/src/main/java/com/hybridmesh/relay/wifi/WifiDirectManager.kt",
+    "android/app/src/main/res/xml/backup_rules.xml",
+    "android/app/src/main/res/xml/data_extraction_rules.xml",
+    "android/app/src/test/java/com/hybridmesh/relay/GattPacketCodecBoundsTest.kt",
+    "android/app/src/test/java/com/hybridmesh/relay/MeshForwardingPolicyTest.kt",
+    "android/app/src/test/java/com/hybridmesh/relay/MeshPeerDirectoryAttachmentCapabilityTest.kt",
+    "android/app/src/test/java/com/hybridmesh/relay/NetworkFeatureTest.kt"
+  ],
+  "validation": {
+    "command": ".\\gradlew.bat --no-daemon --max-workers=1 '-Pkotlin.compiler.execution.strategy=in-process' -g \"$PWD\\.gradle-user-home\" testDebugUnitTest lintDebug assembleDebug",
+    "result": "PASS",
+    "details": {
+      "unitTests": "23 passed; 0 failures; 0 errors across 7 suites.",
+      "lint": "0 errors; 0 fatal issues; 41 warnings and 4 hints remain.",
+      "debugBuild": "assembleDebug passed; app-debug.apk produced (20,127,888 bytes).",
+      "diffCheck": "git diff --check passed.",
+      "releaseBuild": "Not run; release signing secrets/configuration were unavailable.",
+      "generatedFiles": "The task-local Gradle cache used for validation was removed after completion; standard ignored Android build outputs remain."
+    }
+  },
+  "manualVerification": [
+    "Install the same debug APK on three Android phones, grant the requested Nearby Devices/Bluetooth and location permissions, and enable mesh relay on all three.",
+    "Record the three Node IDs. Place A and C out of direct radio range while A-B and B-C remain connected. Confirm A does not have a direct route to C.",
+    "Send a unique short text from A to C. Confirm C receives exactly one copy, A receives a delivery acknowledgement, and message diagnostics show the relay path/hop count through B.",
+    "Keep the A-B GATT connection active until the BLE discovery entry has aged out, then send another unique message through B. Confirm it still reaches C; this exercises retained predecessor identity after the live scan snapshot expires.",
+    "Repeat with Wi-Fi Direct disabled where supported to exercise BLE-only text relay, then with Wi-Fi Direct enabled to exercise health-based transport selection and fallback.",
+    "Transfer a supported attachment across the same route and verify the destination can open the complete file and that its reported size or hash matches the source.",
+    "Capture timestamps, Android versions, phone models, Node IDs, and app diagnostics/logs for any failed hop."
+  ]
+}

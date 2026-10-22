@@ -7,6 +7,7 @@ import com.hybridmesh.relay.ble.BleConstants
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.data.NodeIdGenerator
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
+import com.hybridmesh.relay.messaging.mesh.MeshPacketCodec
 import com.hybridmesh.relay.messaging.attachment.AttachmentDescriptor
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
@@ -104,17 +105,17 @@ class MessagingRepository private constructor(context: Context) {
     private fun normalizeNodeId(nodeId: String): String =
         nodeId.trim().lowercase().replaceFirst("hmr-", "HMR-")
 
-    suspend fun upsertPeer(peer: PeerEntity) = peers.upsert(peer)
+    suspend fun upsertPeer(peer: PeerEntity): Boolean = upsertPeerWithinLimit(peer)
 
     suspend fun getPeer(nodeId: String): PeerEntity? = peers.get(normalizeNodeId(nodeId))
 
-    suspend fun ensurePeer(nodeId: String) {
+    suspend fun ensurePeer(nodeId: String): Boolean {
         val normalized = normalizeNodeId(nodeId)
         val localNodeId = identityStore.getIdentity().nodeId
-        if (normalized.equals(localNodeId, ignoreCase = true)) return
+        if (normalized.equals(localNodeId, ignoreCase = true)) return true
 
         if (peers.get(normalized) == null) {
-            peers.upsert(
+            return upsertPeerWithinLimit(
                 PeerEntity(
                     nodeId = normalized,
                     displayName = normalized,
@@ -128,12 +129,14 @@ class MessagingRepository private constructor(context: Context) {
                 )
             )
         }
+        return true
     }
 
-    suspend fun savePeerForChat(nodeId: String) {
+    suspend fun savePeerForChat(nodeId: String): Boolean {
         val normalized = normalizeNodeId(nodeId)
-        ensurePeer(normalized)
+        if (!ensurePeer(normalized)) return false
         peers.saveForChat(normalized)
+        return peers.get(normalized)?.isSavedForChat == true
     }
 
     suspend fun updateDiscoveredPeer(peer: BlePeer) {
@@ -159,7 +162,7 @@ class MessagingRepository private constructor(context: Context) {
             else -> normalized
         }
 
-        peers.upsert(
+        upsertPeerWithinLimit(
             PeerEntity(
                 nodeId = normalized,
                 displayName = name,
@@ -192,7 +195,7 @@ class MessagingRepository private constructor(context: Context) {
             .takeIf { it.isNotBlank() && !it.equals(normalized, ignoreCase = true) }
             ?: existing?.displayName
             ?: normalized
-        peers.upsert(
+        upsertPeerWithinLimit(
             PeerEntity(
                 nodeId = normalized,
                 displayName = name,
@@ -219,7 +222,7 @@ class MessagingRepository private constructor(context: Context) {
         val normalized = normalizeNodeId(nodeId)
         val existing = peers.get(normalized)
 
-        peers.upsert(
+        upsertPeerWithinLimit(
             PeerEntity(
                 nodeId = normalized,
                 displayName = displayName.trim().takeIf { it.isNotBlank() } ?: existing?.displayName ?: normalized,
@@ -237,7 +240,13 @@ class MessagingRepository private constructor(context: Context) {
 
     suspend fun addIncoming(record: MessageRecordEntity): Boolean {
         require(!record.senderNodeId.equals(identityStore.getIdentity().nodeId, ignoreCase = true))
-        val inserted = messages.insertIncoming(record) != -1L
+        val localNodeId = identityStore.getIdentity().nodeId
+        val inserted = database.withTransaction {
+            if (messages.getById(record.messageId) != null || !hasRemoteMessageCapacity(localNodeId, record)) {
+                return@withTransaction false
+            }
+            messages.insertIncoming(record) != -1L
+        }
         if (inserted) ensurePeer(record.senderNodeId)
         return inserted
     }
@@ -248,9 +257,10 @@ class MessagingRepository private constructor(context: Context) {
         messageType: String
     ): MessageRecordEntity {
         val cleanRecipient = normalizeNodeId(recipientNodeId)
-        require(content.isNotBlank())
-        require(content.toByteArray(Charsets.UTF_8).size <= 12 * 1024) {
-            "content exceeds mesh payload limit"
+        val cleanContent = content.trim()
+        require(cleanContent.isNotBlank())
+        require(cleanContent.toByteArray(Charsets.UTF_8).size <= MeshPacketCodec.MAX_TEXT_BYTES) {
+            "Message exceeds the ${MeshPacketCodec.MAX_TEXT_BYTES / 1024} KiB mesh payload limit."
         }
         require(NodeIdGenerator.isValid(cleanRecipient))
         require(!cleanRecipient.equals(identityStore.getIdentity().nodeId, ignoreCase = true))
@@ -263,7 +273,7 @@ class MessagingRepository private constructor(context: Context) {
             messageId = messageId,
             senderNodeId = identityStore.getIdentity().nodeId,
             recipientNodeId = cleanRecipient,
-            content = content.trim(),
+            content = cleanContent,
             createdAt = now,
             messageType = messageType,
             status = DeliveryStatus.QUEUED.name,
@@ -388,6 +398,9 @@ class MessagingRepository private constructor(context: Context) {
             if (existing?.status == AttachmentTransferStatus.DELIVERED && existing.localPath != null) {
                 return@withTransaction true
             }
+            if (!hasRemoteAttachmentCapacity(localNodeId, manifest.messageId, manifest.sizeBytes)) {
+                return@withTransaction false
+            }
             attachments.upsert(attachment)
             true
         }
@@ -416,6 +429,9 @@ class MessagingRepository private constructor(context: Context) {
                         !existing.sha256.equals(manifest.sha256, true) ||
                         !existing.mimeType.equals(manifest.mimeType, true)
                     )) return@withTransaction false
+            if (!hasRemoteAttachmentCapacity(localNodeId, manifest.messageId, manifest.sizeBytes)) {
+                return@withTransaction false
+            }
             if (isFinalRecipient && messages.getById(manifest.messageId) == null) {
                 val descriptor = AttachmentDescriptor(
                     messageId = manifest.messageId,
@@ -424,23 +440,24 @@ class MessagingRepository private constructor(context: Context) {
                     sizeBytes = manifest.sizeBytes,
                     sha256 = manifest.sha256.lowercase()
                 )
-                messages.insertIncoming(
-                    MessageRecordEntity(
-                        messageId = manifest.messageId,
-                        senderNodeId = manifest.senderNodeId,
-                        recipientNodeId = manifest.recipientNodeId,
-                        content = descriptor.encode(),
-                        createdAt = manifest.createdAt,
-                        messageType = MessageType.ATTACHMENT.name,
-                        status = DeliveryStatus.DELIVERED.name,
-                        lastTransport = transport,
-                        deliveredAt = now,
-                        attemptCount = 0,
-                        nextAttemptAt = null,
-                        lastError = null,
-                        deliveryHopCount = manifest.hopCount
-                    )
+                val incomingMessage = MessageRecordEntity(
+                    messageId = manifest.messageId,
+                    senderNodeId = manifest.senderNodeId,
+                    recipientNodeId = manifest.recipientNodeId,
+                    content = descriptor.encode(),
+                    createdAt = manifest.createdAt,
+                    messageType = MessageType.ATTACHMENT.name,
+                    status = DeliveryStatus.DELIVERED.name,
+                    lastTransport = transport,
+                    deliveredAt = now,
+                    attemptCount = 0,
+                    nextAttemptAt = null,
+                    lastError = null,
+                    deliveryHopCount = manifest.hopCount
                 )
+                if (!hasRemoteMessageCapacity(localNodeId, incomingMessage)) return@withTransaction false
+                messages.insertIncoming(incomingMessage)
+                if (messages.getById(manifest.messageId) == null) return@withTransaction false
             }
             attachments.upsert(
                 AttachmentRecordEntity(
@@ -488,7 +505,10 @@ class MessagingRepository private constructor(context: Context) {
 
     suspend fun expireAttachment(record: AttachmentRecordEntity) {
         val isOrigin = record.senderNodeId.equals(identityStore.getIdentity().nodeId, true)
-        if (!isOrigin) record.localPath?.let { runCatching { java.io.File(it).delete() } }
+        if (!isOrigin) {
+            record.localPath?.let { runCatching { java.io.File(it).delete() } }
+            AttachmentFileStore.deleteReceivedFiles(appContext, record.messageId)
+        }
         attachments.updateStatusAndPath(
             record.messageId,
             AttachmentTransferStatus.FAILED,
@@ -617,11 +637,40 @@ class MessagingRepository private constructor(context: Context) {
         record: MessageRecordEntity,
         attachment: AttachmentRecordEntity? = null
     ): DestinationAcceptance = database.withTransaction {
-        val firstPacket = seenPackets.insert(seen) != -1L
         val existing = messages.getById(record.messageId)
+        val localNodeId = identityStore.getIdentity().nodeId
+
+        if (existing == null && !hasRemoteMessageCapacity(localNodeId, record)) {
+            return@withTransaction DestinationAcceptance(
+                firstPacket = false,
+                insertedMessage = false,
+                messagePersisted = false,
+                deliveryHopCount = 0
+            )
+        }
+        if (attachment != null && attachments.get(attachment.messageId) == null &&
+            !hasRemoteAttachmentCapacity(localNodeId, attachment.messageId, attachment.sizeBytes)) {
+            return@withTransaction DestinationAcceptance(
+                firstPacket = false,
+                insertedMessage = false,
+                messagePersisted = false,
+                deliveryHopCount = 0
+            )
+        }
+        val firstPacket = seenPackets.insert(seen) != -1L
 
         if (existing != null) {
-            attachment?.let { attachments.insert(it) }
+            attachment?.let {
+                attachments.insert(it)
+                if (attachments.get(it.messageId) == null) {
+                    return@withTransaction DestinationAcceptance(
+                        firstPacket = firstPacket,
+                        insertedMessage = false,
+                        messagePersisted = false,
+                        deliveryHopCount = existing.deliveryHopCount ?: record.deliveryHopCount ?: 0
+                    )
+                }
+            }
             // A durable application record is the source of truth. A seen-cache
             // entry by itself must never be treated as proof of delivery.
             DestinationAcceptance(
@@ -636,11 +685,14 @@ class MessagingRepository private constructor(context: Context) {
             // makes the ACK decision depend on durable state, including races.
             val inserted = messages.insertIncoming(record) != -1L
             val persisted = messages.getById(record.messageId) != null
-            if (persisted) attachment?.let { attachments.insert(it) }
+            if (persisted) attachment?.let {
+                attachments.insert(it)
+            }
+            val attachmentPersisted = attachment == null || attachments.get(attachment.messageId) != null
             DestinationAcceptance(
                 firstPacket = firstPacket,
-                insertedMessage = inserted && persisted,
-                messagePersisted = persisted,
+                insertedMessage = inserted && persisted && attachmentPersisted,
+                messagePersisted = persisted && attachmentPersisted,
                 deliveryHopCount = record.deliveryHopCount ?: 0
             )
         }
@@ -801,6 +853,38 @@ class MessagingRepository private constructor(context: Context) {
         traceEvents.deleteExcess(MAX_TRACE_EVENTS)
     }
 
+    private suspend fun hasRemoteMessageCapacity(
+        localNodeId: String,
+        record: MessageRecordEntity
+    ): Boolean {
+        val contentBytes = record.content.toByteArray(Charsets.UTF_8).size
+        return MessageRetentionPolicy.allowsIncomingMessage(
+            retainedMessages = messages.countRemoteMessages(localNodeId),
+            retainedMessagesFromSender = messages.countRemoteMessagesFrom(localNodeId, record.senderNodeId),
+            retainedBytes = messages.countRemoteMessageBytes(localNodeId),
+            incomingBytes = contentBytes
+        )
+    }
+
+    private suspend fun hasRemoteAttachmentCapacity(
+        localNodeId: String,
+        messageId: String,
+        incomingBytes: Long
+    ): Boolean = MessageRetentionPolicy.allowsIncomingAttachment(
+        retainedAttachments = attachments.countRemoteAttachments(localNodeId, messageId),
+        retainedBytes = attachments.countRetainedRemoteAttachmentBytes(localNodeId, messageId),
+        incomingBytes = incomingBytes
+    )
+
+    private suspend fun upsertPeerWithinLimit(peer: PeerEntity): Boolean = database.withTransaction {
+        val existing = peers.get(peer.nodeId)
+        if (existing == null && peers.count() >= MAX_PERSISTED_PEERS && peers.deleteOldestUnsaved() == 0) {
+            return@withTransaction false
+        }
+        peers.upsert(peer)
+        true
+    }
+
     suspend fun deleteMessage(messageId: String) {
         traceEvents.deleteForMessage(messageId)
         attachments.get(messageId)?.localPath?.let { path -> runCatching { java.io.File(path).delete() } }
@@ -823,6 +907,11 @@ class MessagingRepository private constructor(context: Context) {
     }
 
     companion object {
+        const val MAX_PERSISTED_PEERS = MessageRetentionPolicy.MAX_PERSISTED_PEERS
+        const val MAX_RETAINED_REMOTE_MESSAGES = MessageRetentionPolicy.MAX_REMOTE_MESSAGES
+        const val MAX_RETAINED_REMOTE_MESSAGES_PER_SENDER = MessageRetentionPolicy.MAX_REMOTE_MESSAGES_PER_SENDER
+        const val MAX_RETAINED_REMOTE_MESSAGE_BYTES = MessageRetentionPolicy.MAX_REMOTE_MESSAGE_BYTES
+
         private const val TRACE_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_TRACE_EVENTS = 5_000
         private const val FORWARDING_LEASE_TIMEOUT_MS = 90_000L

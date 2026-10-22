@@ -10,6 +10,7 @@ import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.MessagingManager
 import com.hybridmesh.relay.messaging.mesh.MeshPeer
 import com.hybridmesh.relay.messaging.mesh.MeshRuntimeSnapshot
+import com.hybridmesh.relay.messaging.mesh.MeshPacketCodec
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.AttachmentRecordEntity
 import com.hybridmesh.relay.messaging.data.MessageTraceEventEntity
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -206,8 +208,11 @@ class MessagesViewModel(
                     )
 
                 else -> {
-                    repository.savePeerForChat(nodeId)
-                    onResult(true, nodeId)
+                    if (repository.savePeerForChat(nodeId)) {
+                        onResult(true, nodeId)
+                    } else {
+                        onResult(false, "The saved peer limit has been reached. Remove an unused peer before adding another.")
+                    }
                 }
             }
         }
@@ -217,7 +222,7 @@ class MessagesViewModel(
         peerNodeId: String,
         content: String,
         type: MessageType,
-        onDone: () -> Unit = {}
+        onResult: (Boolean, String?) -> Unit = { _, _ -> }
     ) {
         val nodeId = peerNodeId
             .trim()
@@ -230,13 +235,20 @@ class MessagesViewModel(
             nodeId.equals(localNodeId, ignoreCase = true)
         ) return
 
+        if (message.toByteArray(Charsets.UTF_8).size > MeshPacketCodec.MAX_TEXT_BYTES) {
+            onResult(false, "Messages can contain up to ${MeshPacketCodec.MAX_TEXT_BYTES / 1024} KiB of UTF-8 text.")
+            return
+        }
+
         viewModelScope.launch {
-            repository.addOutgoing(
-                message,
-                nodeId,
-                type.name
-            )
-            onDone()
+            try {
+                repository.addOutgoing(message, nodeId, type.name)
+                onResult(true, null)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                onResult(false, "The message could not be saved. Please try again.")
+            }
         }
     }
 
