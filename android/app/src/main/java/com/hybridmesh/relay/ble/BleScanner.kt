@@ -61,6 +61,7 @@ class BleScanner(
 
     /** Restarts only the Android scan registration while preserving peers and session counters. */
     @Synchronized
+    @SuppressLint("MissingPermission") // The permission is rechecked immediately before stopScan.
     fun restartScanningPreservingResults(): Boolean {
         if (_state.value != BleOperationState.ACTIVE || !scanning) return false
 
@@ -68,7 +69,7 @@ class BleScanner(
         generation.incrementAndGet()
         scanning = false
         _state.value = BleOperationState.STOPPING
-        if (oldCallback != null) {
+        if (oldCallback != null && hasScanPermission()) {
             runCatching { bluetoothAdapter?.bluetoothLeScanner?.stopScan(oldCallback) }
         }
         activeCallback = null

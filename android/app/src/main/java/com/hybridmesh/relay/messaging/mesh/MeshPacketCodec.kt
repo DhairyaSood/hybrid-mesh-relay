@@ -43,7 +43,7 @@ object MeshPacketCodec {
     private const val FIXED_HEADER_BYTES = 2 + 1 + 1 + 16 + 16 + 16 + 2 + 2 + 2 + 1 + 1 + 1 + 8 + 8
     private const val MIN_BYTES = FIXED_HEADER_BYTES + 4
     const val MAX_PACKET_BYTES = 16 * 1024
-    private const val MAX_TEXT_BYTES = 12 * 1024
+    const val MAX_TEXT_BYTES = 12 * 1024
     const val INITIAL_TTL = 8
     private const val MAX_TTL_WIRE = 32
 

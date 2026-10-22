@@ -58,6 +58,7 @@ fun ComposeMessageScreen(
     var priority by remember {
         mutableStateOf(Priority.NORMAL)
     }
+    var sendError by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = Modifier
@@ -107,6 +108,7 @@ fun ComposeMessageScreen(
             value = messageText,
             onValueChange = {
                 messageText = it
+                sendError = null
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -117,6 +119,10 @@ fun ComposeMessageScreen(
             shape = RoundedCornerShape(14.dp),
             maxLines = 6
         )
+
+        sendError?.let { error ->
+            Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
 
         Text(
             text = "PRIORITY",
@@ -175,7 +181,9 @@ fun ComposeMessageScreen(
                     peerNodeId = recipient,
                     content = messageText,
                     type = type,
-                    onDone = onMessageSent
+                    onResult = { success, error ->
+                        if (success) onMessageSent() else sendError = error
+                    }
                 )
             },
             enabled = recipient.isNotBlank() && messageText.isNotBlank(),

@@ -14,6 +14,12 @@ interface PeerDao {
     @Query("SELECT * FROM mesh_peers WHERE nodeId = :nodeId LIMIT 1")
     suspend fun get(nodeId: String): PeerEntity?
 
+    @Query("SELECT COUNT(*) FROM mesh_peers")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM mesh_peers WHERE nodeId = (SELECT nodeId FROM mesh_peers WHERE isSavedForChat = 0 ORDER BY COALESCE(lastSeenAt, 0) ASC, nodeId ASC LIMIT 1)")
+    suspend fun deleteOldestUnsaved(): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(peer: PeerEntity)
 

@@ -20,6 +20,12 @@ interface AttachmentDao {
     @Query("SELECT * FROM mesh_attachments WHERE messageId = :messageId LIMIT 1")
     suspend fun get(messageId: String): AttachmentRecordEntity?
 
+    @Query("SELECT COUNT(*) FROM mesh_attachments WHERE UPPER(senderNodeId) != UPPER(:localNodeId) AND messageId != :excludedMessageId")
+    suspend fun countRemoteAttachments(localNodeId: String, excludedMessageId: String): Int
+
+    @Query("SELECT COALESCE(SUM(sizeBytes), 0) FROM mesh_attachments WHERE UPPER(senderNodeId) != UPPER(:localNodeId) AND messageId != :excludedMessageId AND status != 'RELAYED'")
+    suspend fun countRetainedRemoteAttachmentBytes(localNodeId: String, excludedMessageId: String): Long
+
     @Query("SELECT * FROM mesh_attachments WHERE messageId = :messageId LIMIT 1")
     fun observe(messageId: String): Flow<AttachmentRecordEntity?>
 

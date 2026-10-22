@@ -73,7 +73,8 @@ class BleGattServer(context: Context) {
         const val MESH_ATTACHMENT_ACCEPTANCE_TIMEOUT_MS = 15_000L
         const val ASSEMBLY_TIMEOUT_MS = 15_000L
         const val ASSEMBLY_CLEANUP_INTERVAL_MS = 5_000L
-        const val MAX_CONCURRENT_ASSEMBLIES = 32
+        const val MAX_CONCURRENT_ASSEMBLIES = 4
+        const val MAX_ASSEMBLIES_PER_DEVICE = 2
         const val MAX_CONCURRENT_MESH_PROCESSING = 8
     }
 
@@ -500,11 +501,28 @@ class BleGattServer(context: Context) {
             return
         }
 
-        val assembly = assemblies.computeIfAbsent(key) {
-            Assembly(
-                transferId = frame.transferId,
-                chunkCount = frame.chunkCount
+        val assembly = synchronized(assemblies) {
+            assemblies[key] ?: run {
+                val deviceAssemblyCount = assemblies.keys.count { it.startsWith("$address|") }
+                if (assemblies.size >= MAX_CONCURRENT_ASSEMBLIES ||
+                    deviceAssemblyCount >= MAX_ASSEMBLIES_PER_DEVICE) {
+                    null
+                } else {
+                    Assembly(
+                        transferId = frame.transferId,
+                        chunkCount = frame.chunkCount
+                    ).also { assemblies[key] = it }
+                }
+            }
+        }
+        if (assembly == null) {
+            sendAck(
+                device,
+                frame.transferId,
+                accepted = false,
+                rejection = BleAttachmentRejection.ASSEMBLY_LIMIT
             )
+            return
         }
 
         if (assembly.chunkCount != frame.chunkCount) {

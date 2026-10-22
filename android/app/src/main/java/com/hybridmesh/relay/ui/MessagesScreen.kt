@@ -147,7 +147,7 @@ fun MessagesScreen(
             title = { Text("ADD NODE") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Add a Node ID to create its chat now. You can send messages while the node is away; they stay queued until it comes in range.")
+                    Text("Add a Node ID to create its chat now. Messages queue while the node is away and expire if they are not delivered within 30 minutes.")
                     TextField(
                         value = nodeIdInput,
                         onValueChange = { nodeIdInput = it.uppercase() },

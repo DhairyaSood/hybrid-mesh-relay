@@ -75,7 +75,7 @@ fun MessageDiagnosticsDialog(
         DeliveryStatus.DELIVERED.name -> "Delivered"
         DeliveryStatus.IN_FLIGHT.name -> "Sending"
         DeliveryStatus.QUEUED.name -> "Queued"
-        DeliveryStatus.FAILED.name -> "Failed"
+        DeliveryStatus.FAILED.name -> if (message.lastError == "DELIVERY_EXPIRED") "Expired" else "Failed"
         else -> message.status.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
     }
     val created = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM).format(Date(message.createdAt))

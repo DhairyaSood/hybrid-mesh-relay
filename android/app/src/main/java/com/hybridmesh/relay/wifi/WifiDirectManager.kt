@@ -332,10 +332,10 @@ class WifiDirectManager(
     fun isDiscoveryActive(): Boolean =
         isStarted() && serviceRequest != null && serviceDiscoveryActive
     fun isAvailable(): Boolean = transportPreferences.selection.value.wifiDirectEnabled &&
-        started && sessions.isNotEmpty()
+        started && sessions.values.any { it.probeFailurePolicy.isHealthy }
     fun connectedPeerCount(): Int = sessions.size
     fun hasPeer(nodeId: String): Boolean = transportPreferences.selection.value.wifiDirectEnabled &&
-        started && sessions.containsKey(normalize(nodeId))
+        started && sessions[normalize(nodeId)]?.probeFailurePolicy?.isHealthy == true
 
     private fun publishRuntimeState(
         stage: WifiDirectStage,
@@ -376,7 +376,9 @@ class WifiDirectManager(
     suspend fun sendToPeer(nodeId: String, payload: ByteArray): Boolean {
         if (!transportPreferences.selection.value.wifiDirectEnabled || !started) return false
         if (payload.isEmpty() || payload.size > MeshPacketCodec.MAX_PACKET_BYTES) return false
-        return sessions[normalize(nodeId)]?.send(payload, transferIds.incrementAndGet()) ?: false
+        val session = sessions[normalize(nodeId)] ?: return false
+        if (!session.probeFailurePolicy.isHealthy) return false
+        return session.send(payload, transferIds.incrementAndGet())
     }
 
     /** Sends a file on a separate bounded TCP port; the mesh packet codec is untouched. */
@@ -1176,8 +1178,11 @@ class WifiDirectManager(
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun requestGroupInfo(current: WifiP2pManager.Channel) {
-        if (!started || !groupFormed) return
+        // Keep the runtime permission gate beside the platform call; lint cannot
+        // infer the target-SDK-aware permission check in PermissionManager.
+        if (!started || !groupFormed || !hasRequiredPermissions()) return
         runCatching {
             manager?.requestGroupInfo(current) { group ->
                 if (channel !== current || !started || !groupFormed) return@requestGroupInfo
@@ -1555,6 +1560,9 @@ class WifiDirectManager(
                             ((System.nanoTime() - startedAt) / 1_000_000L).coerceAtLeast(0L),
                             success
                         )
+                        if (peerSession.probeFailurePolicy.record(success)) {
+                            peerSession.close(notify = true)
+                        }
                     }
                     delay(10_000L)
                 }
@@ -1575,6 +1583,7 @@ class WifiDirectManager(
         private val pendingAcks = ConcurrentHashMap<Long, CompletableDeferred<Boolean>>()
         private val sendSlots = Semaphore(MAX_CONCURRENT_SENDS_PER_SESSION)
         private val packetWorkers = Semaphore(MAX_CONCURRENT_RECEIVE_PACKETS)
+        val probeFailurePolicy = ProbeFailurePolicy(PROBE_FAILURES_BEFORE_INVALIDATION)
         @Volatile private var readerJob: Job? = null
 
         fun startReader() {
@@ -1863,6 +1872,7 @@ class WifiDirectManager(
         private const val SERVER_BACKLOG = 8
         private const val MAX_DEVICE_NAME_CHARS = 64
         private const val MAX_CONCURRENT_RECEIVE_PACKETS = 4
+        private const val PROBE_FAILURES_BEFORE_INVALIDATION = 2
         private const val MAX_CONCURRENT_HANDSHAKES = 4
         private const val MAX_WIFI_SESSIONS = 8
         private const val MAX_DISCOVERED_SERVICE_DEVICES = 64

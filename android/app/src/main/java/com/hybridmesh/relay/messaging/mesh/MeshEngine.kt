@@ -264,7 +264,11 @@ class MeshEngine(context: Context) {
         if (BleAttachmentFrameCodec.isFrame(payload)) {
             return onBleAttachmentFrame(address, payload) is BleAttachmentReceiveResult.Accepted
         }
-        val sourceNodeId = peerDirectory.findLiveNodeIdByBleAddress(address)
+        // A GATT connection can remain active after its discovery advertisement
+        // ages out of the live route snapshot. Preserve the predecessor identity
+        // for this bounded ingress window so the relay excludes the same node's
+        // other bearer when selecting its next hop.
+        val sourceNodeId = peerDirectory.findNodeIdByBleAddress(address)
         return onTransportPacket(
             sourceNodeId = sourceNodeId,
             sourceAddress = address,
@@ -1579,9 +1583,7 @@ class MeshEngine(context: Context) {
                                 nextHop.nodeId, manifest, file,
                                 onProgress = { sent ->
                                     latestTransferredBytes = sent
-                                    val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
-                                        AttachmentRateWindow(System.nanoTime(), sent)
-                                    }
+                                    val rateWindow = attachmentRateWindow(attachment.messageId, sent)
                                     publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
                                     repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
                                 }
@@ -1606,9 +1608,7 @@ class MeshEngine(context: Context) {
                                 immediateHopSenderNodeId = identityStore.getIdentity().nodeId,
                                 onProgress = { sent ->
                                     latestTransferredBytes = sent
-                                    val rateWindow = attachmentRateWindows.getOrPut(attachment.messageId) {
-                                        AttachmentRateWindow(System.nanoTime(), sent)
-                                    }
+                                    val rateWindow = attachmentRateWindow(attachment.messageId, sent)
                                     publishAttachmentThroughput(sent, rateWindow, active = sent < attachment.sizeBytes, transport = transport)
                                     repository.updateAttachmentProgress(attachment.messageId, AttachmentTransferStatus.SENDING, sent)
                                 }
@@ -1699,8 +1699,13 @@ class MeshEngine(context: Context) {
             isExpired(manifest.createdAt, System.currentTimeMillis())) return null
         val resumeOffset = AttachmentFileStore.prepareReceive(appContext, manifest) ?: return null
         val finalPath = AttachmentFileStore.receivedFile(appContext, manifest.messageId).absolutePath
-        if (!repository.prepareIncomingAttachment(manifest, finalPath, resumeOffset, sourceNodeId, localCanRelay = true)) return null
-        attachmentRateWindows[manifest.messageId] = AttachmentRateWindow(System.nanoTime(), resumeOffset)
+        if (!repository.prepareIncomingAttachment(manifest, finalPath, resumeOffset, sourceNodeId, localCanRelay = true)) {
+            if (repository.getAttachment(manifest.messageId) == null) {
+                AttachmentFileStore.deleteReceivedFiles(appContext, manifest.messageId)
+            }
+            return null
+        }
+        attachmentRateWindow(manifest.messageId, resumeOffset)
         return resumeOffset
     }
 
@@ -1758,12 +1763,13 @@ class MeshEngine(context: Context) {
                     !existing.sha256.equals(manifest.sha256, true) ||
                     !existing.mimeType.equals(manifest.mimeType, true)
                 )
+            if (existing == null) AttachmentFileStore.deleteReceivedFiles(appContext, manifest.messageId)
             return BleAttachmentReceiveResult.Rejected(
                 if (conflicts) BleAttachmentRejection.ATTACHMENT_METADATA_CONFLICT
                 else BleAttachmentRejection.STORAGE_UNAVAILABLE
             )
         }
-        attachmentRateWindows[manifest.messageId] = AttachmentRateWindow(System.nanoTime(), resumeOffset)
+        attachmentRateWindow(manifest.messageId, resumeOffset)
         return BleAttachmentReceiveResult.Accepted(resumeOffset)
     }
 
@@ -1786,9 +1792,7 @@ class MeshEngine(context: Context) {
             AttachmentTransferStatus.RECEIVING,
             nextOffset
         )
-        val rateWindow = attachmentRateWindows.getOrPut(manifest.messageId) {
-            AttachmentRateWindow(System.nanoTime(), offset)
-        }
+        val rateWindow = attachmentRateWindow(manifest.messageId, offset)
         publishAttachmentThroughput(nextOffset, rateWindow, active = nextOffset < manifest.sizeBytes, transport = transport)
         return nextOffset
     }
@@ -1822,6 +1826,20 @@ class MeshEngine(context: Context) {
         }
         return completed
     }
+
+    private fun attachmentRateWindow(messageId: String, initialBytes: Long): AttachmentRateWindow =
+        synchronized(attachmentRateWindows) {
+            attachmentRateWindows[messageId] ?: run {
+                if (attachmentRateWindows.size >= MAX_ATTACHMENT_RATE_WINDOWS) {
+                    attachmentRateWindows.entries.minByOrNull { it.value.startedAtNanos }?.let { oldest ->
+                        attachmentRateWindows.remove(oldest.key, oldest.value)
+                    }
+                }
+                AttachmentRateWindow(System.nanoTime(), initialBytes).also {
+                    attachmentRateWindows[messageId] = it
+                }
+            }
+        }
 
     private fun AttachmentRecordEntity.toAttachmentManifest() = AttachmentTransferManifest(
         messageId = messageId,
@@ -2054,6 +2072,7 @@ class MeshEngine(context: Context) {
         private const val MAX_FORWARD_BATCH = 16
         private const val MAX_CONCURRENT_FORWARD_PACKETS = 4
         private const val MAX_TRACKED_RECEIVE_TIMESTAMPS = 1_024
+        private const val MAX_ATTACHMENT_RATE_WINDOWS = 128
         private const val BLE_INGRESS_BINDING_RETENTION_MS = 60 * 60 * 1_000L
         private const val MAX_BLE_INGRESS_BINDINGS = 128
         private const val ATTACHMENT_RETRY_MS = 15_000L

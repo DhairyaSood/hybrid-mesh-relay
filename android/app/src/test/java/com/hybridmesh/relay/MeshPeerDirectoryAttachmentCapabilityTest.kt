@@ -3,6 +3,7 @@ package com.hybridmesh.relay
 import com.hybridmesh.relay.ble.BlePeer
 import com.hybridmesh.relay.messaging.mesh.MeshPeerDirectory
 import com.hybridmesh.relay.model.NodeType
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -43,5 +44,32 @@ class MeshPeerDirectoryAttachmentCapabilityTest {
         directory.replaceBlePeers(emptyList())
 
         assertFalse(directory.findByNodeId(peerId)!!.toTransportPeer().bleSupportsAttachmentHopIdentity)
+    }
+
+    @Test
+    fun ingressIdentitySurvivesLivePeerExpiryForAnActiveGattConnection() {
+        val peerId = "HMR-11111111-1111-1111-1111-111111111111"
+        val address = "AA:BB:CC:DD:EE:FF"
+        val directory = MeshPeerDirectory()
+        directory.replaceBlePeers(
+            listOf(
+                BlePeer(
+                    nodeId = peerId,
+                    deviceName = "Relay",
+                    deviceType = NodeType.RELAY,
+                    address = address,
+                    rssi = -50,
+                    lastSeen = System.currentTimeMillis(),
+                    meshProtocolVersion = 2,
+                    canRelay = true,
+                    canStoreForward = true
+                )
+            )
+        )
+
+        directory.replaceBlePeers(emptyList())
+
+        assertEquals(peerId, directory.findNodeIdByBleAddress(address))
+        assertEquals(null, directory.findLiveNodeIdByBleAddress(address))
     }
 }
