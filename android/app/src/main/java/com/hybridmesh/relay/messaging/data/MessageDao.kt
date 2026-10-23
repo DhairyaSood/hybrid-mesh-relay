@@ -49,6 +49,12 @@ interface MessageDao {
     @Query("SELECT COALESCE(SUM(length(CAST(content AS BLOB))), 0) FROM mesh_messages WHERE UPPER(senderNodeId) != UPPER(:localNodeId)")
     suspend fun countRemoteMessageBytes(localNodeId: String): Long
 
+    @Query("SELECT * FROM mesh_messages WHERE UPPER(senderNodeId) != UPPER(:localNodeId) AND status IN ('DELIVERED', 'FAILED') AND createdAt < :cutoff AND NOT EXISTS (SELECT 1 FROM mesh_attachments a WHERE a.messageId = mesh_messages.messageId) AND NOT EXISTS (SELECT 1 FROM mesh_forwarding f WHERE f.messageId = mesh_messages.messageId AND f.state IN ('PENDING', 'FORWARDING')) ORDER BY createdAt ASC LIMIT :limit")
+    suspend fun getExpiredRemoteHistory(localNodeId: String, cutoff: Long, limit: Int): List<MessageRecordEntity>
+
+    @Query("DELETE FROM mesh_messages WHERE messageId = :messageId AND UPPER(senderNodeId) != UPPER(:localNodeId) AND status IN ('DELIVERED', 'FAILED') AND createdAt < :cutoff AND NOT EXISTS (SELECT 1 FROM mesh_attachments a WHERE a.messageId = mesh_messages.messageId) AND NOT EXISTS (SELECT 1 FROM mesh_forwarding f WHERE f.messageId = mesh_messages.messageId AND f.state IN ('PENDING', 'FORWARDING'))")
+    suspend fun deleteExpiredRemoteHistory(messageId: String, localNodeId: String, cutoff: Long): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(message: MessageRecordEntity)
 

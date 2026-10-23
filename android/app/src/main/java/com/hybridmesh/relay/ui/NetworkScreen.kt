@@ -227,7 +227,7 @@ private fun Overview(
             item {
                 SectionCard("WI-FI DIRECT DISCOVERY CANDIDATES") {
                     mesh.wifiDirectCandidates.forEach { candidate ->
-                        MetricLine(candidate.deviceName, candidate.decision, "version ${candidate.protocolVersion ?: "pending"} · ${java.text.DateFormat.getTimeInstance().format(java.util.Date(candidate.lastSeen))}")
+                        MetricLine(candidate.deviceName, if (candidate.attemptInProgress) "IN PROGRESS · ${candidate.decision}" else candidate.decision, "version ${candidate.protocolVersion ?: "pending"} · ${java.text.DateFormat.getTimeInstance().format(java.util.Date(candidate.lastSeen))}")
                     }
                 }
             }
@@ -538,7 +538,21 @@ private fun DiagnoseNetworkDialog(
                             Text("DISCOVERED CANDIDATES", color = RelayTextMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                             DiagnosticListScroller(mesh.wifiDirectCandidates.size) {
                                 mesh.wifiDirectCandidates.asReversed().forEach { candidate ->
-                                    MetricLine(candidate.deviceName, candidate.decision, "${candidate.deviceAddress} · protocol ${candidate.protocolVersion ?: "pending"} · seen ${ageLabel(candidate.lastSeen)} ago")
+                                    MetricLine(candidate.deviceName, if (candidate.attemptInProgress) "IN PROGRESS · ${candidate.decision}" else candidate.decision, "${candidate.deviceAddress} · protocol ${candidate.protocolVersion ?: "pending"} · seen ${ageLabel(candidate.lastSeen)} ago")
+                                }
+                            }
+                        }
+                        if (mesh.wifiDirectPeers.isNotEmpty()) {
+                            Text("PEER SESSION HEALTH", color = RelayTextMuted, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                            DiagnosticListScroller(mesh.wifiDirectPeers.size) {
+                                mesh.wifiDirectPeers.forEach { peer ->
+                                    val duration = peer.latestAttemptDurationMs?.let { " · last attempt ${it} ms" }.orEmpty()
+                                    val failure = peer.lastFailureReason?.let { " · last failure $it" }.orEmpty()
+                                    MetricLine(
+                                        peer.deviceName.ifBlank { peer.nodeId },
+                                        "${peer.groupRole} · ${peer.connectionStage}",
+                                        "${peer.nodeId} · TCP ${if (peer.tcpSessionHealthy) "healthy" else "unavailable"} · route ${if (peer.routeEligible) "eligible" else "not eligible"}$duration$failure"
+                                    )
                                 }
                             }
                         }

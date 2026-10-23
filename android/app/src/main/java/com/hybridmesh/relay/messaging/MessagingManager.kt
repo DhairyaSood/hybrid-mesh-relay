@@ -71,6 +71,9 @@ class MessagingManager private constructor(context: Context) {
         gattServer.setAttachmentReceiver { device, payload ->
             meshEngine.onBleAttachmentFrame(device, payload)
         }
+        gattServer.setConnectionStateReceiver { address, connectionId, connected ->
+            meshEngine.onBleGattConnectionChanged(address, connectionId, connected)
+        }
 
         jobs += scope.launch {
             var success = false
@@ -162,9 +165,10 @@ class MessagingManager private constructor(context: Context) {
         started = false
         jobs.forEach(Job::cancel)
         jobs.clear()
+        gattServer.stop()
         gattServer.setPacketReceiver(null)
         gattServer.setAttachmentReceiver(null)
-        gattServer.stop()
+        gattServer.setConnectionStateReceiver(null)
         meshEngine.stop()
         networkManager.setGattServerReady(false)
         _transport.value = GattTransportSnapshot()

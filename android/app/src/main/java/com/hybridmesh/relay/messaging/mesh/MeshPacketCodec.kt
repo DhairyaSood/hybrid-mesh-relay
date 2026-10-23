@@ -26,7 +26,8 @@ data class MeshPacket(
 ) {
     enum class PacketType(val code: Byte) {
         DATA(1),
-        DELIVERY_ACK(2)
+        DELIVERY_ACK(2),
+        ATTACHMENT_ACK(3)
     }
 
 }
@@ -58,6 +59,9 @@ object MeshPacketCodec {
         require(content.size <= MAX_TEXT_BYTES) { "mesh payload too large" }
         require(wireVersionNumber in 1..PROTOCOL_VERSION) { "unsupported wire version" }
         require(wireVersionNumber != 1 || packet.routeTransportCodes.isEmpty()) { "legacy packets cannot carry route trace" }
+        require(wireVersionNumber != 1 || packet.packetType != MeshPacket.PacketType.ATTACHMENT_ACK) {
+            "ATTACHMENT_ACK requires trace-capable mesh peers"
+        }
         require(packet.routeTransportCodes.size <= INITIAL_TTL + 1) { "route trace exceeds hop budget" }
         require(packet.routeTransportCodes.all { it in 1..3 }) { "unknown route transport code" }
         require(packet.ttl in 0..MAX_TTL_WIRE) { "ttl out of range" }
@@ -91,6 +95,20 @@ object MeshPacketCodec {
                 }
                 require(!packet.routeTraceComplete || packet.routeTransportCodes.size == packet.deliveryHopCount + 1) {
                     "complete DELIVERY_ACK route must contain one transport per delivered link"
+                }
+            }
+            MeshPacket.PacketType.ATTACHMENT_ACK -> {
+                require(packet.messageType == ATTACHMENT_ACK_TYPE) {
+                    "ATTACHMENT_ACK packet has invalid messageType"
+                }
+                require(packet.content.matches(ATTACHMENT_SHA256_PATTERN)) {
+                    "ATTACHMENT_ACK requires the verified attachment SHA-256"
+                }
+                require(packet.deliveryHopCount == null) {
+                    "ATTACHMENT_ACK cannot contain deliveryHopCount"
+                }
+                require(!packet.routeTraceComplete || packet.routeTransportCodes.size == packet.hopCount) {
+                    "complete ATTACHMENT_ACK route must contain one transport per prior hop"
                 }
             }
         }
@@ -241,6 +259,15 @@ object MeshPacketCodec {
                     if (wireVersion == VERSION_2 && decodedPacket.routeTraceComplete &&
                         decodedPacket.routeTransportCodes.size != decodedPacket.deliveryHopCount + 1) return null
                 }
+                MeshPacket.PacketType.ATTACHMENT_ACK -> {
+                    if (wireVersion == VERSION_1 ||
+                        decodedPacket.messageType != ATTACHMENT_ACK_TYPE ||
+                        !decodedPacket.content.matches(ATTACHMENT_SHA256_PATTERN) ||
+                        decodedPacket.deliveryHopCount != null
+                    ) return null
+                    if (wireVersion == VERSION_2 && decodedPacket.routeTraceComplete &&
+                        decodedPacket.routeTransportCodes.size != decodedPacket.hopCount) return null
+                }
             }
             decodedPacket
         }.getOrNull()
@@ -253,6 +280,9 @@ object MeshPacketCodec {
 
     fun stableDeliveryAckPacketId(messageId: String): String =
         "HMR-${UUID.nameUUIDFromBytes((messageId + "::DELIVERY_ACK").toByteArray(Charsets.UTF_8))}"
+
+    fun stableAttachmentAckPacketId(messageId: String): String =
+        "HMR-${UUID.nameUUIDFromBytes((messageId + "::ATTACHMENT_ACK").toByteArray(Charsets.UTF_8))}"
 
     fun newTransferId(): Long = UUID.randomUUID().leastSignificantBits
 
@@ -275,4 +305,7 @@ object MeshPacketCodec {
     private fun writeLong(stream: ByteArrayOutputStream, value: Long) {
         ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(value).array().forEach { stream.write(it.toInt()) }
     }
+
+    const val ATTACHMENT_ACK_TYPE = "ATTACHMENT_ACK"
+    private val ATTACHMENT_SHA256_PATTERN = Regex("[0-9a-fA-F]{64}")
 }

@@ -13,14 +13,22 @@ import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
 import com.hybridmesh.relay.messaging.attachment.AttachmentFileStore
 import com.hybridmesh.relay.model.MessageType
+import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.Flow
 
-class MessagingRepository private constructor(context: Context) {
+class MessagingRepository internal constructor(
+    context: Context,
+    databaseOverride: MessagingDatabase? = null,
+    localNodeIdOverride: (() -> String)? = null
+) {
     private val appContext = context.applicationContext
-    private val identityStore = IdentityStore.getInstance(appContext)
-    private val database = MessagingDatabase.getInstance(appContext)
+    private val identityStore = RepositoryIdentityProvider(
+        delegate = IdentityStore.getInstance(appContext),
+        nodeIdOverride = localNodeIdOverride
+    )
+    private val database = databaseOverride ?: MessagingDatabase.getInstance(appContext)
     private val peers = database.peerDao()
     private val messages = database.messageDao()
     private val forwarding = database.meshForwardingDao()
@@ -28,6 +36,15 @@ class MessagingRepository private constructor(context: Context) {
     private val traceEvents = database.messageTraceEventDao()
     private val attachments = database.attachmentDao()
     private val tracePurgeCounter = AtomicInteger(0)
+
+    private class RepositoryIdentityProvider(
+        private val delegate: IdentityStore,
+        private val nodeIdOverride: (() -> String)?
+    ) {
+        fun getIdentity() = delegate.getIdentity().let { identity ->
+            nodeIdOverride?.invoke()?.let { nodeId -> identity.copy(nodeId = nodeId) } ?: identity
+        }
+    }
 
     val allMessages: Flow<List<MessageRecordEntity>> = messages.observeAll()
 
@@ -56,7 +73,35 @@ class MessagingRepository private constructor(context: Context) {
     }
 
     suspend fun resetInterruptedAttachmentTransfers() {
-        attachments.resetInterruptedTransfers(System.currentTimeMillis())
+        attachments.resetInterruptedTransfers()
+    }
+
+    suspend fun cleanupStaleAttachmentTransfers(now: Long = System.currentTimeMillis()) {
+        val staleBefore = now - STALE_ATTACHMENT_TRANSFER_TIMEOUT_MS
+        val localNodeId = identityStore.getIdentity().nodeId
+        while (true) {
+            val stale = attachments.getStaleIncomingTransfers(
+                localNodeId,
+                staleBefore,
+                STALE_ATTACHMENT_CLEANUP_BATCH_SIZE
+            )
+            if (stale.isEmpty()) break
+            stale.forEach { record ->
+                AttachmentFileStore.deleteReceivedFiles(appContext, record.messageId)
+                attachments.markStaleIncomingTransfer(
+                    messageId = record.messageId,
+                    localNodeId = localNodeId,
+                    cutoff = staleBefore,
+                    now = now,
+                    lastError = "TRANSFER_EXPIRED"
+                )
+            }
+        }
+        AttachmentFileStore.deleteStaleOrphanReceiveParts(
+            appContext,
+            attachments.getActiveIncomingTransferMessageIds(localNodeId).toSet(),
+            staleBefore
+        )
     }
 
     suspend fun recordTraceEvent(
@@ -241,6 +286,7 @@ class MessagingRepository private constructor(context: Context) {
     suspend fun addIncoming(record: MessageRecordEntity): Boolean {
         require(!record.senderNodeId.equals(identityStore.getIdentity().nodeId, ignoreCase = true))
         val localNodeId = identityStore.getIdentity().nodeId
+        reclaimExpiredRemoteHistory(System.currentTimeMillis())
         val inserted = database.withTransaction {
             if (messages.getById(record.messageId) != null || !hasRemoteMessageCapacity(localNodeId, record)) {
                 return@withTransaction false
@@ -368,6 +414,7 @@ class MessagingRepository private constructor(context: Context) {
         if (!manifest.isValid() || receivedFromNodeId.isBlank() ||
             (!isFinalRecipient && (!localCanRelay || manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS))) return false
         val now = System.currentTimeMillis()
+        reclaimExpiredRemoteHistory(now)
         val attachment = AttachmentRecordEntity(
             messageId = manifest.messageId,
             senderNodeId = manifest.senderNodeId,
@@ -414,8 +461,9 @@ class MessagingRepository private constructor(context: Context) {
         receivedFromNodeId: String,
         localCanRelay: Boolean,
         transport: String = "WIFI_DIRECT"
-    ): Boolean =
-        database.withTransaction {
+    ): Boolean {
+        reclaimExpiredRemoteHistory(System.currentTimeMillis())
+        return database.withTransaction {
             val localNodeId = identityStore.getIdentity().nodeId
             val isFinalRecipient = manifest.recipientNodeId.equals(localNodeId, true)
             if (!manifest.isValid() || receivedFromNodeId.isBlank() ||
@@ -480,22 +528,25 @@ class MessagingRepository private constructor(context: Context) {
             (existing == null || existing.messageId == manifest.messageId) &&
                 (!isFinalRecipient || messages.getById(manifest.messageId) != null)
         }
+    }
 
-    suspend fun markAttachmentForwarded(record: AttachmentRecordEntity, finalRecipientHop: Boolean) {
+    suspend fun markAttachmentForwarded(record: AttachmentRecordEntity) {
         val isOrigin = record.senderNodeId.equals(identityStore.getIdentity().nodeId, true)
         if (!isOrigin) {
-            record.localPath?.let { runCatching { java.io.File(it).delete() } }
+            val remainingPayloadPath = deleteAttachmentPayloadFiles(record)
             attachments.updateStatusAndPath(
                 record.messageId,
                 AttachmentTransferStatus.RELAYED,
-                null,
+                remainingPayloadPath,
                 System.currentTimeMillis(),
                 null
             )
         } else {
             attachments.updateProgress(
                 record.messageId,
-                if (finalRecipientHop) AttachmentTransferStatus.DELIVERED else AttachmentTransferStatus.RELAYED,
+                // A transport's acceptance is only a one-hop custody signal. The
+                // origin is marked DELIVERED by the final recipient's completion ACK.
+                AttachmentTransferStatus.RELAYED,
                 record.sizeBytes,
                 System.currentTimeMillis(),
                 null
@@ -503,16 +554,27 @@ class MessagingRepository private constructor(context: Context) {
         }
     }
 
+    suspend fun markAttachmentDeliveredByRecipient(messageId: String, now: Long = System.currentTimeMillis()): Boolean {
+        val localNodeId = identityStore.getIdentity().nodeId
+        val attachment = attachments.get(messageId) ?: return false
+        if (!attachment.senderNodeId.equals(localNodeId, true)) return false
+        if (attachment.status == AttachmentTransferStatus.DELIVERED) return true
+        return attachments.updateProgress(
+            messageId = messageId,
+            status = AttachmentTransferStatus.DELIVERED,
+            transferredBytes = attachment.sizeBytes,
+            updatedAt = now,
+            lastError = null
+        ) > 0
+    }
+
     suspend fun expireAttachment(record: AttachmentRecordEntity) {
         val isOrigin = record.senderNodeId.equals(identityStore.getIdentity().nodeId, true)
-        if (!isOrigin) {
-            record.localPath?.let { runCatching { java.io.File(it).delete() } }
-            AttachmentFileStore.deleteReceivedFiles(appContext, record.messageId)
-        }
+        val retainedPath = if (isOrigin) record.localPath else deleteAttachmentPayloadFiles(record)
         attachments.updateStatusAndPath(
             record.messageId,
             AttachmentTransferStatus.FAILED,
-            record.localPath.takeIf { isOrigin },
+            retainedPath,
             System.currentTimeMillis(),
             "ATTACHMENT_EXPIRED"
         )
@@ -636,65 +698,68 @@ class MessagingRepository private constructor(context: Context) {
         seen: MeshSeenPacketEntity,
         record: MessageRecordEntity,
         attachment: AttachmentRecordEntity? = null
-    ): DestinationAcceptance = database.withTransaction {
-        val existing = messages.getById(record.messageId)
-        val localNodeId = identityStore.getIdentity().nodeId
+    ): DestinationAcceptance {
+        reclaimExpiredRemoteHistory(System.currentTimeMillis())
+        return database.withTransaction {
+            val existing = messages.getById(record.messageId)
+            val localNodeId = identityStore.getIdentity().nodeId
 
-        if (existing == null && !hasRemoteMessageCapacity(localNodeId, record)) {
-            return@withTransaction DestinationAcceptance(
-                firstPacket = false,
-                insertedMessage = false,
-                messagePersisted = false,
-                deliveryHopCount = 0
-            )
-        }
-        if (attachment != null && attachments.get(attachment.messageId) == null &&
-            !hasRemoteAttachmentCapacity(localNodeId, attachment.messageId, attachment.sizeBytes)) {
-            return@withTransaction DestinationAcceptance(
-                firstPacket = false,
-                insertedMessage = false,
-                messagePersisted = false,
-                deliveryHopCount = 0
-            )
-        }
-        val firstPacket = seenPackets.insert(seen) != -1L
+            if (existing == null && !hasRemoteMessageCapacity(localNodeId, record)) {
+                return@withTransaction DestinationAcceptance(
+                    firstPacket = false,
+                    insertedMessage = false,
+                    messagePersisted = false,
+                    deliveryHopCount = 0
+                )
+            }
+            if (attachment != null && attachments.get(attachment.messageId) == null &&
+                !hasRemoteAttachmentCapacity(localNodeId, attachment.messageId, attachment.sizeBytes)) {
+                return@withTransaction DestinationAcceptance(
+                    firstPacket = false,
+                    insertedMessage = false,
+                    messagePersisted = false,
+                    deliveryHopCount = 0
+                )
+            }
+            val firstPacket = seenPackets.insert(seen) != -1L
 
-        if (existing != null) {
-            attachment?.let {
-                attachments.insert(it)
-                if (attachments.get(it.messageId) == null) {
-                    return@withTransaction DestinationAcceptance(
-                        firstPacket = firstPacket,
-                        insertedMessage = false,
-                        messagePersisted = false,
-                        deliveryHopCount = existing.deliveryHopCount ?: record.deliveryHopCount ?: 0
-                    )
+            if (existing != null) {
+                attachment?.let {
+                    attachments.insert(it)
+                    if (attachments.get(it.messageId) == null) {
+                        return@withTransaction DestinationAcceptance(
+                            firstPacket = firstPacket,
+                            insertedMessage = false,
+                            messagePersisted = false,
+                            deliveryHopCount = existing.deliveryHopCount ?: record.deliveryHopCount ?: 0
+                        )
+                    }
                 }
+                // A durable application record is the source of truth. A seen-cache
+                // entry by itself must never be treated as proof of delivery.
+                DestinationAcceptance(
+                    firstPacket = firstPacket,
+                    insertedMessage = false,
+                    messagePersisted = true,
+                    deliveryHopCount = existing.deliveryHopCount ?: record.deliveryHopCount ?: 0
+                )
+            } else {
+                // Repair an inconsistent database where the seen-packet cache survived
+                // but the application record did not. INSERT IGNORE plus a read-back
+                // makes the ACK decision depend on durable state, including races.
+                val inserted = messages.insertIncoming(record) != -1L
+                val persisted = messages.getById(record.messageId) != null
+                if (persisted) attachment?.let {
+                    attachments.insert(it)
+                }
+                val attachmentPersisted = attachment == null || attachments.get(attachment.messageId) != null
+                DestinationAcceptance(
+                    firstPacket = firstPacket,
+                    insertedMessage = inserted && persisted && attachmentPersisted,
+                    messagePersisted = persisted && attachmentPersisted,
+                    deliveryHopCount = record.deliveryHopCount ?: 0
+                )
             }
-            // A durable application record is the source of truth. A seen-cache
-            // entry by itself must never be treated as proof of delivery.
-            DestinationAcceptance(
-                firstPacket = firstPacket,
-                insertedMessage = false,
-                messagePersisted = true,
-                deliveryHopCount = existing.deliveryHopCount ?: record.deliveryHopCount ?: 0
-            )
-        } else {
-            // Repair an inconsistent database where the seen-packet cache survived
-            // but the application record did not. INSERT IGNORE plus a read-back
-            // makes the ACK decision depend on durable state, including races.
-            val inserted = messages.insertIncoming(record) != -1L
-            val persisted = messages.getById(record.messageId) != null
-            if (persisted) attachment?.let {
-                attachments.insert(it)
-            }
-            val attachmentPersisted = attachment == null || attachments.get(attachment.messageId) != null
-            DestinationAcceptance(
-                firstPacket = firstPacket,
-                insertedMessage = inserted && persisted && attachmentPersisted,
-                messagePersisted = persisted && attachmentPersisted,
-                deliveryHopCount = record.deliveryHopCount ?: 0
-            )
         }
     }
 
@@ -801,13 +866,29 @@ class MessagingRepository private constructor(context: Context) {
     suspend fun claimForward(packetId: String, now: Long = System.currentTimeMillis()): Boolean =
         forwarding.claim(packetId, now) == 1
 
-    suspend fun markForwarded(packetId: String): Int = forwarding.markForwarded(packetId)
+    suspend fun markForwarded(
+        packetId: String,
+        forwardedAt: Long = System.currentTimeMillis()
+    ): Int = forwarding.markForwarded(packetId, forwardedAt)
 
     suspend fun requeueAfterBetterCopy(packetId: String, now: Long = System.currentTimeMillis()): Int =
         forwarding.requeueAfterBetterCopy(packetId, now)
 
     suspend fun requeueForwarded(packetId: String, now: Long = System.currentTimeMillis(), error: String = "DELIVERY_ACK_RETRY") =
         forwarding.requeueForwarded(packetId, now, error)
+
+    suspend fun requeueForwardedDataAfterRetry(
+        packetId: String,
+        now: Long,
+        retryEligibleBefore: Long,
+        maxAttempts: Int
+    ): Int = forwarding.requeueForwardedDataAfterRetry(packetId, now, retryEligibleBefore, maxAttempts)
+
+    suspend fun markForwardedDataDelivered(
+        messageId: String,
+        originNodeId: String,
+        destinationNodeId: String
+    ): Int = forwarding.markDataDelivered(messageId, originNodeId, destinationNodeId)
 
     suspend fun markForwardInvalid(packetId: String, error: String = "INVALID_FORWARDING_STATE") =
         forwarding.markInvalid(packetId, error)
@@ -851,6 +932,91 @@ class MessagingRepository private constructor(context: Context) {
         forwarding.purgeExpired(now)
         traceEvents.deleteOlderThan(now - TRACE_RETENTION_MS)
         traceEvents.deleteExcess(MAX_TRACE_EVENTS)
+        reclaimExpiredRemoteHistory(now)
+    }
+
+    /**
+     * Removes only settled remote history older than the retention window. File
+     * deletion occurs before row deletion inside the same Room transaction; if
+     * cleanup is interrupted, the eligible row remains and this idempotent pass
+     * retries it on the next quota check or maintenance cycle.
+     */
+    private suspend fun reclaimExpiredRemoteHistory(now: Long) {
+        val localNodeId = identityStore.getIdentity().nodeId
+        val cutoff = now - MessageRetentionPolicy.REMOTE_HISTORY_RETENTION_MS
+        while (true) {
+            val removed = database.withTransaction {
+                var deletedRows = 0
+                attachments.getExpiredRemoteHistory(
+                    localNodeId,
+                    cutoff,
+                    MessageRetentionPolicy.REMOTE_HISTORY_PURGE_BATCH_SIZE
+                ).forEach { record ->
+                    if (MessageRetentionPolicy.shouldPruneRemoteAttachment(
+                            senderNodeId = record.senderNodeId,
+                            localNodeId = localNodeId,
+                            status = record.status,
+                            updatedAt = record.updatedAt,
+                            cutoff = cutoff,
+                            hasPendingCompletionAck = false
+                    ) && deleteAttachmentPayloadFiles(record) == null
+                    ) {
+                        deletedRows += attachments.deleteExpiredRemoteHistory(
+                            record.messageId,
+                            localNodeId,
+                            cutoff
+                        )
+                    }
+                }
+                messages.getExpiredRemoteHistory(
+                    localNodeId,
+                    cutoff,
+                    MessageRetentionPolicy.REMOTE_HISTORY_PURGE_BATCH_SIZE
+                ).forEach { record ->
+                    if (MessageRetentionPolicy.shouldPruneRemoteMessage(
+                            senderNodeId = record.senderNodeId,
+                            localNodeId = localNodeId,
+                            status = record.status,
+                            createdAt = record.createdAt,
+                            cutoff = cutoff,
+                            hasAttachment = false,
+                            hasPendingForwarding = false
+                        )
+                    ) {
+                        deletedRows += messages.deleteExpiredRemoteHistory(
+                            record.messageId,
+                            localNodeId,
+                            cutoff
+                        )
+                    }
+                }
+                deletedRows
+            }
+            if (removed == 0) return
+        }
+    }
+
+    private fun deleteAttachmentPayloadFiles(record: AttachmentRecordEntity): String? {
+        val partFile = AttachmentFileStore.receivePart(appContext, record.messageId)
+        val receivedFile = AttachmentFileStore.receivedFile(appContext, record.messageId)
+        fun remainingKnownPath(): String? = record.localPath
+            ?: receivedFile.takeIf { it.exists() }?.absolutePath
+            ?: partFile.takeIf { it.exists() }?.absolutePath
+        val attachmentRoot = runCatching {
+            File(appContext.filesDir, "attachments").canonicalFile
+        }.getOrNull() ?: return remainingKnownPath()
+        val files = linkedSetOf<File>()
+        record.localPath?.let { path ->
+            val localFile = runCatching { File(path).canonicalFile }.getOrNull() ?: return path
+            if (localFile.parentFile != attachmentRoot) return path
+            files += localFile
+        }
+        files += partFile
+        files += receivedFile
+        files.forEach { file ->
+            if (file.exists()) runCatching { if (file.isFile) file.delete() }
+        }
+        return files.firstOrNull { it.exists() }?.absolutePath
     }
 
     private suspend fun hasRemoteMessageCapacity(
@@ -915,6 +1081,8 @@ class MessagingRepository private constructor(context: Context) {
         private const val TRACE_RETENTION_MS = 7L * 24 * 60 * 60 * 1000
         private const val MAX_TRACE_EVENTS = 5_000
         private const val FORWARDING_LEASE_TIMEOUT_MS = 90_000L
+        private const val STALE_ATTACHMENT_TRANSFER_TIMEOUT_MS = 24L * 60L * 60L * 1_000L
+        private const val STALE_ATTACHMENT_CLEANUP_BATCH_SIZE = 64
 
         @Volatile
         private var INSTANCE: MessagingRepository? = null

@@ -17,7 +17,8 @@ object MeshForwardingPolicy {
         excludeAddress: String?,
         packetId: String = "",
         maxFanout: Int = MAX_FANOUT,
-        isTransportUsable: (MeshPeer) -> Boolean = { it.hasAnyEndpoint() }
+        isTransportUsable: (MeshPeer) -> Boolean = { it.hasAnyEndpoint() },
+        isRelayTransportUsable: (MeshPeer) -> Boolean = { true }
     ): List<MeshPeer> {
         val local = localNodeId.trim()
         val destination = destinationNodeId.trim()
@@ -44,7 +45,9 @@ object MeshForwardingPolicy {
 
         usable.firstOrNull { it.nodeId.equals(destination, true) }?.let { return listOf(it) }
 
-        val eligible = usable.filter { it.canRelay && it.canStoreForward }
+        val eligible = usable.filter {
+            it.canRelay && it.canStoreForward && isRelayTransportUsable(it)
+        }
         if (eligible.isEmpty()) return emptyList()
 
         // RSSI values from different bearers are not comparable. Retain the
