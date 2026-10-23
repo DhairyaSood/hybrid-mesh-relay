@@ -62,14 +62,17 @@ import kotlinx.coroutines.sync.withPermit
  * The engine is a managed-flooding/store-and-forward layer above transport adapters.
  * One-hop acceptance is distinct from the final application DELIVERY_ACK.
  */
-class MeshEngine(context: Context) {
+class MeshEngine internal constructor(
+    context: Context,
+    private val testOverrides: MeshEngineTestOverrides? = null
+) {
     private val appContext = context.applicationContext
     private val networkManager = NetworkManager.getInstance(appContext)
     private val transportPreferences = MeshTransportPreferences.getInstance(appContext)
     private val networkDiagnostics = NetworkDiagnostics.getInstance()
-    private val repository = MessagingRepository.getInstance(appContext)
+    private val repository = testOverrides?.repository ?: MessagingRepository.getInstance(appContext)
     private val identityStore = IdentityStore.getInstance(appContext)
-    private val peerDirectory = MeshPeerDirectory()
+    private val peerDirectory = testOverrides?.peerDirectory ?: MeshPeerDirectory()
     private val gattClient = BleGattClient(appContext)
     private val bleTransport = BleGattMeshTransport(
         context = appContext,
@@ -91,8 +94,16 @@ class MeshEngine(context: Context) {
         onAttachmentFinish = { source, manifest -> onAttachmentFinish(source, manifest) }
     )
     private val wifiTransport = WifiDirectMeshTransport(wifiDirectManager)
-    private val meshTransports = listOf<MeshTransport>(bleTransport, wifiTransport)
+    private val meshTransports = testOverrides?.transports ?: listOf<MeshTransport>(bleTransport, wifiTransport)
     private val transportSelector = TransportSelector { meshTransports }
+
+    private fun localNodeId(): String =
+        testOverrides?.localNodeId?.invoke() ?: identityStore.getIdentity().nodeId
+
+    private fun currentTransportSelection() =
+        testOverrides?.transportSelection ?: transportPreferences.selection.value
+
+    private fun nowMillis(): Long = testOverrides?.nowMillis?.invoke() ?: System.currentTimeMillis()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val wakeChannel = Channel<Unit>(Channel.CONFLATED)
@@ -136,10 +147,13 @@ class MeshEngine(context: Context) {
 
         _snapshot.value = _snapshot.value.copy(
             running = true,
-            bleEnabled = transportPreferences.selection.value.bleEnabled,
-            wifiDirectEnabled = transportPreferences.selection.value.wifiDirectEnabled,
-            updatedAt = System.currentTimeMillis()
+            bleEnabled = currentTransportSelection().bleEnabled,
+            wifiDirectEnabled = currentTransportSelection().wifiDirectEnabled,
+            updatedAt = nowMillis()
         )
+        // Integration tests drive the same packet and forwarding methods directly,
+        // while leaving Android radio lifecycle and background workers untouched.
+        if (testOverrides != null) return
         // Optional transport: missing hardware/permission must not block BLE.
         if (transportPreferences.selection.value.wifiDirectEnabled) wifiDirectManager.start()
 
@@ -182,6 +196,7 @@ class MeshEngine(context: Context) {
                     wifiDirectGroupFormed = selection.wifiDirectEnabled && wifiState.groupFormed,
                     wifiDirectGroupOwner = selection.wifiDirectEnabled && wifiState.groupOwner,
                     wifiDirectCandidates = if (selection.wifiDirectEnabled) wifiState.candidates else emptyList(),
+                    wifiDirectPeers = if (selection.wifiDirectEnabled) wifiState.peers else emptyList(),
                     wifiDirectStage = wifiState.stage.name,
                     wifiDirectCurrentAttemptId = if (selection.wifiDirectEnabled) wifiState.currentAttemptId else null,
                     wifiDirectCurrentPeer = if (selection.wifiDirectEnabled) wifiState.currentPeer else null,
@@ -191,7 +206,7 @@ class MeshEngine(context: Context) {
                     wifiDirectMediaServerReady = selection.wifiDirectEnabled && wifiState.mediaServerReady,
                     wifiDirectGroupOwnerAddress = if (selection.wifiDirectEnabled) wifiState.groupOwnerAddress else null,
                     wifiDirectLastError = if (selection.wifiDirectEnabled) wifiState.lastError else null,
-                    updatedAt = System.currentTimeMillis()
+                    updatedAt = nowMillis()
                 )
                 wakeChannel.trySend(Unit)
             }
@@ -229,7 +244,7 @@ class MeshEngine(context: Context) {
         jobs.clear()
         activeFanoutJobs.toList().forEach(Job::cancel)
         activeFanoutJobs.clear()
-        wifiDirectManager.stop()
+        if (testOverrides == null) wifiDirectManager.stop()
         receivedAtByPacket.clear()
         attachmentRateWindows.clear()
         val wifiState = wifiDirectManager.runtimeState.value
@@ -254,20 +269,30 @@ class MeshEngine(context: Context) {
             wifiDirectLastError = wifiState.lastError,
             attachmentTransferActive = false,
             currentAttachmentThroughputMbps = null,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = nowMillis()
         )
     }
 
     /** BLE-specific ingress adapter; core packet handling below is bearer-neutral. */
+    fun onBleGattConnectionChanged(address: String, connectionId: Long, connected: Boolean) {
+        if (connected) {
+            peerDirectory.onBleConnectionEstablished(address, connectionId)
+        } else {
+            peerDirectory.onBleConnectionClosed(address, connectionId)
+        }
+    }
+
     suspend fun onBleTransportPacket(device: BluetoothDevice, payload: ByteArray): Boolean {
         val address = runCatching { device.address }.getOrDefault("Unknown")
+        return onBleAddressTransportPacket(address, payload)
+    }
+
+    internal suspend fun onBleAddressTransportPacket(address: String, payload: ByteArray): Boolean {
         if (BleAttachmentFrameCodec.isFrame(payload)) {
             return onBleAttachmentFrame(address, payload) is BleAttachmentReceiveResult.Accepted
         }
-        // A GATT connection can remain active after its discovery advertisement
-        // ages out of the live route snapshot. Preserve the predecessor identity
-        // for this bounded ingress window so the relay excludes the same node's
-        // other bearer when selecting its next hop.
+        // Active GATT sessions pin the predecessor identity independently of the
+        // shorter-lived discovery cache, so its other bearer stays excluded.
         val sourceNodeId = peerDirectory.findNodeIdByBleAddress(address)
         return onTransportPacket(
             sourceNodeId = sourceNodeId,
@@ -284,7 +309,7 @@ class MeshEngine(context: Context) {
 
     /** BLE attachment frames are accepted one bounded block at a time and persisted before ACK. */
     private suspend fun onBleAttachmentFrame(address: String, payload: ByteArray): BleAttachmentReceiveResult {
-        if (!started || !transportPreferences.selection.value.bleEnabled) {
+        if (!started || !currentTransportSelection().bleEnabled) {
             return BleAttachmentReceiveResult.Rejected(BleAttachmentRejection.RECEIVER_UNAVAILABLE)
         }
         val frame = BleAttachmentFrameCodec.decode(payload)
@@ -402,13 +427,13 @@ class MeshEngine(context: Context) {
         bleAttachmentIngressBindings[key] = BleAttachmentIngressBinding(
             nodeId = nodeId,
             protocolVersion = protocolVersion,
-            lastActivityAt = System.currentTimeMillis()
+            lastActivityAt = nowMillis()
         )
         pruneBleAttachmentIngressBindings()
     }
 
     private fun pruneBleAttachmentIngressBindings() {
-        val now = System.currentTimeMillis()
+        val now = nowMillis()
         bleAttachmentIngressBindings.entries.removeIf {
             now - it.value.lastActivityAt > BLE_INGRESS_BINDING_RETENTION_MS
         }
@@ -429,7 +454,7 @@ class MeshEngine(context: Context) {
         payload: ByteArray
     ): Boolean {
         if (!started) return false
-        val selection = transportPreferences.selection.value
+        val selection = currentTransportSelection()
         if (sourceTransport == MeshTransportKind.BLE_GATT && !selection.bleEnabled) return false
         if (sourceTransport == MeshTransportKind.WIFI_DIRECT && !selection.wifiDirectEnabled) return false
         return handleReceivedPacket(
@@ -499,7 +524,7 @@ class MeshEngine(context: Context) {
                     continue
                 }
 
-                val now = System.currentTimeMillis()
+                val now = nowMillis()
                 val eligible = repository.getEligibleOutgoing(now).take(MAX_ORIGIN_BATCH)
                 var worked = if (eligible.isEmpty()) {
                     false
@@ -513,8 +538,8 @@ class MeshEngine(context: Context) {
                     }
                 }
 
-                for (message in repository.getDueInFlight(System.currentTimeMillis()).take(MAX_ORIGIN_BATCH)) {
-                    val currentNow = System.currentTimeMillis()
+                for (message in repository.getDueInFlight(nowMillis()).take(MAX_ORIGIN_BATCH)) {
+                    val currentNow = nowMillis()
                     if (isExpired(message.createdAt, currentNow)) {
                         repository.markFailed(message.messageId, null, "DELIVERY_EXPIRED")
                     } else {
@@ -527,7 +552,7 @@ class MeshEngine(context: Context) {
                     worked = true
                 }
 
-                if (!worked) waitForWake(originWaitTime(System.currentTimeMillis()))
+                if (!worked) waitForWake(originWaitTime(nowMillis()))
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -537,9 +562,9 @@ class MeshEngine(context: Context) {
         }
     }
 
-    private suspend fun processOutgoingMessage(message: MessageRecordEntity): Boolean {
-        if (!message.senderNodeId.equals(identityStore.getIdentity().nodeId, true)) return false
-        val now = System.currentTimeMillis()
+    internal suspend fun processOutgoingMessage(message: MessageRecordEntity): Boolean {
+        if (!message.senderNodeId.equals(localNodeId(), true)) return false
+        val now = nowMillis()
         if (isExpired(message.createdAt, now)) {
             repository.markFailed(message.messageId, null, "DELIVERY_EXPIRED")
             return true
@@ -553,12 +578,13 @@ class MeshEngine(context: Context) {
         )
         val peers = MeshForwardingPolicy.select(
             peers = peerDirectory.snapshot.value,
-            localNodeId = identityStore.getIdentity().nodeId,
+            localNodeId = localNodeId(),
             destinationNodeId = message.recipientNodeId,
             excludeNodeId = null,
             excludeAddress = null,
             packetId = message.messageId,
-            isTransportUsable = ::hasCompatibleTransport
+            isTransportUsable = ::hasCompatibleTransport,
+            isRelayTransportUsable = ::hasCompatibleRelayTransport
         )
         if (peers.isEmpty()) {
             repository.deferQueuedMessage(
@@ -593,14 +619,14 @@ class MeshEngine(context: Context) {
         val durationMs = ((System.nanoTime() - sendStartedAt) / 1_000_000L).coerceAtLeast(0L)
         _snapshot.value = _snapshot.value.copy(
             lastTransportSendDurationMs = durationMs,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = nowMillis()
         )
         if (outcome.accepted) {
             outcome.transportName?.let { repository.updateLastTransport(message.messageId, it) }
         } else {
             repository.requeueIfInFlight(
                 message.messageId,
-                System.currentTimeMillis() + originRetryDelay(message.attemptCount),
+                nowMillis() + originRetryDelay(message.attemptCount),
                 "MESH_TRANSPORT_FAILED"
             )
         }
@@ -614,7 +640,7 @@ class MeshEngine(context: Context) {
                     waitForWake(5_000L)
                     continue
                 }
-                val now = System.currentTimeMillis()
+                val now = nowMillis()
                 val candidates = repository.getPendingForwards(now, MAX_FORWARD_BATCH)
                 val worked = if (candidates.isEmpty()) {
                     false
@@ -668,7 +694,7 @@ class MeshEngine(context: Context) {
                 } else {
                     repository.scheduleForwardRetry(
                         packetId = record.packetId,
-                        nextAttemptAt = System.currentTimeMillis() + forwardRetryDelay(record.attemptCount),
+                        nextAttemptAt = nowMillis() + forwardRetryDelay(record.attemptCount),
                         error = retryError
                     )
                 }
@@ -702,7 +728,7 @@ class MeshEngine(context: Context) {
         }
     }
 
-    private suspend fun processForwardRecord(
+    internal suspend fun processForwardRecord(
         record: MeshForwardingRecordEntity,
         now: Long
     ): Boolean {
@@ -720,7 +746,7 @@ class MeshEngine(context: Context) {
         val claimedRecord = repository.getForwarding(record.packetId)
         if (claimedRecord == null || claimedRecord.state != "FORWARDING") return false
         val activeRecord = claimedRecord
-        if (activeRecord.expiresAt <= System.currentTimeMillis()) {
+        if (activeRecord.expiresAt <= nowMillis()) {
             repository.markForwardExpired(activeRecord.packetId)
             receivedAtByPacket.remove(activeRecord.packetId)
             return true
@@ -740,12 +766,27 @@ class MeshEngine(context: Context) {
 
         val peers = MeshForwardingPolicy.select(
             peers = peerDirectory.snapshot.value,
-            localNodeId = identityStore.getIdentity().nodeId,
+            localNodeId = localNodeId(),
             destinationNodeId = packet.destinationNodeId,
             excludeNodeId = activeRecord.receivedFromNodeId,
             excludeAddress = activeRecord.receivedFromAddress,
             packetId = activeRecord.packetId,
-            isTransportUsable = ::hasCompatibleRelayTransport
+            // The final destination only needs to accept this packet; relay
+            // capability is required for alternate intermediate next hops.
+            isTransportUsable = { peer ->
+                if (packet.packetType == MeshPacket.PacketType.ATTACHMENT_ACK) {
+                    hasTraceCompatibleTransport(peer)
+                } else {
+                    hasCompatibleTransport(peer)
+                }
+            },
+            isRelayTransportUsable = { peer ->
+                if (packet.packetType == MeshPacket.PacketType.ATTACHMENT_ACK) {
+                    hasTraceCompatibleRelayTransport(peer)
+                } else {
+                    hasCompatibleRelayTransport(peer)
+                }
+            }
         )
 
         if (peers.isEmpty()) {
@@ -764,11 +805,11 @@ class MeshEngine(context: Context) {
 
         // The durable record already supplies the single suppression window.
         val receivedAt = receivedAtByPacket[activeRecord.packetId]
-        val queueDelay = receivedAt?.let { (System.currentTimeMillis() - it).coerceAtLeast(0L) }
+        val queueDelay = receivedAt?.let { (nowMillis() - it).coerceAtLeast(0L) }
         if (queueDelay != null) {
             _snapshot.value = _snapshot.value.copy(
                 lastForwardQueueDelayMs = queueDelay,
-                updatedAt = System.currentTimeMillis()
+                updatedAt = nowMillis()
             )
         }
 
@@ -783,7 +824,7 @@ class MeshEngine(context: Context) {
         val sendDurationMs = ((System.nanoTime() - sendStartedAt) / 1_000_000L).coerceAtLeast(0L)
         _snapshot.value = _snapshot.value.copy(
             lastTransportSendDurationMs = sendDurationMs,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = nowMillis()
         )
 
         return if (sendOutcome.accepted) {
@@ -792,12 +833,12 @@ class MeshEngine(context: Context) {
                 peerNodeId = peers.joinToString(",") { it.nodeId },
                 result = "FORWARD_ACCEPTED"
             )
-            val finalized = repository.markForwarded(activeRecord.packetId)
+            val finalized = repository.markForwarded(activeRecord.packetId, nowMillis())
             if (finalized == 0) {
                 // A better duplicate may have arrived while the radio send was in
                 // progress. The DAO refuses to mark that row FORWARDED while its
                 // dirty marker is set; put it back on the queue for the better path.
-                repository.requeueAfterBetterCopy(activeRecord.packetId, System.currentTimeMillis())
+                repository.requeueAfterBetterCopy(activeRecord.packetId, nowMillis())
                 wakeChannel.trySend(Unit)
             } else {
                 receivedAtByPacket.remove(activeRecord.packetId)
@@ -806,7 +847,7 @@ class MeshEngine(context: Context) {
         } else {
             repository.scheduleForwardRetry(
                 activeRecord.packetId,
-                System.currentTimeMillis() + forwardRetryDelay(activeRecord.attemptCount),
+                nowMillis() + forwardRetryDelay(activeRecord.attemptCount),
                 "MESH_TRANSPORT_FAILED"
             )
             recordRelayDiagnostic(
@@ -872,21 +913,21 @@ class MeshEngine(context: Context) {
         }
     }
 
-    private suspend fun handleReceivedPacket(
+    internal suspend fun handleReceivedPacket(
         payload: ByteArray,
         sourceNodeId: String?,
         sourceAddress: String,
         sourceTransport: MeshTransportKind
     ): Boolean {
         val packet = MeshPacketCodec.decode(payload) ?: return false
-        val now = System.currentTimeMillis()
+        val now = nowMillis()
 
         if (packet.expiresAt <= now) return false
         if (packet.createdAt > now + MAX_CLOCK_SKEW_MS) return false
         if (packet.ttl !in 0..MAX_TTL) return false
         if (packet.hopCount !in 0..MAX_TTL) return false
 
-        val localNodeId = identityStore.getIdentity().nodeId
+        val localNodeId = localNodeId()
 
         return when (packet.packetType) {
             MeshPacket.PacketType.DATA -> {
@@ -913,6 +954,21 @@ class MeshEngine(context: Context) {
                 } else if (packet.originNodeId.equals(localNodeId, true)) {
                     // A locally-created ACK that is not addressed to this node
                     // must not be relayed back into the mesh.
+                    false
+                } else if (packet.ttl > 0 && packet.hopCount < MAX_TTL) {
+                    acceptForRelay(packet, sourceNodeId, sourceAddress, sourceTransport, now)
+                } else {
+                    false
+                }
+            }
+
+            MeshPacket.PacketType.ATTACHMENT_ACK -> {
+                if (packet.messageType != MeshPacketCodec.ATTACHMENT_ACK_TYPE ||
+                    !packet.content.matches(ATTACHMENT_SHA256_PATTERN)
+                ) return false
+                if (packet.destinationNodeId.equals(localNodeId, true)) {
+                    handleAttachmentCompletionAckForOrigin(packet, now)
+                } else if (packet.originNodeId.equals(localNodeId, true)) {
                     false
                 } else if (packet.ttl > 0 && packet.hopCount < MAX_TTL) {
                     acceptForRelay(packet, sourceNodeId, sourceAddress, sourceTransport, now)
@@ -975,15 +1031,27 @@ class MeshEngine(context: Context) {
             if (existingForwarding != null) {
                 if (existingForwarding.state == "EXPIRED") {
                     val repaired = repository.repairExpiredForwarding(packet.packetId, now)
+                    if (repaired) markForwardedDataDeliveredIfAck(packet)
                     if (repaired) wakeChannel.trySend(Unit)
                     return repaired
                 }
+                if (MeshForwardingRetryPolicy.shouldReplayForwardedData(existingForwarding, now)) {
+                    val replayed = repository.requeueForwardedDataAfterRetry(
+                        packetId = packet.packetId,
+                        now = now,
+                        retryEligibleBefore = now - MeshForwardingRetryPolicy.REPLAY_COOLDOWN_MS,
+                        maxAttempts = MeshForwardingRetryPolicy.MAX_DATA_FORWARD_ATTEMPTS
+                    )
+                    if (replayed > 0) wakeChannel.trySend(Unit)
+                }
+                markForwardedDataDeliveredIfAck(packet)
                 return true
             }
 
             val rebuilt = repository.insertForwardingRecord(
                 packetWithObservedHop.toForwardingRecord(predecessorNodeId, sourceAddress)
             )
+            if (rebuilt) markForwardedDataDeliveredIfAck(packet)
             if (rebuilt) wakeChannel.trySend(Unit)
             return rebuilt
         }
@@ -996,6 +1064,7 @@ class MeshEngine(context: Context) {
             )
         )
         if (accepted) {
+            markForwardedDataDeliveredIfAck(packet)
             receivedAtByPacket.putIfAbsent(packet.packetId, now)
             if (receivedAtByPacket.size > MAX_TRACKED_RECEIVE_TIMESTAMPS) {
                 val oldest = receivedAtByPacket.entries
@@ -1006,6 +1075,20 @@ class MeshEngine(context: Context) {
             wakeChannel.trySend(Unit)
         }
         return accepted
+    }
+
+    private suspend fun markForwardedDataDeliveredIfAck(packet: MeshPacket) {
+        if (packet.packetType == MeshPacket.PacketType.DELIVERY_ACK ||
+            packet.packetType == MeshPacket.PacketType.ATTACHMENT_ACK
+        ) {
+            // Receipt of the destination-generated ACK is durable proof that the
+            // corresponding DATA no longer needs duplicate-triggered replay here.
+            repository.markForwardedDataDelivered(
+                messageId = packet.messageId,
+                originNodeId = packet.destinationNodeId,
+                destinationNodeId = packet.originNodeId
+            )
+        }
     }
 
     private suspend fun handleDataForLocalDestination(
@@ -1099,7 +1182,7 @@ class MeshEngine(context: Context) {
             val ack = MeshPacket(
                 packetId = ackPacketId,
                 messageId = packet.messageId,
-                originNodeId = identityStore.getIdentity().nodeId,
+                originNodeId = localNodeId(),
                 destinationNodeId = packet.originNodeId,
                 createdAt = now,
                 expiresAt = now + ACK_LIFETIME_MS,
@@ -1134,9 +1217,9 @@ class MeshEngine(context: Context) {
         // A valid delivery ACK must be generated by the same node that the
         // original application message targeted, and must be addressed back
         // to this node.
-        if (!original.senderNodeId.equals(identityStore.getIdentity().nodeId, true)) return false
+        if (!original.senderNodeId.equals(localNodeId(), true)) return false
         if (!original.recipientNodeId.equals(packet.originNodeId, true)) return false
-        if (!packet.destinationNodeId.equals(identityStore.getIdentity().nodeId, true)) return false
+        if (!packet.destinationNodeId.equals(localNodeId(), true)) return false
 
         val delivered = repository.acceptDeliveryAck(
             seen = packet.toSeenPacket(now),
@@ -1160,6 +1243,32 @@ class MeshEngine(context: Context) {
                 updatedAt = now
             )
         }
+        return delivered
+    }
+
+    private suspend fun handleAttachmentCompletionAckForOrigin(
+        packet: MeshPacket,
+        now: Long
+    ): Boolean {
+        val attachment = repository.getAttachment(packet.messageId) ?: return false
+        val localNodeId = localNodeId()
+        if (!attachment.senderNodeId.equals(localNodeId, true) ||
+            !AttachmentCompletionAckPolicy.matches(
+                packet = packet,
+                messageId = attachment.messageId,
+                localNodeId = localNodeId,
+                expectedRecipientNodeId = attachment.recipientNodeId,
+                expectedSha256 = attachment.sha256
+            )
+        ) return false
+
+        val delivered = repository.markAttachmentDeliveredByRecipient(packet.messageId, now)
+        repository.recordTraceEvent(
+            messageId = packet.messageId,
+            packetId = packet.packetId,
+            eventType = "ATTACHMENT_COMPLETION_ACK_RECEIVED",
+            resultCode = if (delivered) "DELIVERED" else "IGNORED"
+        )
         return delivered
     }
 
@@ -1199,7 +1308,9 @@ class MeshEngine(context: Context) {
             }
             val job = scope.launch {
                 try {
-                    val acceptedTransport = sendPacketToPeer(peer, packet, requireRelayCapability)
+                    val requiresRelay = requireRelayCapability &&
+                        !peer.nodeId.equals(packet.destinationNodeId, ignoreCase = true)
+                    val acceptedTransport = sendPacketToPeer(peer, packet, requiresRelay)
                     if (acceptedTransport != null) {
                         completion.complete(MeshSendOutcome(true, acceptedTransport.persistedName))
                     }
@@ -1259,6 +1370,8 @@ class MeshEngine(context: Context) {
                 MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
                 MeshTransportKind.LORA -> false
             }) &&
+            (packet.packetType != MeshPacket.PacketType.ATTACHMENT_ACK ||
+                peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION) &&
             (
                 peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
                     transport.kind == MeshTransportKind.BLE_GATT
@@ -1424,6 +1537,21 @@ class MeshEngine(context: Context) {
         }
     }
 
+    private fun hasTraceCompatibleTransport(peer: MeshPeer): Boolean =
+        transportSelector.candidates(peer).any { (transport, _) ->
+            peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION
+        }
+
+    private fun hasTraceCompatibleRelayTransport(peer: MeshPeer): Boolean =
+        transportSelector.candidates(peer).any { (transport, _) ->
+            val capable = when (transport.kind) {
+                MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
+                MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
+                MeshTransportKind.LORA -> false
+            }
+            capable && peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION
+        }
+
     /** Bulk files use Wi-Fi Direct or BLE, subject to each bearer’s attachment size limit. */
     private suspend fun attachmentLoop() {
         while (currentCoroutineContext().isActive && started) {
@@ -1443,7 +1571,7 @@ class MeshEngine(context: Context) {
             val outgoing = repository.getPendingOutgoingAttachments(limit = 4)
             for (attachment in outgoing) {
                 if (!started) break
-                val now = System.currentTimeMillis()
+                val now = nowMillis()
                 if (isExpired(attachment.createdAt, now)) {
                     repository.expireAttachment(attachment)
                     continue
@@ -1666,7 +1794,7 @@ class MeshEngine(context: Context) {
                         attachment.sizeBytes, attachmentRateWindows.remove(attachment.messageId),
                         active = false, transport = completedTransport
                     )
-                    repository.markAttachmentForwarded(attachment, nextHop.nodeId.equals(attachment.recipientNodeId, true))
+                    repository.markAttachmentForwarded(attachment)
                 } else {
                     publishAttachmentThroughput(
                         latestTransferredBytes,
@@ -1685,18 +1813,18 @@ class MeshEngine(context: Context) {
             }
     }
 
-    private suspend fun onAttachmentBegin(
+    internal suspend fun onAttachmentBegin(
         sourceNodeId: String,
         manifest: AttachmentTransferManifest,
         transport: MeshTransportKind = MeshTransportKind.WIFI_DIRECT
     ): Long? {
-        val isFinalRecipient = manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)
+        val isFinalRecipient = manifest.recipientNodeId.equals(localNodeId(), true)
         if (!manifest.isValid() ||
             (manifest.hopCount <= 1 && !manifest.senderNodeId.equals(sourceNodeId, true)) ||
             (transport == MeshTransportKind.BLE_GATT && manifest.sizeBytes > AttachmentTransferManifest.MAX_BLE_BYTES) ||
             (!isFinalRecipient && manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS) ||
-            manifest.createdAt > System.currentTimeMillis() + MAX_CLOCK_SKEW_MS ||
-            isExpired(manifest.createdAt, System.currentTimeMillis())) return null
+            manifest.createdAt > nowMillis() + MAX_CLOCK_SKEW_MS ||
+            isExpired(manifest.createdAt, nowMillis())) return null
         val resumeOffset = AttachmentFileStore.prepareReceive(appContext, manifest) ?: return null
         val finalPath = AttachmentFileStore.receivedFile(appContext, manifest.messageId).absolutePath
         if (!repository.prepareIncomingAttachment(manifest, finalPath, resumeOffset, sourceNodeId, localCanRelay = true)) {
@@ -1714,7 +1842,7 @@ class MeshEngine(context: Context) {
         manifest: AttachmentTransferManifest,
         transport: MeshTransportKind
     ): BleAttachmentRejection? {
-        val isFinalRecipient = manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)
+        val isFinalRecipient = manifest.recipientNodeId.equals(localNodeId(), true)
         if (!manifest.isValid()) return BleAttachmentRejection.INVALID_MANIFEST
         if (manifest.hopCount <= 1 && !manifest.senderNodeId.equals(sourceNodeId, true)) {
             return BleAttachmentRejection.SENDER_IDENTITY_MISMATCH
@@ -1725,7 +1853,7 @@ class MeshEngine(context: Context) {
         if (!isFinalRecipient && manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS) {
             return BleAttachmentRejection.HOP_LIMIT_EXCEEDED
         }
-        val now = System.currentTimeMillis()
+        val now = nowMillis()
         if (manifest.createdAt > now + MAX_CLOCK_SKEW_MS) return BleAttachmentRejection.CLOCK_SKEW
         if (isExpired(manifest.createdAt, now)) return BleAttachmentRejection.ATTACHMENT_EXPIRED
         return null
@@ -1773,7 +1901,7 @@ class MeshEngine(context: Context) {
         return BleAttachmentReceiveResult.Accepted(resumeOffset)
     }
 
-    private suspend fun onAttachmentChunk(
+    internal suspend fun onAttachmentChunk(
         sourceNodeId: String,
         manifest: AttachmentTransferManifest,
         offset: Long,
@@ -1797,7 +1925,7 @@ class MeshEngine(context: Context) {
         return nextOffset
     }
 
-    private suspend fun onAttachmentFinish(
+    internal suspend fun onAttachmentFinish(
         sourceNodeId: String,
         manifest: AttachmentTransferManifest,
         transport: MeshTransportKind = MeshTransportKind.WIFI_DIRECT
@@ -1818,13 +1946,69 @@ class MeshEngine(context: Context) {
             )
             repository.recordTraceEvent(
                 messageId = manifest.messageId,
-                eventType = if (manifest.recipientNodeId.equals(identityStore.getIdentity().nodeId, true)) "ATTACHMENT_DELIVERED" else "ATTACHMENT_STORED_FOR_RELAY",
+                eventType = if (manifest.recipientNodeId.equals(localNodeId(), true)) "ATTACHMENT_DELIVERED" else "ATTACHMENT_STORED_FOR_RELAY",
                 transport = transport.persistedName,
                 peerNodeId = sourceNodeId,
                 resultCode = "VERIFIED"
             )
+            if (manifest.recipientNodeId.equals(localNodeId(), true) &&
+                !queueAttachmentCompletionAck(manifest, transport, nowMillis())
+            ) {
+                return false
+            }
         }
         return completed
+    }
+
+    private suspend fun queueAttachmentCompletionAck(
+        manifest: AttachmentTransferManifest,
+        transport: MeshTransportKind,
+        now: Long
+    ): Boolean {
+        val ackPacketId = MeshPacketCodec.stableAttachmentAckPacketId(manifest.messageId)
+        val localNodeId = localNodeId()
+        val existing = repository.getForwarding(ackPacketId)
+        if (existing != null) {
+            if (!existing.originNodeId.equals(localNodeId, true) ||
+                !existing.destinationNodeId.equals(manifest.senderNodeId, true) ||
+                existing.messageId != manifest.messageId ||
+                existing.messageType != MeshPacketCodec.ATTACHMENT_ACK_TYPE ||
+                !existing.content.equals(manifest.sha256, true)
+            ) return false
+            return when (existing.state) {
+                "PENDING", "FORWARDING", "FORWARDED" -> true
+                else -> false
+            }
+        }
+        val ack = MeshPacket(
+            packetId = ackPacketId,
+            messageId = manifest.messageId,
+            originNodeId = localNodeId,
+            destinationNodeId = manifest.senderNodeId,
+            createdAt = now,
+            expiresAt = now + ACK_LIFETIME_MS,
+            ttl = ACK_INITIAL_TTL,
+            hopCount = 0,
+            packetType = MeshPacket.PacketType.ATTACHMENT_ACK,
+            messageType = MeshPacketCodec.ATTACHMENT_ACK_TYPE,
+            content = manifest.sha256.lowercase()
+        )
+        val accepted = repository.acceptRelayPacket(
+            seen = ack.toSeenPacket(now),
+            forwardingRecord = ack.toForwardingRecord(predecessor = null, predecessorAddress = null)
+        )
+        if (accepted) {
+            repository.recordTraceEvent(
+                messageId = manifest.messageId,
+                packetId = ackPacketId,
+                eventType = "ATTACHMENT_COMPLETION_ACK_QUEUED",
+                transport = transport.persistedName,
+                peerNodeId = manifest.senderNodeId,
+                resultCode = "VERIFIED"
+            )
+            wakeChannel.trySend(Unit)
+        }
+        return accepted
     }
 
     private fun attachmentRateWindow(messageId: String, initialBytes: Long): AttachmentRateWindow =
@@ -1870,7 +2054,7 @@ class MeshEngine(context: Context) {
             lastAttachmentThroughputMbps = if (active || mbps == null) _snapshot.value.lastAttachmentThroughputMbps else mbps,
             attachmentTransferActive = active,
             attachmentTransport = transport.persistedName,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = nowMillis()
         )
     }
 
@@ -1878,6 +2062,7 @@ class MeshEngine(context: Context) {
         while (currentCoroutineContext().isActive && started) {
             try {
                 repository.purgeMeshState()
+                repository.cleanupStaleAttachmentTransfers()
                 val recovered = repository.recoverStaleForwarding()
                 if (recovered > 0) {
                     try {
@@ -1915,7 +2100,7 @@ class MeshEngine(context: Context) {
 
     private suspend fun snapshotLoop() {
         while (currentCoroutineContext().isActive && started) {
-            val now = System.currentTimeMillis()
+            val now = nowMillis()
             _snapshot.value = _snapshot.value.copy(
                 running = true,
                 bleEnabled = transportPreferences.selection.value.bleEnabled,
@@ -1931,6 +2116,7 @@ class MeshEngine(context: Context) {
                 wifiDirectGroupOwner = wifiDirectManager.runtimeState.value.groupOwner,
                 wifiDirectLocationModeEnabled = wifiDirectManager.runtimeState.value.locationModeEnabled,
                 wifiDirectCandidates = wifiDirectManager.runtimeState.value.candidates,
+                wifiDirectPeers = wifiDirectManager.runtimeState.value.peers,
                 wifiDirectStage = wifiDirectManager.runtimeState.value.stage.name,
                 wifiDirectCurrentAttemptId = wifiDirectManager.runtimeState.value.currentAttemptId,
                 wifiDirectCurrentPeer = wifiDirectManager.runtimeState.value.currentPeer,
@@ -2011,7 +2197,7 @@ class MeshEngine(context: Context) {
             deliveryHopCount = deliveryHopCount,
             state = "PENDING",
             attemptCount = 0,
-            nextAttemptAt = System.currentTimeMillis() +
+            nextAttemptAt = nowMillis() +
                 (150L..500L).random(),
             lastError = null,
             routeTrace = routeTransportCodes.joinToString(","),
@@ -2078,6 +2264,7 @@ class MeshEngine(context: Context) {
         private const val ATTACHMENT_RETRY_MS = 15_000L
         private const val MAX_CLOCK_SKEW_MS = 2 * 60 * 1000L
         private const val DELIVERY_ACK_TYPE = "DELIVERY_ACK"
+        private val ATTACHMENT_SHA256_PATTERN = Regex("[0-9a-fA-F]{64}")
 
         private val APPLICATION_MESSAGE_TYPES = setOf(
             MessageType.NORMAL.name,

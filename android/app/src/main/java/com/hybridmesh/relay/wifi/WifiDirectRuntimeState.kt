@@ -19,7 +19,21 @@ data class WifiDiscoveryCandidate(
     val deviceAddress: String,
     val protocolVersion: String? = null,
     val decision: String = "SERVICE_SEEN",
+    val attemptInProgress: Boolean = false,
     val lastSeen: Long = System.currentTimeMillis()
+)
+
+data class WifiDirectPeerRuntimeState(
+    val nodeId: String,
+    val deviceName: String,
+    val groupRole: String,
+    val connectionStage: String,
+    val tcpSessionHealthy: Boolean,
+    val routeEligible: Boolean,
+    val attemptInProgress: Boolean,
+    val latestAttemptDurationMs: Long? = null,
+    val lastFailureReason: String? = null,
+    val updatedAt: Long = System.currentTimeMillis()
 )
 
 data class WifiDirectRuntimeState(
@@ -30,6 +44,8 @@ data class WifiDirectRuntimeState(
     val controlServerReady: Boolean = false,
     val mediaServerReady: Boolean = false,
     val sessionCount: Int = 0,
+    val healthySessionCount: Int = 0,
+    val peers: List<WifiDirectPeerRuntimeState> = emptyList(),
     val groupClientCount: Int = 0,
     val candidates: List<WifiDiscoveryCandidate> = emptyList(),
     val currentAttemptId: String? = null,

@@ -87,16 +87,17 @@ class BleAdvertiser(context: Context) {
             return
         }
 
-        if (!adapter.isMultipleAdvertisementSupported) {
-            fail(ERROR_ADVERTISING_NOT_SUPPORTED)
-            return
-        }
-
         val leAdvertiser = adapter.bluetoothLeAdvertiser
-        if (leAdvertiser == null) {
+        val capability = BleAdvertisingCapabilityPolicy.evaluate(
+            advertiserAvailable = leAdvertiser != null,
+            multipleAdvertisingSupported = runCatching { adapter.isMultipleAdvertisementSupported }
+                .getOrDefault(false)
+        )
+        if (!capability.canAttemptSingleSession) {
             fail(ERROR_ADVERTISER_UNAVAILABLE)
             return
         }
+        val availableAdvertiser = leAdvertiser ?: return fail(ERROR_ADVERTISER_UNAVAILABLE)
 
         val key = identity.nodeId + "|" + identity.deviceName
         if (
@@ -152,11 +153,11 @@ class BleAdvertiser(context: Context) {
 
         val callback = newCallback(sessionGeneration)
 
-        advertiser = leAdvertiser
+        advertiser = availableAdvertiser
         activeCallback = callback
 
         try {
-            leAdvertiser.startAdvertising(
+            availableAdvertiser.startAdvertising(
                 settings,
                 serviceAdvertisement,
                 scanResponse,
@@ -177,6 +178,14 @@ class BleAdvertiser(context: Context) {
                 activeCallback = null
                 advertisedIdentityKey = null
                 fail(ERROR_INVALID_CONFIGURATION)
+            }
+        } catch (_: IllegalStateException) {
+            if (generation.get() == sessionGeneration) {
+                advertisingRequested = false
+                advertiser = null
+                activeCallback = null
+                advertisedIdentityKey = null
+                fail(ERROR_ADVERTISING_START_FAILED)
             }
         }
     }
@@ -255,7 +264,11 @@ class BleAdvertiser(context: Context) {
                 if (generation.get() != sessionGeneration) return
                 if (advertisingRequested && activeCallback === this) {
                     _state.value = BleOperationState.ERROR
-                    _errorCode.value = errorCode
+                    _errorCode.value = when (errorCode) {
+                        AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> ERROR_ADVERTISING_NOT_SUPPORTED
+                        AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE -> ERROR_INVALID_CONFIGURATION
+                        else -> errorCode
+                    }
                 }
             }
         }
@@ -348,6 +361,7 @@ class BleAdvertiser(context: Context) {
         const val ERROR_ADVERTISING_NOT_SUPPORTED = -104
         const val ERROR_ADVERTISER_UNAVAILABLE = -105
         const val ERROR_INVALID_CONFIGURATION = -106
+        const val ERROR_ADVERTISING_START_FAILED = -107
 
         private const val RESTART_HANDOFF_MS = 200L
     }

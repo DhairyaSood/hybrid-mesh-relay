@@ -66,16 +66,26 @@ class MeshPeerDirectory {
         val lastSeen: Long
     )
 
+    private data class ActiveBleConnection(
+        val connectionId: Long,
+        var nodeId: String?
+    )
+
     private val lock = Any()
     private val peers = LinkedHashMap<String, MeshPeer>()
     // Keep just the recent address-to-identity association for ingress. Live route
     // snapshots still drop peers at the scanner's shorter stale timeout.
     private val recentBleAddresses = LinkedHashMap<String, RememberedBleAddress>()
+    // Discovery is allowed to expire while GATT stays connected. Pin the identity
+    // to the GATT session and only release it for that session's disconnect event.
+    private val activeBleConnections = LinkedHashMap<String, ActiveBleConnection>()
     private val _snapshot = MutableStateFlow<List<MeshPeer>>(emptyList())
     val snapshot: StateFlow<List<MeshPeer>> = _snapshot.asStateFlow()
 
-    fun replaceBlePeers(observed: List<BlePeer>) = synchronized(lock) {
-        val now = System.currentTimeMillis()
+    fun replaceBlePeers(
+        observed: List<BlePeer>,
+        now: Long = System.currentTimeMillis()
+    ) = synchronized(lock) {
         observed.forEach { ble ->
             val address = ble.address.takeUnless { it.isBlank() || it.equals("Unknown", true) }
                 ?: return@forEach
@@ -83,6 +93,11 @@ class MeshPeerDirectory {
                 nodeId = ble.nodeId,
                 lastSeen = ble.lastSeen.takeIf { it > 0L } ?: now
             )
+            activeBleConnections[address.normalizedAddress()]?.let { connection ->
+                // A connected session can learn an identity later if discovery
+                // had not completed when Android reported the connection.
+                if (connection.nodeId == null) connection.nodeId = ble.nodeId
+            }
         }
         pruneRecentBleAddresses(now)
 
@@ -185,14 +200,47 @@ class MeshPeerDirectory {
             ?.nodeId
     }
 
+    fun onBleConnectionEstablished(address: String, connectionId: Long): String? = synchronized(lock) {
+        val key = address.normalizedAddress().takeIf { it.isNotBlank() } ?: return@synchronized null
+        val existing = activeBleConnections[key]
+        if (existing?.connectionId == connectionId) {
+            if (existing.nodeId == null) existing.nodeId = findLiveNodeIdLocked(key)
+            return@synchronized existing.nodeId
+        }
+        // Do not evict a still-active connection to make room: fail closed if the
+        // platform ever reports an implausible number of simultaneous GATT peers.
+        if (existing == null && activeBleConnections.size >= MAX_ACTIVE_BLE_CONNECTIONS) {
+            return@synchronized null
+        }
+        val binding = ActiveBleConnection(
+            connectionId = connectionId,
+            // A new connection may bind only to a live discovery observation.
+            // Reusing the short recent cache here could map a recycled Bluetooth
+            // address to its previous owner.
+            nodeId = findLiveNodeIdLocked(key)
+        )
+        activeBleConnections[key] = binding
+        binding.nodeId
+    }
+
+    /** A delayed disconnect from an old GATT session cannot clear a newer binding. */
+    fun onBleConnectionClosed(address: String, connectionId: Long): Boolean = synchronized(lock) {
+        val key = address.normalizedAddress()
+        val current = activeBleConnections[key] ?: return@synchronized false
+        if (current.connectionId != connectionId) return@synchronized false
+        activeBleConnections.remove(key)
+        true
+    }
+
+    fun activeBleConnectionCount(): Int = synchronized(lock) { activeBleConnections.size }
+
     fun findNodeIdByBleAddress(address: String): String? = synchronized(lock) {
         val key = address.normalizedAddress()
-        findLiveNodeIdByBleAddress(address)
-            ?: run {
-                val now = System.currentTimeMillis()
-                pruneRecentBleAddresses(now)
-                recentBleAddresses[key]?.nodeId
-            }
+        activeBleConnections[key]?.let { connection ->
+            if (connection.nodeId == null) connection.nodeId = findLiveNodeIdLocked(key)
+            return@synchronized connection.nodeId
+        }
+        findDiscoveredNodeIdLocked(key, System.currentTimeMillis())
     }
 
     fun findByNodeId(nodeId: String): MeshPeer? = synchronized(lock) {
@@ -213,11 +261,21 @@ class MeshPeerDirectory {
         }
     }
 
+    private fun findDiscoveredNodeIdLocked(addressKey: String, now: Long): String? {
+        pruneRecentBleAddresses(now)
+        findLiveNodeIdLocked(addressKey)?.let { return it }
+        return recentBleAddresses[addressKey]?.nodeId
+    }
+
+    private fun findLiveNodeIdLocked(addressKey: String): String? =
+        peers.values.firstOrNull { it.bleAddress?.normalizedAddress() == addressKey }?.nodeId
+
     private fun String.normalized(): String = trim().lowercase(Locale.US)
     private fun String.normalizedAddress(): String = trim().uppercase(Locale.US)
 
     private companion object {
         const val BLE_INGRESS_IDENTITY_RETENTION_MS = 2 * 60 * 1_000L
         const val MAX_REMEMBERED_BLE_ADDRESSES = 256
+        const val MAX_ACTIVE_BLE_CONNECTIONS = 128
     }
 }

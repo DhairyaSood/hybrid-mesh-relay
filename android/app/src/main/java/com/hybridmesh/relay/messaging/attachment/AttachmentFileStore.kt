@@ -7,6 +7,7 @@ import android.os.StatFs
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.UUID
 
 data class ImportedAttachment(
@@ -20,6 +21,8 @@ data class ImportedAttachment(
 /** Bounded streaming file I/O for outgoing and incoming private attachment files. */
 object AttachmentFileStore {
     private const val CHUNK_BYTES = 64 * 1024
+    private val receiveFileLock = Any()
+    private val blockedReceiveIds = Collections.synchronizedSet(HashSet<String>())
 
     fun importPickedFile(
         context: Context,
@@ -89,53 +92,84 @@ object AttachmentFileStore {
         File(attachmentDirectory(context), "${stableFileKey(messageId)}.media")
 
     fun deleteReceivedFiles(context: Context, messageId: String) {
-        receivePart(context, messageId).delete()
-        receivedFile(context, messageId).delete()
+        synchronized(receiveFileLock) {
+            blockedReceiveIds += messageId
+            receivePart(context, messageId).delete()
+            receivedFile(context, messageId).delete()
+        }
+    }
+
+    fun deleteStaleOrphanReceiveParts(
+        context: Context,
+        protectedMessageIds: Set<String>,
+        cutoff: Long
+    ): Int {
+        val directory = attachmentDirectory(context)
+        val protectedPaths = protectedMessageIds.mapTo(HashSet()) {
+            receivePart(context, it).absolutePath
+        }
+        return directory.listFiles()
+            ?.count { file ->
+                file.extension == "part" &&
+                    file.absolutePath !in protectedPaths &&
+                    file.lastModified() < cutoff &&
+                    file.isFile &&
+                    file.delete()
+            } ?: 0
     }
 
     fun prepareReceive(context: Context, manifest: AttachmentTransferManifest): Long? {
-        val part = receivePart(context, manifest.messageId)
-        val completed = receivedFile(context, manifest.messageId)
-        if (completed.isFile && completed.length() == manifest.sizeBytes && sha256(completed) == manifest.sha256) {
-            return manifest.sizeBytes
+        synchronized(receiveFileLock) {
+            blockedReceiveIds.remove(manifest.messageId)
+            val part = receivePart(context, manifest.messageId)
+            val completed = receivedFile(context, manifest.messageId)
+            if (completed.isFile && completed.length() == manifest.sizeBytes && sha256(completed) == manifest.sha256) {
+                return manifest.sizeBytes
+            }
+            if (completed.exists()) completed.delete()
+            if (part.exists() && part.length() > manifest.sizeBytes) {
+                if (!part.delete()) return null
+            }
+            val existingBytes = part.takeIf { it.exists() }?.length() ?: 0L
+            val available = runCatching { StatFs(part.parentFile!!.absolutePath).availableBytes }.getOrDefault(0L)
+            if (available < manifest.sizeBytes - existingBytes) return null
+            if (!part.exists()) part.createNewFile()
+            return part.length().takeIf { it <= manifest.sizeBytes }
         }
-        if (completed.exists()) completed.delete()
-        if (part.exists() && part.length() > manifest.sizeBytes) {
-            if (!part.delete()) return null
-        }
-        val existingBytes = part.takeIf { it.exists() }?.length() ?: 0L
-        val available = runCatching { StatFs(part.parentFile!!.absolutePath).availableBytes }.getOrDefault(0L)
-        if (available < manifest.sizeBytes - existingBytes) return null
-        if (!part.exists()) part.createNewFile()
-        return part.length().takeIf { it <= manifest.sizeBytes }
     }
 
     /** Must be called with the app context used to prepare this message's part file. */
     fun appendChunk(context: Context, messageId: String, expectedOffset: Long, bytes: ByteArray, totalBytes: Long): Long? {
         if (bytes.isEmpty() || bytes.size > CHUNK_BYTES || expectedOffset < 0L || expectedOffset + bytes.size > totalBytes) return null
-        val part = receivePart(context, messageId)
-        return runCatching {
-            RandomAccessFile(part, "rw").use { output ->
-                if (output.length() != expectedOffset) return null
-                output.seek(expectedOffset)
-                output.write(bytes)
-                output.filePointer
-            }
-        }.getOrNull()
+        synchronized(receiveFileLock) {
+            if (blockedReceiveIds.contains(messageId)) return null
+            val part = receivePart(context, messageId)
+            return runCatching {
+                RandomAccessFile(part, "rw").use { output ->
+                    if (output.length() != expectedOffset) return null
+                    output.seek(expectedOffset)
+                    output.write(bytes)
+                    output.filePointer
+                }
+            }.getOrNull()
+        }
     }
 
     fun finishReceive(context: Context, manifest: AttachmentTransferManifest): File? {
-        val finalFile = receivedFile(context, manifest.messageId)
-        if (finalFile.isFile && finalFile.length() == manifest.sizeBytes && sha256(finalFile) == manifest.sha256) return finalFile
-        val part = receivePart(context, manifest.messageId)
-        if (!part.isFile || part.length() != manifest.sizeBytes) return null
-        if (sha256(part) != manifest.sha256) {
-            part.delete()
-            return null
+        synchronized(receiveFileLock) {
+            if (blockedReceiveIds.contains(manifest.messageId)) return null
+            val finalFile = receivedFile(context, manifest.messageId)
+            if (finalFile.isFile && finalFile.length() == manifest.sizeBytes && sha256(finalFile) == manifest.sha256) return finalFile
+            val part = receivePart(context, manifest.messageId)
+            if (!part.isFile || part.length() != manifest.sizeBytes) return null
+            if (sha256(part) != manifest.sha256) {
+                part.delete()
+                return null
+            }
+            if (finalFile.exists()) finalFile.delete()
+            if (!part.renameTo(finalFile)) return null
+            return finalFile
         }
-        if (finalFile.exists()) finalFile.delete()
-        if (!part.renameTo(finalFile)) return null
-        return finalFile
     }
 
     fun sha256(file: File): String {

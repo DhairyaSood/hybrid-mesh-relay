@@ -1,6 +1,7 @@
 package com.hybridmesh.relay.messaging.mesh
 
 import com.hybridmesh.relay.wifi.WifiDiscoveryCandidate
+import com.hybridmesh.relay.wifi.WifiDirectPeerRuntimeState
 
 data class MeshRuntimeSnapshot(
     val running: Boolean = false,
@@ -26,6 +27,7 @@ data class MeshRuntimeSnapshot(
     val wifiDirectGroupOwner: Boolean = false,
     val wifiDirectLocationModeEnabled: Boolean = true,
     val wifiDirectCandidates: List<WifiDiscoveryCandidate> = emptyList(),
+    val wifiDirectPeers: List<WifiDirectPeerRuntimeState> = emptyList(),
     val wifiDirectStage: String = "STOPPED",
     val wifiDirectCurrentAttemptId: String? = null,
     val wifiDirectCurrentPeer: String? = null,

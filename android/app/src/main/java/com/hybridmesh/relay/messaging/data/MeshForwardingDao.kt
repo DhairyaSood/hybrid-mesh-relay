@@ -7,7 +7,7 @@ import androidx.room.Query
 
 @Dao
 interface MeshForwardingDao {
-    @Query("SELECT * FROM mesh_forwarding WHERE state = 'PENDING' AND (nextAttemptAt IS NULL OR nextAttemptAt <= :now) AND expiresAt > :now ORDER BY CASE WHEN packetType = 2 THEN 0 ELSE 1 END, COALESCE(nextAttemptAt, 0) ASC, createdAt ASC LIMIT :limit")
+    @Query("SELECT * FROM mesh_forwarding WHERE state = 'PENDING' AND (nextAttemptAt IS NULL OR nextAttemptAt <= :now) AND expiresAt > :now ORDER BY CASE WHEN packetType IN (2, 3) THEN 0 ELSE 1 END, COALESCE(nextAttemptAt, 0) ASC, createdAt ASC LIMIT :limit")
     suspend fun getPending(now: Long, limit: Int): List<MeshForwardingRecordEntity>
 
     @Query("SELECT MIN(nextAttemptAt) FROM mesh_forwarding WHERE state = 'PENDING' AND expiresAt > :now AND nextAttemptAt IS NOT NULL")
@@ -52,14 +52,25 @@ interface MeshForwardingDao {
         nextAttemptAt: Long
     ): Int
 
-    @Query("UPDATE mesh_forwarding SET state = 'FORWARDED', nextAttemptAt = NULL, claimedAt = NULL, lastError = NULL WHERE packetId = :packetId AND state = 'FORWARDING' AND (lastError IS NULL OR lastError != 'BETTER_COPY_RECEIVED_DURING_FORWARD')")
-    suspend fun markForwarded(packetId: String): Int
+    @Query("UPDATE mesh_forwarding SET state = 'FORWARDED', nextAttemptAt = :forwardedAt, claimedAt = NULL, lastError = NULL WHERE packetId = :packetId AND state = 'FORWARDING' AND (lastError IS NULL OR lastError != 'BETTER_COPY_RECEIVED_DURING_FORWARD')")
+    suspend fun markForwarded(packetId: String, forwardedAt: Long): Int
 
     @Query("UPDATE mesh_forwarding SET state = 'PENDING', nextAttemptAt = :now, claimedAt = NULL, lastError = 'BETTER_COPY_RECEIVED' WHERE packetId = :packetId AND state = 'FORWARDING' AND lastError = 'BETTER_COPY_RECEIVED_DURING_FORWARD' AND expiresAt > :now")
     suspend fun requeueAfterBetterCopy(packetId: String, now: Long): Int
 
     @Query("UPDATE mesh_forwarding SET state = 'PENDING', nextAttemptAt = :now, lastError = :error WHERE packetId = :packetId AND state = 'FORWARDED' AND expiresAt > :now")
     suspend fun requeueForwarded(packetId: String, now: Long, error: String): Int
+
+    @Query("UPDATE mesh_forwarding SET state = 'PENDING', nextAttemptAt = :now, lastError = 'DUPLICATE_DATA_REPLAY' WHERE packetId = :packetId AND packetType = 1 AND state = 'FORWARDED' AND attemptCount < :maxAttempts AND expiresAt > :now AND (nextAttemptAt IS NULL OR nextAttemptAt <= :retryEligibleBefore)")
+    suspend fun requeueForwardedDataAfterRetry(
+        packetId: String,
+        now: Long,
+        retryEligibleBefore: Long,
+        maxAttempts: Int
+    ): Int
+
+    @Query("UPDATE mesh_forwarding SET state = 'DELIVERED', nextAttemptAt = NULL, claimedAt = NULL, lastError = NULL WHERE messageId = :messageId AND originNodeId = :originNodeId AND destinationNodeId = :destinationNodeId AND packetType = 1 AND state IN ('PENDING', 'FORWARDING', 'FORWARDED')")
+    suspend fun markDataDelivered(messageId: String, originNodeId: String, destinationNodeId: String): Int
 
     @Query("UPDATE mesh_forwarding SET state = 'EXPIRED', nextAttemptAt = NULL, lastError = :error WHERE packetId = :packetId")
     suspend fun markInvalid(packetId: String, error: String): Int

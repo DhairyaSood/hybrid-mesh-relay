@@ -29,6 +29,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -63,6 +64,8 @@ class BleGattServer(context: Context) {
 
     private val subscribedDevices = ConcurrentHashMap.newKeySet<String>()
     private val assemblies = ConcurrentHashMap<String, Assembly>()
+    private val nextConnectionId = AtomicLong(0L)
+    private val activeConnectionIds = ConcurrentHashMap<String, Long>()
     private val receiveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var assemblyCleanupJob: Job? = null
 
@@ -84,12 +87,19 @@ class BleGattServer(context: Context) {
     @Volatile
     private var attachmentReceiver: (suspend (BluetoothDevice, ByteArray) -> BleAttachmentReceiveResult)? = null
 
+    @Volatile
+    private var connectionStateReceiver: ((address: String, connectionId: Long, connected: Boolean) -> Unit)? = null
+
     fun setPacketReceiver(receiver: (suspend (BluetoothDevice, ByteArray) -> Boolean)?) {
         packetReceiver = receiver
     }
 
     fun setAttachmentReceiver(receiver: (suspend (BluetoothDevice, ByteArray) -> BleAttachmentReceiveResult)?) {
         attachmentReceiver = receiver
+    }
+
+    fun setConnectionStateReceiver(receiver: ((address: String, connectionId: Long, connected: Boolean) -> Unit)?) {
+        connectionStateReceiver = receiver
     }
 
     @Volatile
@@ -231,6 +241,11 @@ class BleGattServer(context: Context) {
         assemblyCleanupJob?.cancel()
         assemblyCleanupJob = null
         subscribedDevices.clear()
+        activeConnectionIds.entries.toList().forEach { (address, connectionId) ->
+            if (activeConnectionIds.remove(address, connectionId)) {
+                connectionStateReceiver?.invoke(address, connectionId, false)
+            }
+        }
         lastAckDeliverySucceeded = null
         if (hasConnectPermission()) {
             runCatching { server?.clearServices() }
@@ -260,6 +275,13 @@ class BleGattServer(context: Context) {
                 appContext,
                 Manifest.permission.BLUETOOTH_CONNECT
             ) == PackageManager.PERMISSION_GRANTED
+
+    @SuppressLint("MissingPermission")
+    private fun isGattDeviceConnected(device: BluetoothDevice): Boolean =
+        if (!hasConnectPermission()) false
+        else runCatching {
+            bluetoothManager?.getConnectionState(device, BluetoothProfile.GATT) == BluetoothProfile.STATE_CONNECTED
+        }.getOrDefault(false)
 
     @SuppressLint("MissingPermission")
     private fun closeServerSafely() {
@@ -330,10 +352,24 @@ class BleGattServer(context: Context) {
                     "peer_connection",
                     "status=$status state=$newState server_ready=$isReady generation=$callbackGeneration"
                 )
+                val address = safeAddress(device)
+                if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                    val connectionId = activeConnectionIds.computeIfAbsent(address) {
+                        nextConnectionId.incrementAndGet()
+                    }
+                    connectionStateReceiver?.invoke(address, connectionId, true)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED &&
+                    !isGattDeviceConnected(device)
+                ) {
+                    val connectionId = activeConnectionIds.remove(address)
+                    if (connectionId != null) {
+                        connectionStateReceiver?.invoke(address, connectionId, false)
+                    }
+                }
                 if (newState != BluetoothProfile.STATE_CONNECTED) {
-                    val prefix = "${safeAddress(device)}|"
+                    val prefix = "$address|"
                     assemblies.keys.removeIf { it.startsWith(prefix) }
-                    subscribedDevices.remove(safeAddress(device))
+                    subscribedDevices.remove(address)
                 }
             }
 
