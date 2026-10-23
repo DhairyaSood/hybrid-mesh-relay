@@ -1,0 +1,29 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PlatformIO: Build firmware",
+			"type": "shell",
+			"command": "pio",
+			"args": [
+				"run"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Open COM5 Serial Monitor",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-NoExit",
+				"-Command",
+				"& \"$env:USERPROFILE\\.platformio\\penv\\Scripts\\pio.exe\" device monitor -p COM5 -b 115200"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
