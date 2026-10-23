@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MisuseAnnotationRecord",
+  "description": "One annotator's labels for a pilot sample.",
+  "type": "object",
+  "required": [
+    "sample_id",
+    "annotator_id",
+    "discourse_type",
+    "content_labels",
+    "confidence",
+    "adjudication_status"
+  ],
+  "properties": {
+    "sample_id": { "type": "string", "pattern": "^PILOT-[0-9a-f]{32}$" },
+    "annotator_id": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "discourse_type": {
+      "type": "string",
+      "enum": ["D0", "D1", "D2", "D3", "D4", "D5", "D6"]
+    },
+    "content_labels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7"]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "primary_content_label": {
+      "type": "string",
+      "enum": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7"],
+      "description": "Single primary for agreement metrics; M7 if unclear."
+    },
+    "confidence": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "annotator_notes": { "type": "string", "maxLength": 500 },
+    "adjudication_status": {
+      "type": "string",
+      "enum": ["pending", "complete", "needs_adjudication", "adjudicated"]
+    },
+    "adjudicated_content_labels": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7"] }
+    },
+    "adjudicated_discourse_type": {
+      "type": "string",
+      "enum": ["D0", "D1", "D2", "D3", "D4", "D5", "D6"]
+    },
+    "adjudicator_id": { "type": "string" },
+    "annotated_at_utc": { "type": "string" }
+  },
+  "additionalProperties": false
+}

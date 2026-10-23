@@ -1,0 +1,10 @@
+# Final local models
+disaster_type_model: experiments/disaster_classifier/models/multi_hazard_v1/multi_hazard_tfidf_logreg_v1.joblib
+misuse_model: experiments/disaster_misuse_classifier/models/synthetic_baseline/synthetic_misuse_tfidf_logreg.joblib
+
+disaster_preprocess:
+  lowercase: true
+  strip_urls: true
+  strip_mentions: true
+
+batch_output_dir: outputs

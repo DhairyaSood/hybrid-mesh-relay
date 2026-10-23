@@ -1,0 +1,32 @@
+random_seed: 42
+total_messages: 22000
+english_count: 11000
+hindi_hinglish_count: 11000
+devanagari_share: 0.5
+
+scenario_sets:
+  - legacy_v1
+  - civic_v2
+  - contrast_v3
+
+output_dir: data/synthetic_misuse_v3_22k
+dataset_filename: messages_22k.jsonl
+report_filename: generation_report.json
+
+label_counts:
+  benign_emergency_information: 4840
+  report_or_warning_about_misconduct: 3520
+  ambiguous_needs_review: 2640
+  quoted_or_historical_threat: 2640
+  direct_threat_or_intimidation: 2860
+  coercion_or_extortion: 2860
+  possible_relief_worker_impersonation_or_fraud: 2640
+
+split:
+  train_family_fraction: 0.70
+  validation_family_fraction: 0.15
+  test_family_fraction: 0.15
+  split_seed: 42
+
+min_text_chars: 8
+max_generation_attempts_per_slot: 120

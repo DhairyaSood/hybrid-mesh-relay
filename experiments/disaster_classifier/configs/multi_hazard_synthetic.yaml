@@ -1,0 +1,10 @@
+random_seed: 42
+output_dir: data/synthetic_multi_hazard_v1
+dataset_filename: messages_10k.jsonl
+per_label_count: 588
+
+split:
+  train_family_fraction: 0.70
+  validation_family_fraction: 0.15
+  test_family_fraction: 0.15
+  split_seed: 42

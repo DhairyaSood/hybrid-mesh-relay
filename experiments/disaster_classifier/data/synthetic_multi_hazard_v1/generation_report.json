@@ -1,0 +1,23 @@
+{
+  "total": 9996,
+  "label_counts": {
+    "building_collapse_or_structural_failure": 588,
+    "cyclone_or_hurricane": 588,
+    "drought_or_water_shortage": 588,
+    "earthquake": 588,
+    "extreme_cold_or_snowstorm": 588,
+    "extreme_heat_or_heatwave": 588,
+    "fire": 588,
+    "flood": 588,
+    "heavy_rain_or_waterlogging": 588,
+    "industrial_or_chemical_accident": 588,
+    "landslide_or_mudslide": 588,
+    "non_disaster": 588,
+    "other_disaster_or_emergency": 588,
+    "severe_storm_or_high_winds": 588,
+    "transport_accident": 588,
+    "tsunami": 588,
+    "unknown_or_insufficient_information": 588
+  },
+  "created_at_utc": "2026-10-23T13:43:21.527895+00:00"
+}

@@ -1,0 +1,32 @@
+# Compact word TF-IDF + LR — recommended for mobile export (see src/export_mobile_bundle.py).
+dataset_root: "/Users/purusharth/Desktop/Hierarchical Disaster Tweet Classification Corpus/dataset"
+
+task: task3_help
+random_seed: 42
+
+split:
+  train: 0.70
+  validation: 0.15
+  test: 0.15
+
+drop_duplicate_text: true
+min_text_chars: 3
+
+features:
+  mode: word_only
+  word_ngram_range: [1, 2]
+  word_max_features: 8000
+  lowercase: true
+  strip_urls: true
+  strip_mentions: true
+
+classifier:
+  class_weight: balanced
+  max_iter: 2000
+  solver: lbfgs
+  C: 1.0
+
+outputs_dir: "outputs"
+models_dir: "models/compact_word"
+save_model: true
+report_food_medicine_as_urgency: false

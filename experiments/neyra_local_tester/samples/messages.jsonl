@@ -1,0 +1,5 @@
+{"message_text": "Need food and water for families trapped on the roof in Patna.", "expected_label": "benign_emergency_information"}
+{"message_text": "बाढ़ में पानी बढ़ रहा है, खाने की जरूरत है।", "expected_label": "benign_emergency_information"}
+{"message_text": "Yahan flood hai, please help with medicine aur blankets.", "expected_label": "benign_emergency_information"}
+{"message_text": "Pay 5000 or we will not let your family leave the shelter.", "expected_label": "coercion_or_extortion"}
+{"message_text": "Official alert: do not pay any fee to unknown volunteers.", "expected_label": "report_or_warning_about_misconduct"}

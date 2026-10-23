@@ -1,0 +1,28 @@
+# Read-only audit configuration (no training).
+
+dataset_root: "/Users/purusharth/Desktop/Hierarchical Disaster Tweet Classification Corpus/dataset"
+
+# Optional: other roots to scan later (must exist locally; not bundled).
+additional_roots: []
+
+outputs_dir: outputs
+
+# Keyword buckets are weak screening signals only — NOT ground-truth misuse labels.
+keyword_buckets:
+  explicit_threat_violence:
+    pattern: "\\b(kill|bomb|attack|shoot|gunmen|terror|isis|threat|hostage|execute)\\b"
+  looting_theft:
+    pattern: "\\b(loot|looting|rob|robbery|theft|stolen|ransack|plunder)\\b"
+  impersonation_fraud:
+    pattern: "\\b(fake\\s+(?:ngo|relief|aid)|impersonat|scam|fraud|bogus|charity\\s+scam)\\b"
+  coercion_exploitation:
+    pattern: "\\b(force|coerc|extort|blackmail|demand\\s+money|at\\s+gunpoint)\\b"
+  rescue_interference:
+    pattern: "\\b(block(?:ing)?\\s+(?:road|rescue)|hinder\\s+rescue|stop\\s+rescue|obstruct)\\b"
+  denial_rumor_warning:
+    pattern: "\\b(rumor|hoax|fake\\s+news|debunk|deny|denied|misinformation)\\b"
+
+discourse_heuristics:
+  reporting_language: "\\b(report|reports|reported|according|police|official|said|says|claim|alleged)\\b"
+  quote_or_rt: "[\"\\u201c]|rt @|via @"
+  negation_or_denial: "\\b(not|no|never|deny|debunk|hoax|fake)\\b"

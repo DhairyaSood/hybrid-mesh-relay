@@ -1,0 +1,79 @@
+dataset_root: "/Users/purusharth/Desktop/Hierarchical Disaster Tweet Classification Corpus/dataset"
+random_seed: 42
+min_text_chars: 3
+drop_duplicate_text: true
+
+# Tasks to compare (Task 3 = event hold-out; Task 2 = source hold-out).
+tasks:
+  - task3_help
+  - task2_type
+
+classifier:
+  class_weight: balanced
+  max_iter: 2000
+  solver: lbfgs
+  C: 1.0
+
+features:
+  lowercase: true
+  strip_urls: true
+  strip_mentions: true
+
+# Model variants (names are report keys).
+variants:
+  baseline_full:
+    description: "Word (1-2) + char (3-5) TF-IDF — current default"
+    type: tfidf_union
+    word_ngram_range: [1, 2]
+    word_max_features: 50000
+    char_ngram_range: [3, 5]
+    char_max_features: 30000
+
+  word_only:
+    description: "Word n-grams (1-2) only, same word cap as baseline"
+    type: tfidf_word
+    word_ngram_range: [1, 2]
+    word_max_features: 50000
+
+  reduced_vocab:
+    description: "Word + char TF-IDF with smaller vocabulary caps"
+    type: tfidf_union
+    word_ngram_range: [1, 2]
+    word_max_features: 8000
+    char_ngram_range: [3, 5]
+    char_max_features: 4000
+
+  compact_word:
+    description: "Word n-grams (1-2), 8k features"
+    type: tfidf_word
+    word_ngram_range: [1, 2]
+    word_max_features: 8000
+
+  hash_word_8k:
+    description: "HashingVectorizer word (1-2), 8192 features"
+    type: hash_word
+    word_ngram_range: [1, 2]
+    n_features: 8192
+
+  hash_word_16k:
+    description: "HashingVectorizer word (1-2), 16384 features"
+    type: hash_word
+    word_ngram_range: [1, 2]
+    n_features: 16384
+
+  hash_word_char:
+    description: "Hashed word (1-2) 8k + hashed char_wb (3-5) 4k"
+    type: hash_union
+    word_ngram_range: [1, 2]
+    word_n_features: 8192
+    char_ngram_range: [3, 5]
+    char_n_features: 4096
+
+outputs_dir: outputs
+models_dir: models/size_comparison
+
+# Latency: number of timed predict batches (each batch = all holdout texts once).
+latency_repeats: 5
+
+# Recommendation: mean hold-out macro-F1 must be >= this fraction of baseline_full.
+min_holdout_macro_f1_ratio: 0.95

@@ -1,0 +1,30 @@
+random_seed: 42
+total_messages: 10000
+english_count: 5000
+hindi_hinglish_count: 5000
+# Within hindi_hinglish_count: share with Devanagari script (rest = latin_hinglish)
+devanagari_share: 0.5
+
+output_dir: data/synthetic_misuse_10k
+dataset_filename: messages_10k.jsonl
+report_filename: generation_report.json
+
+# Per-label totals (must sum to total_messages)
+label_counts:
+  benign_emergency_information: 2200
+  report_or_warning_about_misconduct: 1600
+  ambiguous_needs_review: 1200
+  quoted_or_historical_threat: 1200
+  direct_threat_or_intimidation: 1300
+  coercion_or_extortion: 1300
+  possible_relief_worker_impersonation_or_fraud: 1200
+
+# Split whole template families (not rows) — stratified by primary label where possible
+split:
+  train_family_fraction: 0.70
+  validation_family_fraction: 0.15
+  test_family_fraction: 0.15
+  split_seed: 42
+
+min_text_chars: 8
+max_generation_attempts_per_slot: 120
