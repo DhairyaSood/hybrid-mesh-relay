@@ -6,14 +6,14 @@ Offline **disaster-type** and **misuse** classifiers for local demo. **Android i
 
 1. Branch from `main`: **`feature/censor`**
 2. Commit new files here (not under `android/`) to avoid merge conflicts
-3. Copy trained weights into `models/` paths below; integrate into the app later
+3. Weights live in repo root **`model/`** (pushed on this branch); experiment `models/` dirs remain gitignored cache copies
 
 ## Models
 
 | ID | Role | Artifact (local, gitignored) |
 |----|------|------------------------------|
-| **MH-v1** | Disaster type — **17** hazard labels | `disaster_classifier/models/multi_hazard_v1/multi_hazard_tfidf_logreg_v1.joblib` |
-| **MU-v1** | Misuse advisory — **7** categories | `disaster_misuse_classifier/models/synthetic_baseline/synthetic_misuse_tfidf_logreg.joblib` |
+| **MH-v1** | Disaster type — **17** hazard labels | `model/multi_hazard_tfidf_logreg_v1.joblib` |
+| **MU-v1** | Misuse advisory — **7** categories | `model/synthetic_misuse_tfidf_logreg.joblib` |
 
 MU-v1 uses **civic/traffic refinement rules** in `neyra_local_tester/neyra_tester/misuse_refinement.py` (tester only).
 
