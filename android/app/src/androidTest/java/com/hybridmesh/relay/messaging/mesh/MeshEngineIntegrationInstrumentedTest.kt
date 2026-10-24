@@ -12,7 +12,6 @@ import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
 import com.hybridmesh.relay.messaging.data.MessagingDatabase
 import com.hybridmesh.relay.messaging.data.MessagingRepository
-import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
 import com.hybridmesh.relay.model.MessageType
 import com.hybridmesh.relay.model.NodeType
@@ -20,15 +19,12 @@ import com.hybridmesh.relay.network.MeshTransportSelection
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -84,9 +80,6 @@ class MeshEngineIntegrationInstrumentedTest {
         val relay = requireNotNull(b.repository.getForwarding(dataPacketId))
         assertEquals(a.nodeId, relay.receivedFromNodeId)
         assertEquals("BLE_MESH", network.attempts.single { it.from == a.nodeId && it.messageId == outgoing.messageId }.kind.persistedName)
-        val relayEvents = b.repository.observeTraceEvents(outgoing.messageId).first()
-        assertTrue(relayEvents.any { it.eventType == "PACKET_RECEIVED_FOR_RELAY" && it.resultCode == "VALIDATED" })
-        assertTrue(relayEvents.any { it.eventType == "RELAY_ENQUEUED" && it.resultCode == "PERSISTED" })
 
         b.engine.processForwardRecord(relay, b.now + 5_000L)
         assertTrue(network.attempts.any {
@@ -101,9 +94,6 @@ class MeshEngineIntegrationInstrumentedTest {
             it.from == b.nodeId && it.to == a.nodeId && it.packetType == MeshPacket.PacketType.DATA
         })
         assertEquals(1, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
-        val destinationEvents = c.repository.observeTraceEvents(outgoing.messageId).first()
-        assertTrue(destinationEvents.any { it.eventType == "DESTINATION_PERSISTED" && it.resultCode == "PERSISTED" })
-        assertTrue(destinationEvents.any { it.eventType == "DELIVERY_ACK_QUEUED" && it.resultCode == "PERSISTED" })
 
         processForwarding(c, MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId))
         processForwarding(b, MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId))
@@ -114,353 +104,6 @@ class MeshEngineIntegrationInstrumentedTest {
             it.from == b.nodeId && it.to == a.nodeId && it.packetType == MeshPacket.PacketType.DELIVERY_ACK &&
                 it.kind == MeshTransportKind.WIFI_DIRECT
         })
-    }
-
-    @Test
-    fun lateFinalAckCanCorrectAnExpiredOriginMessage() = runBlocking {
-        val (_, a, _, c) = createThreeNodes()
-        val outgoing = a.repository.addOutgoing("Delivered before its ack arrived", c.nodeId, MessageType.NORMAL.name)
-        a.repository.markFailed(outgoing.messageId, transport = null, error = "DELIVERY_EXPIRED")
-        val ack = MeshPacket(
-            packetId = MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId),
-            messageId = outgoing.messageId,
-            originNodeId = c.nodeId,
-            destinationNodeId = a.nodeId,
-            createdAt = a.now,
-            expiresAt = a.now + MeshEngine.MESSAGE_LIFETIME_MS,
-            ttl = MeshPacketCodec.ACK_INITIAL_TTL,
-            hopCount = 0,
-            packetType = MeshPacket.PacketType.DELIVERY_ACK,
-            messageType = "DELIVERY_ACK",
-            content = "",
-            deliveryHopCount = 1,
-            routeTransportCodes = listOf(1, 1),
-            routeTraceComplete = true
-        )
-
-        val accepted = a.engine.onTransportPacket(
-            sourceNodeId = c.nodeId,
-            sourceAddress = c.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(ack)
-        )
-
-        assertTrue(accepted)
-        assertEquals(DeliveryStatus.DELIVERED.name, a.repository.getById(outgoing.messageId)?.status)
-
-        // A stale expiration candidate must not overwrite a delivery ACK that won
-        // the race and changed the durable message state first.
-        a.repository.markFailed(outgoing.messageId, transport = null, error = "DELIVERY_EXPIRED")
-        assertEquals(DeliveryStatus.DELIVERED.name, a.repository.getById(outgoing.messageId)?.status)
-    }
-
-    @Test
-    fun improvedDuplicateRepairsSeenCacheAheadOfForwardingRow() = runBlocking {
-        val (_, a, b, c) = createThreeNodes()
-        val origin = "HMR-44444444-4444-4444-4444-444444444444"
-        val destination = "HMR-55555555-5555-5555-5555-555555555555"
-        val messageId = "HMRM-44444444-4444-4444-4444-444444444444::stale-route"
-        val packetId = MeshPacketCodec.stableDataPacketId(messageId)
-        val firstCopy = MeshPacket(
-            packetId = packetId,
-            messageId = messageId,
-            originNodeId = origin,
-            destinationNodeId = destination,
-            createdAt = b.now,
-            expiresAt = b.now + MeshEngine.MESSAGE_LIFETIME_MS,
-            ttl = MeshPacketCodec.INITIAL_TTL - 3,
-            hopCount = 3,
-            packetType = MeshPacket.PacketType.DATA,
-            messageType = MessageType.NORMAL.name,
-            content = "route improvement recovery",
-            routeTransportCodes = listOf(1, 1, 1),
-            routeTraceComplete = true
-        )
-        assertTrue(b.engine.onTransportPacket(
-            sourceNodeId = a.nodeId,
-            sourceAddress = a.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(firstCopy)
-        ))
-
-        // This is the durable state left by process death after updating the seen
-        // cache but before the old implementation updated the forwarding record.
-        b.repository.markForwardExpired(packetId)
-        b.repository.updateSeenObservation(
-            packetId = packetId,
-            hopCount = 2,
-            expiresAt = firstCopy.expiresAt + 2 * 60 * 1_000L
-        )
-        assertEquals(3, requireNotNull(b.repository.getForwarding(packetId)).hopCount)
-
-        val improvedCopy = firstCopy.copy(
-            ttl = MeshPacketCodec.INITIAL_TTL - 2,
-            hopCount = 2,
-            routeTransportCodes = listOf(2, 2)
-        )
-        assertTrue(b.engine.onTransportPacket(
-            sourceNodeId = c.nodeId,
-            sourceAddress = c.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(improvedCopy)
-        ))
-
-        val repaired = requireNotNull(b.repository.getForwarding(packetId))
-        assertEquals(2, repaired.hopCount)
-        assertEquals(c.nodeId, repaired.receivedFromNodeId)
-        assertEquals("2,2,1", repaired.routeTrace)
-    }
-
-    @Test
-    fun lateFinalAckRecoversRelayExpiryAndStaleTerminalWritesCannotEraseIt() = runBlocking {
-        val (_, a, b, c) = createThreeNodes()
-        val outgoing = a.repository.addOutgoing("Late relay ACK", c.nodeId, MessageType.NORMAL.name)
-        val data = MeshPacket(
-            packetId = MeshPacketCodec.stableDataPacketId(outgoing.messageId),
-            messageId = outgoing.messageId,
-            originNodeId = a.nodeId,
-            destinationNodeId = c.nodeId,
-            createdAt = outgoing.createdAt,
-            expiresAt = outgoing.createdAt + MeshEngine.MESSAGE_LIFETIME_MS,
-            ttl = MeshPacketCodec.INITIAL_TTL,
-            hopCount = 0,
-            packetType = MeshPacket.PacketType.DATA,
-            messageType = outgoing.messageType,
-            content = outgoing.content
-        )
-        assertTrue(b.engine.onTransportPacket(
-            sourceNodeId = a.nodeId,
-            sourceAddress = a.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(data)
-        ))
-        val dataPacketId = data.packetId
-
-        // Model a delayed final ACK arriving after the relay's DATA row crossed
-        // its local expiry transition but before maintenance purged that row.
-        b.repository.markForwardExpired(dataPacketId)
-        val ack = MeshPacket(
-            packetId = MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId),
-            messageId = outgoing.messageId,
-            originNodeId = c.nodeId,
-            destinationNodeId = a.nodeId,
-            createdAt = b.now,
-            expiresAt = b.now + MeshEngine.MESSAGE_LIFETIME_MS,
-            ttl = MeshPacketCodec.ACK_INITIAL_TTL,
-            hopCount = 0,
-            packetType = MeshPacket.PacketType.DELIVERY_ACK,
-            messageType = "DELIVERY_ACK",
-            content = "",
-            deliveryHopCount = 1,
-            routeTransportCodes = listOf(1, 1),
-            routeTraceComplete = true
-        )
-        assertTrue(b.engine.onTransportPacket(
-            sourceNodeId = c.nodeId,
-            sourceAddress = c.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(ack)
-        ))
-        assertEquals("DELIVERED", b.repository.getForwarding(dataPacketId)?.state)
-
-        // Stale terminal work that loses the race to the ACK must not replace the
-        // relay's durable delivery confirmation.
-        b.repository.markForwardExpired(dataPacketId)
-        b.repository.markForwardInvalid(dataPacketId, "STALE_RELAY_ERROR")
-        assertEquals("DELIVERED", b.repository.getForwarding(dataPacketId)?.state)
-    }
-
-    @Test
-    fun queuedMessageExpiresWhileAllTransportsAreUnavailable() = runBlocking {
-        val (network, a, _, _) = createThreeNodes(runOriginWorker = true)
-        network.available = false
-
-        val outgoing = a.repository.addOutgoing(
-            "Expire while offline",
-            nodeC,
-            MessageType.NORMAL.name
-        )
-        a.advance(MeshEngine.MESSAGE_LIFETIME_MS + 1L)
-        a.engine.onPeerAvailabilityChanged()
-
-        withTimeout(TEST_WORKER_TIMEOUT_MS) {
-            a.repository.allMessages.first { records ->
-                records.firstOrNull { it.messageId == outgoing.messageId }?.status == DeliveryStatus.FAILED.name
-            }
-        }
-        assertEquals("DELIVERY_EXPIRED", a.repository.getById(outgoing.messageId)?.lastError)
-    }
-
-    @Test
-    fun bleOnlyThreeNodeDeliveryPersistsAtDestinationAndReturnsFinalAck() = runBlocking {
-        val (network, a, b, c) = createThreeNodes()
-        configureBleOnlyTopology(network, a, b, c)
-
-        val outgoing = a.repository.addOutgoing("BLE only A to C", c.nodeId, MessageType.NORMAL.name)
-        assertTrue(a.engine.processOutgoingMessage(outgoing))
-        val dataPacketId = MeshPacketCodec.stableDataPacketId(outgoing.messageId)
-        val relay = requireNotNull(b.repository.getForwarding(dataPacketId))
-        assertEquals(a.nodeId, relay.receivedFromNodeId)
-        assertTrue(network.attempts.any {
-            it.from == a.nodeId && it.to == b.nodeId && it.kind == MeshTransportKind.BLE_GATT &&
-                it.packetType == MeshPacket.PacketType.DATA
-        })
-
-        b.engine.processForwardRecord(relay, b.now + 5_000L)
-        assertEquals(1, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
-        processForwarding(c, MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId))
-        processForwarding(b, MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId))
-
-        assertEquals(DeliveryStatus.DELIVERED.name, a.repository.getById(outgoing.messageId)?.status)
-        assertEquals("1,1", a.repository.getById(outgoing.messageId)?.routeTrace)
-        assertTrue(network.attempts.any {
-            it.from == b.nodeId && it.to == c.nodeId && it.kind == MeshTransportKind.BLE_GATT &&
-                it.packetType == MeshPacket.PacketType.DATA
-        })
-        assertTrue(network.attempts.any {
-            it.from == b.nodeId && it.to == a.nodeId && it.kind == MeshTransportKind.BLE_GATT &&
-                it.packetType == MeshPacket.PacketType.DELIVERY_ACK
-        })
-    }
-
-    @Test
-    fun wifiToBleRelayReturnsFinalAckOverWifi() = runBlocking {
-        val (network, a, b, c) = createThreeNodes()
-        configureWifiToBleTopology(network, a, b, c)
-
-        val outgoing = a.repository.addOutgoing("Wi-Fi to BLE A to C", c.nodeId, MessageType.NORMAL.name)
-        assertTrue(a.engine.processOutgoingMessage(outgoing))
-        val dataPacketId = MeshPacketCodec.stableDataPacketId(outgoing.messageId)
-        val relay = requireNotNull(b.repository.getForwarding(dataPacketId))
-        assertEquals(a.nodeId, relay.receivedFromNodeId)
-        b.engine.processForwardRecord(relay, b.now + 5_000L)
-        assertEquals(1, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
-        processForwarding(c, MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId))
-        processForwarding(b, MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId))
-
-        assertEquals(DeliveryStatus.DELIVERED.name, a.repository.getById(outgoing.messageId)?.status)
-        assertEquals("2,1", a.repository.getById(outgoing.messageId)?.routeTrace)
-        assertTrue(network.attempts.any {
-            it.from == a.nodeId && it.to == b.nodeId && it.kind == MeshTransportKind.WIFI_DIRECT &&
-                it.packetType == MeshPacket.PacketType.DATA
-        })
-        assertTrue(network.attempts.any {
-            it.from == b.nodeId && it.to == c.nodeId && it.kind == MeshTransportKind.BLE_GATT &&
-                it.packetType == MeshPacket.PacketType.DATA
-        })
-        assertTrue(network.attempts.any {
-            it.from == b.nodeId && it.to == a.nodeId && it.kind == MeshTransportKind.WIFI_DIRECT &&
-                it.packetType == MeshPacket.PacketType.DELIVERY_ACK
-        })
-    }
-
-    @Test
-    fun forwardingWorkerRelaysQueuedPacketAndOriginWaitsForFinalAck() = runBlocking {
-        val (network, a, b, c) = createThreeNodes(runForwardingWorker = true)
-        configureBleOnlyTopology(network, a, b, c)
-        val onwardData = network.holdNext(
-            from = b.nodeId,
-            to = c.nodeId,
-            kind = MeshTransportKind.BLE_GATT,
-            packetType = MeshPacket.PacketType.DATA
-        )
-        val finalAck = network.holdNext(
-            from = b.nodeId,
-            to = a.nodeId,
-            kind = MeshTransportKind.BLE_GATT,
-            packetType = MeshPacket.PacketType.DELIVERY_ACK
-        )
-
-        val outgoing = a.repository.addOutgoing("Scheduled BLE relay", c.nodeId, MessageType.NORMAL.name)
-        assertTrue(a.engine.processOutgoingMessage(outgoing))
-
-        val dataPacketId = MeshPacketCodec.stableDataPacketId(outgoing.messageId)
-        val queued = requireNotNull(b.repository.getForwarding(dataPacketId))
-        assertEquals(a.nodeId, queued.receivedFromNodeId)
-        assertEquals(0, queued.hopCount)
-        assertEquals("1", queued.routeTrace)
-        assertTrue(queued.routeTraceComplete)
-
-        // This gate is reached only when the production forwardingLoop claims the
-        // durable row and invokes its selected next-hop transport.
-        onwardData.awaitStarted()
-        val claimed = requireNotNull(b.repository.getForwarding(dataPacketId))
-        assertEquals("FORWARDING", claimed.state)
-        assertEquals(1, claimed.attemptCount)
-        assertEquals(0, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
-        onwardData.release()
-
-        // C persists DATA and schedules its ACK through its normal forwardingLoop.
-        finalAck.awaitStarted()
-        assertEquals(1, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
-        assertEquals("FORWARDING", b.repository.getForwarding(
-            MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId)
-        )?.state)
-        assertEquals(DeliveryStatus.IN_FLIGHT.name, a.repository.getById(outgoing.messageId)?.status)
-
-        finalAck.release()
-        withTimeout(TEST_WORKER_TIMEOUT_MS) {
-            a.repository.allMessages.first { records ->
-                records.firstOrNull { it.messageId == outgoing.messageId }?.status == DeliveryStatus.DELIVERED.name
-            }
-        }
-
-        assertEquals(1, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
-        assertEquals("DELIVERED", b.repository.getForwarding(dataPacketId)?.state)
-        assertTrue(network.attempts.any {
-            it.from == b.nodeId && it.to == c.nodeId && it.packetType == MeshPacket.PacketType.DATA
-        })
-        assertTrue(network.attempts.any {
-            it.from == b.nodeId && it.to == a.nodeId && it.packetType == MeshPacket.PacketType.DELIVERY_ACK
-        })
-    }
-
-    @Test
-    fun forwardingWorkerRetriesWhenNextHopAppearsAfterNoPeerBackoff() = runBlocking {
-        val (network, a, b, c) = createThreeNodes(runForwardingWorker = true)
-        a.peerDirectory.replaceBlePeers(listOf(blePeer(b)), now = a.now)
-        b.peerDirectory.replaceBlePeers(listOf(blePeer(a)), now = b.now)
-        network.connect(a.nodeId, b.nodeId, MeshTransportKind.BLE_GATT)
-        network.connect(b.nodeId, a.nodeId, MeshTransportKind.BLE_GATT)
-
-        val outgoing = a.repository.addOutgoing("Retry after peer appears", c.nodeId, MessageType.NORMAL.name)
-        assertTrue(a.engine.processOutgoingMessage(outgoing))
-        val dataPacketId = MeshPacketCodec.stableDataPacketId(outgoing.messageId)
-        b.repository.observeTraceEvents(outgoing.messageId).first { events ->
-            events.any { it.eventType == "RETRY_SCHEDULED" && it.resultCode == "NO_MESH_NEIGHBOR" }
-        }
-        val deferred = requireNotNull(b.repository.getForwarding(dataPacketId))
-        assertEquals("PENDING", deferred.state)
-        assertEquals("NO_MESH_NEIGHBOR", deferred.lastError)
-
-        val onwardData = network.holdNext(
-            from = b.nodeId,
-            to = c.nodeId,
-            kind = MeshTransportKind.BLE_GATT,
-            packetType = MeshPacket.PacketType.DATA
-        )
-        b.peerDirectory.replaceBlePeers(listOf(blePeer(a), blePeer(c)), now = b.now)
-        c.peerDirectory.replaceBlePeers(listOf(blePeer(b)), now = c.now)
-        network.connect(b.nodeId, c.nodeId, MeshTransportKind.BLE_GATT)
-        network.connect(c.nodeId, b.nodeId, MeshTransportKind.BLE_GATT)
-
-        val retryAt = requireNotNull(deferred.nextAttemptAt)
-        b.advance((retryAt - b.now).coerceAtLeast(0L))
-        b.engine.onPeerAvailabilityChanged()
-
-        // No internal processForwardRecord call: this is the normal worker retry.
-        onwardData.awaitStarted()
-        val retried = requireNotNull(b.repository.getForwarding(dataPacketId))
-        assertEquals("FORWARDING", retried.state)
-        assertEquals(2, retried.attemptCount)
-        onwardData.release()
-
-        withTimeout(TEST_WORKER_TIMEOUT_MS) {
-            a.repository.allMessages.first { records ->
-                records.firstOrNull { it.messageId == outgoing.messageId }?.status == DeliveryStatus.DELIVERED.name
-            }
-        }
-        assertEquals(1, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
     }
 
     @Test
@@ -485,9 +128,6 @@ class MeshEngineIntegrationInstrumentedTest {
         assertEquals(DeliveryStatus.IN_FLIGHT.name, a.repository.getById(outgoing.messageId)?.status)
         assertEquals("PENDING", b.repository.getForwarding(MeshPacketCodec.stableDeliveryAckPacketId(outgoing.messageId))?.state)
         assertEquals(1, c.repository.allMessages.first().count { it.messageId == outgoing.messageId })
-        assertTrue(b.repository.observeTraceEvents(outgoing.messageId).first().any {
-            it.eventType == "RETRY_SCHEDULED" && it.resultCode == "MESH_TRANSPORT_FAILED"
-        })
 
         advanceClocks(120_000L)
         a.repository.requeueIfInFlight(outgoing.messageId, a.now, "INTEGRATION_TEST_ORIGIN_RETRY")
@@ -553,20 +193,6 @@ class MeshEngineIntegrationInstrumentedTest {
         assertTrue(b.engine.onAttachmentFinish(a.nodeId, firstHopManifest, MeshTransportKind.WIFI_DIRECT))
         assertEquals(AttachmentTransferStatus.RELAY_QUEUED, b.repository.getAttachment(outgoing.messageId)?.status)
 
-        val relayedRecord = requireNotNull(b.repository.getAttachment(outgoing.messageId))
-        val relayedFile = File(requireNotNull(relayedRecord.localPath))
-        val conflictingHash = firstHopManifest.copy(
-            sizeBytes = payload.size + 1L,
-            sha256 = "b".repeat(64)
-        )
-        assertNull(b.engine.onAttachmentBegin(a.nodeId, conflictingHash, MeshTransportKind.WIFI_DIRECT))
-        assertTrue("a conflicting BEGIN must preserve the accepted relay file", relayedFile.isFile)
-        assertEquals(sha256, AttachmentFileStore.sha256(relayedFile))
-
-        val conflictingName = firstHopManifest.copy(displayName = "replacement.png")
-        assertNull(b.engine.onAttachmentBegin(a.nodeId, conflictingName, MeshTransportKind.WIFI_DIRECT))
-        assertEquals("test.png", b.repository.getAttachment(outgoing.messageId)?.displayName)
-
         val secondHopManifest = firstHopManifest.copy(hopCount = 2)
         assertEquals(0L, c.engine.onAttachmentBegin(b.nodeId, secondHopManifest, MeshTransportKind.WIFI_DIRECT))
         assertEquals(payload.size.toLong(), c.engine.onAttachmentChunk(b.nodeId, secondHopManifest, 0L, payload, MeshTransportKind.WIFI_DIRECT))
@@ -590,196 +216,6 @@ class MeshEngineIntegrationInstrumentedTest {
         assertEquals(AttachmentTransferStatus.DELIVERED, a.repository.getAttachment(outgoing.messageId)?.status)
     }
 
-    @Test
-    fun lateChunkCannotRecreatePartialFileAfterAttachmentDelivery() = runBlocking {
-        val (_, a, b, _) = createThreeNodes()
-        val payload = "already verified attachment".toByteArray()
-        val messageId = "HMRM-${a.nodeId.removePrefix("HMR-")}::late-chunk"
-        val manifest = AttachmentTransferManifest(
-            messageId = messageId,
-            senderNodeId = a.nodeId,
-            recipientNodeId = b.nodeId,
-            mimeType = "image/png",
-            displayName = "late.png",
-            sizeBytes = payload.size.toLong(),
-            sha256 = payload.sha256(),
-            createdAt = b.now,
-            hopCount = 0
-        )
-
-        assertEquals(0L, b.engine.onAttachmentBegin(a.nodeId, manifest))
-        assertEquals(payload.size.toLong(), b.engine.onAttachmentChunk(a.nodeId, manifest, 0L, payload))
-        assertTrue(b.engine.onAttachmentFinish(a.nodeId, manifest))
-        assertEquals(AttachmentTransferStatus.DELIVERED, b.repository.getAttachment(messageId)?.status)
-
-        val receivePart = AttachmentFileStore.receivePart(b.context, messageId)
-        assertFalse(receivePart.exists())
-        assertNull(b.engine.onAttachmentChunk(a.nodeId, manifest, 0L, payload))
-        assertFalse("a late chunk must not recreate a .part file", receivePart.exists())
-    }
-
-    @Test
-    fun finishFromDifferentPeerCannotFinalizeAcceptedAttachment() = runBlocking {
-        val (_, a, b, c) = createThreeNodes()
-        val payload = "finish must come from accepted peer".toByteArray()
-        val messageId = "HMRM-${a.nodeId.removePrefix("HMR-")}::finish-peer"
-        val manifest = AttachmentTransferManifest(
-            messageId = messageId,
-            senderNodeId = a.nodeId,
-            recipientNodeId = b.nodeId,
-            mimeType = "image/png",
-            displayName = "finish.png",
-            sizeBytes = payload.size.toLong(),
-            sha256 = payload.sha256(),
-            createdAt = b.now,
-            hopCount = 0
-        )
-
-        assertEquals(0L, b.engine.onAttachmentBegin(a.nodeId, manifest))
-        assertEquals(payload.size.toLong(), b.engine.onAttachmentChunk(a.nodeId, manifest, 0L, payload))
-
-        assertFalse(b.engine.onAttachmentFinish(c.nodeId, manifest))
-        assertTrue(AttachmentFileStore.receivePart(b.context, messageId).exists())
-        assertFalse(AttachmentFileStore.receivedFile(b.context, messageId).exists())
-        assertEquals(AttachmentTransferStatus.RECEIVING, b.repository.getAttachment(messageId)?.status)
-
-        assertTrue(b.engine.onAttachmentFinish(a.nodeId, manifest))
-        assertEquals(AttachmentTransferStatus.DELIVERED, b.repository.getAttachment(messageId)?.status)
-    }
-
-    @Test
-    fun attachmentBeginCannotReuseAnExistingNonAttachmentMessageId() = runBlocking {
-        val (_, a, b, _) = createThreeNodes()
-        val messageId = "HMRM-${a.nodeId.removePrefix("HMR-")}::text-message-id"
-        b.database.messageDao().insertIncoming(
-            MessageRecordEntity(
-                messageId = messageId,
-                senderNodeId = a.nodeId,
-                recipientNodeId = b.nodeId,
-                content = "an existing text message",
-                createdAt = b.now,
-                messageType = MessageType.NORMAL.name,
-                status = DeliveryStatus.DELIVERED.name,
-                lastTransport = "WIFI_DIRECT",
-                deliveredAt = b.now
-            )
-        )
-        val manifest = AttachmentTransferManifest(
-            messageId = messageId,
-            senderNodeId = a.nodeId,
-            recipientNodeId = b.nodeId,
-            mimeType = "image/png",
-            displayName = "unexpected.png",
-            sizeBytes = 1L,
-            sha256 = "a".repeat(64),
-            createdAt = b.now
-        )
-
-        assertNull(b.engine.onAttachmentBegin(a.nodeId, manifest))
-        assertNull(b.repository.getAttachment(messageId))
-        assertFalse(AttachmentFileStore.receivePart(b.context, messageId).exists())
-    }
-
-    @Test
-    fun conflictingDataDuplicateCannotReceiveDeliveryAcceptance() = runBlocking {
-        val (_, a, b, _) = createThreeNodes()
-        val messageId = "HMRM-${a.nodeId.removePrefix("HMR-")}::duplicate-content"
-        val packet = MeshPacket(
-            packetId = MeshPacketCodec.stableDataPacketId(messageId),
-            messageId = messageId,
-            originNodeId = a.nodeId,
-            destinationNodeId = b.nodeId,
-            createdAt = b.now,
-            expiresAt = b.now + MeshEngine.MESSAGE_LIFETIME_MS,
-            ttl = MeshPacketCodec.INITIAL_TTL,
-            hopCount = 0,
-            packetType = MeshPacket.PacketType.DATA,
-            messageType = MessageType.NORMAL.name,
-            content = "first durable content"
-        )
-        assertTrue(b.engine.onTransportPacket(
-            sourceNodeId = a.nodeId,
-            sourceAddress = a.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(packet)
-        ))
-        val ackPacketId = MeshPacketCodec.stableDeliveryAckPacketId(messageId)
-        val queuedAckBeforeConflict = requireNotNull(b.repository.getForwarding(ackPacketId))
-
-        val conflict = packet.copy(content = "conflicting content under the same ID")
-        assertFalse(b.engine.onTransportPacket(
-            sourceNodeId = a.nodeId,
-            sourceAddress = a.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(conflict)
-        ))
-        assertEquals("first durable content", b.repository.getById(messageId)?.content)
-        assertEquals(queuedAckBeforeConflict, b.repository.getForwarding(ackPacketId))
-    }
-
-    @Test
-    fun zeroHopDataCannotClaimAnOriginDifferentFromItsIngressPeer() = runBlocking {
-        val (_, a, b, c) = createThreeNodes()
-        val outgoing = a.repository.addOutgoing("Origin binding", b.nodeId, MessageType.NORMAL.name)
-        val packet = MeshPacket(
-            packetId = MeshPacketCodec.stableDataPacketId(outgoing.messageId),
-            messageId = outgoing.messageId,
-            originNodeId = a.nodeId,
-            destinationNodeId = b.nodeId,
-            createdAt = outgoing.createdAt,
-            expiresAt = outgoing.createdAt + MeshEngine.MESSAGE_LIFETIME_MS,
-            ttl = MeshPacketCodec.INITIAL_TTL,
-            hopCount = 0,
-            packetType = MeshPacket.PacketType.DATA,
-            messageType = outgoing.messageType,
-            content = outgoing.content
-        )
-
-        assertFalse(b.engine.onTransportPacket(
-            sourceNodeId = c.nodeId,
-            sourceAddress = c.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(packet)
-        ))
-        assertNull(b.repository.getById(outgoing.messageId))
-
-        assertTrue(b.engine.onTransportPacket(
-            sourceNodeId = a.nodeId,
-            sourceAddress = a.bleAddress,
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(packet)
-        ))
-        assertEquals(outgoing.content, b.repository.getById(outgoing.messageId)?.content)
-    }
-
-    @Test
-    fun relayedDataCannotEnterWithoutAnAssociatedIngressPeer() = runBlocking {
-        val (_, a, b, c) = createThreeNodes()
-        val messageId = "HMRM-${a.nodeId.removePrefix("HMR-")}::missing-predecessor"
-        val packet = MeshPacket(
-            packetId = MeshPacketCodec.stableDataPacketId(messageId),
-            messageId = messageId,
-            originNodeId = a.nodeId,
-            destinationNodeId = c.nodeId,
-            createdAt = b.now,
-            expiresAt = b.now + MeshEngine.MESSAGE_LIFETIME_MS,
-            ttl = MeshPacketCodec.INITIAL_TTL - 1,
-            hopCount = 1,
-            packetType = MeshPacket.PacketType.DATA,
-            messageType = MessageType.NORMAL.name,
-            content = "relayed without peer binding"
-        )
-
-        assertFalse(b.engine.onTransportPacket(
-            sourceNodeId = null,
-            sourceAddress = "unassociated-ble-address",
-            sourceTransport = MeshTransportKind.BLE_GATT,
-            payload = MeshPacketCodec.encode(packet)
-        ))
-        assertNull(b.repository.getForwarding(packet.packetId))
-        assertNull(b.repository.getSeenPacket(packet.packetId))
-    }
-
     private suspend fun processForwarding(node: TestNode, packetId: String) {
         val record = requireNotNull(node.repository.getForwarding(packetId))
         node.engine.processForwardRecord(record, node.now + 5_000L)
@@ -794,17 +230,14 @@ class MeshEngineIntegrationInstrumentedTest {
         val c: TestNode
     )
 
-    private fun createThreeNodes(
-        runForwardingWorker: Boolean = false,
-        runOriginWorker: Boolean = false
-    ): ThreeNodes {
+    private fun createThreeNodes(): ThreeNodes {
         val base = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(base.filesDir, "mesh-engine-integration-${UUID.randomUUID()}").apply { mkdirs() }
         testRoot = root
         val network = FakeNetwork()
-        val a = createNode(base, root, network, nodeA, 1, runForwardingWorker, runOriginWorker)
-        val b = createNode(base, root, network, nodeB, 2, runForwardingWorker, runOriginWorker)
-        val c = createNode(base, root, network, nodeC, 3, runForwardingWorker, runOriginWorker)
+        val a = createNode(base, root, network, nodeA, 1)
+        val b = createNode(base, root, network, nodeB, 2)
+        val c = createNode(base, root, network, nodeC, 3)
         nodes += listOf(a, b, c)
         nodes.forEach { it.engine.start() }
         return ThreeNodes(network, a, b, c)
@@ -815,9 +248,7 @@ class MeshEngineIntegrationInstrumentedTest {
         root: File,
         network: FakeNetwork,
         nodeId: String,
-        index: Int,
-        runForwardingWorker: Boolean,
-        runOriginWorker: Boolean
+        index: Int
     ): TestNode {
         require(NodeIdGenerator.isValid(nodeId))
         val nodeRoot = File(root, nodeId.takeLast(4)).apply { mkdirs() }
@@ -840,9 +271,7 @@ class MeshEngineIntegrationInstrumentedTest {
                 peerDirectory = directory,
                 transports = transports,
                 transportSelection = MeshTransportSelection(),
-                nowMillis = { clock },
-                runForwardingWorker = runForwardingWorker,
-                runOriginWorker = runOriginWorker
+                nowMillis = { clock }
             )
         )
         val node = TestNode(
@@ -894,37 +323,6 @@ class MeshEngineIntegrationInstrumentedTest {
         network.connect(c.nodeId, b.nodeId, MeshTransportKind.WIFI_DIRECT)
     }
 
-    private fun configureBleOnlyTopology(
-        network: FakeNetwork,
-        a: TestNode,
-        b: TestNode,
-        c: TestNode
-    ) {
-        a.peerDirectory.replaceBlePeers(listOf(blePeer(b)), now = a.now)
-        b.peerDirectory.replaceBlePeers(listOf(blePeer(a), blePeer(c)), now = b.now)
-        c.peerDirectory.replaceBlePeers(listOf(blePeer(b)), now = c.now)
-        network.connect(a.nodeId, b.nodeId, MeshTransportKind.BLE_GATT)
-        network.connect(b.nodeId, a.nodeId, MeshTransportKind.BLE_GATT)
-        network.connect(b.nodeId, c.nodeId, MeshTransportKind.BLE_GATT)
-        network.connect(c.nodeId, b.nodeId, MeshTransportKind.BLE_GATT)
-    }
-
-    private fun configureWifiToBleTopology(
-        network: FakeNetwork,
-        a: TestNode,
-        b: TestNode,
-        c: TestNode
-    ) {
-        a.peerDirectory.observeWifi(b.nodeId, "B", "192.0.2.2", 41000, 2, true, true, a.now)
-        b.peerDirectory.observeWifi(a.nodeId, "A", "192.0.2.1", 41000, 2, true, true, b.now)
-        b.peerDirectory.replaceBlePeers(listOf(blePeer(c)), now = b.now)
-        c.peerDirectory.replaceBlePeers(listOf(blePeer(b)), now = c.now)
-        network.connect(a.nodeId, b.nodeId, MeshTransportKind.WIFI_DIRECT)
-        network.connect(b.nodeId, a.nodeId, MeshTransportKind.WIFI_DIRECT)
-        network.connect(b.nodeId, c.nodeId, MeshTransportKind.BLE_GATT)
-        network.connect(c.nodeId, b.nodeId, MeshTransportKind.BLE_GATT)
-    }
-
     private fun blePeer(node: TestNode) = BlePeer(
         nodeId = node.nodeId,
         deviceName = node.nodeId.takeLast(4),
@@ -964,16 +362,6 @@ class MeshEngineIntegrationInstrumentedTest {
     private class FakeNetwork {
         private data class Link(val from: String, val to: String, val kind: MeshTransportKind)
         private data class FailureKey(val link: Link, val packetType: MeshPacket.PacketType, val afterAccept: Boolean)
-        private data class GateKey(val link: Link, val packetType: MeshPacket.PacketType)
-        class SendGate internal constructor() {
-            private val started = CompletableDeferred<Unit>()
-            private val released = CompletableDeferred<Unit>()
-
-            suspend fun awaitStarted() = withTimeout(TEST_WORKER_TIMEOUT_MS) { started.await() }
-            fun release() { released.complete(Unit) }
-            internal suspend fun awaitRelease() { released.await() }
-            internal fun signalStarted() { started.complete(Unit) }
-        }
         data class Attempt(
             val from: String,
             val to: String,
@@ -987,24 +375,12 @@ class MeshEngineIntegrationInstrumentedTest {
         private val nodes = LinkedHashMap<String, TestNode>()
         private val links = mutableSetOf<Link>()
         private val failures = mutableMapOf<FailureKey, Int>()
-        private val sendGates = mutableMapOf<GateKey, MutableList<SendGate>>()
-        @Volatile var available = true
         val attempts = mutableListOf<Attempt>()
 
         fun register(node: TestNode) = synchronized(lock) { nodes[node.nodeId] = node }
 
         fun connect(from: String, to: String, kind: MeshTransportKind) = synchronized(lock) {
             links += Link(from, to, kind)
-        }
-
-        fun holdNext(
-            from: String,
-            to: String,
-            kind: MeshTransportKind,
-            packetType: MeshPacket.PacketType
-        ): SendGate = synchronized(lock) {
-            val key = GateKey(Link(from, to, kind), packetType)
-            SendGate().also { sendGates.getOrPut(key) { mutableListOf() }.add(it) }
         }
 
         fun failNext(
@@ -1020,7 +396,7 @@ class MeshEngineIntegrationInstrumentedTest {
 
         fun transport(from: String, transportKind: MeshTransportKind) = object : MeshTransport {
             override val kind = transportKind
-            override fun isAvailable() = available
+            override fun isAvailable() = true
             override fun canReach(peer: MeshTransportPeer): Boolean = synchronized(lock) {
                 Link(from, peer.nodeId, kind) in links
             }
@@ -1037,19 +413,10 @@ class MeshEngineIntegrationInstrumentedTest {
                 val afterKey = FailureKey(link, packet.packetType, afterAccept = true)
                 val failBefore = takeFailure(beforeKey)
                 val failAfter = !failBefore && takeFailure(afterKey)
-                val gate = synchronized(lock) {
-                    sendGates[GateKey(link, packet.packetType)]?.removeFirstOrNull()
-                        ?.also { if (sendGates[GateKey(link, packet.packetType)].isNullOrEmpty()) sendGates.remove(GateKey(link, packet.packetType)) }
-                }
                 val attempt = Attempt(from, peer.nodeId, kind, packet.packetType, packet.messageId, encodedPacket.copyOf())
                 synchronized(lock) { attempts += attempt }
                 if (!canReach(peer)) return MeshTransportSendResult.Unavailable(kind, "NO_FAKE_LINK")
                 if (failBefore) return MeshTransportSendResult.Failed(kind, "INJECTED_PACKET_LOSS")
-
-                if (gate != null) {
-                    gate.signalStarted()
-                    gate.awaitRelease()
-                }
 
                 val target = synchronized(lock) { nodes[peer.nodeId] }
                     ?: return MeshTransportSendResult.Failed(kind, "UNKNOWN_FAKE_NODE")
@@ -1076,8 +443,4 @@ class MeshEngineIntegrationInstrumentedTest {
     private fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256")
         .digest(this)
         .joinToString("") { "%02x".format(it) }
-
-    private companion object {
-        const val TEST_WORKER_TIMEOUT_MS = 10_000L
-    }
 }

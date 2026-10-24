@@ -7,6 +7,7 @@ import android.os.StatFs
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.UUID
 
 data class ImportedAttachment(
@@ -21,18 +22,7 @@ data class ImportedAttachment(
 object AttachmentFileStore {
     private const val CHUNK_BYTES = 64 * 1024
     private val receiveFileLock = Any()
-    private val receiveHandles = HashMap<String, ReceiveHandle>()
-
-    data class ReceiveHandle(
-        val offset: Long,
-        private var valid: Boolean = true
-    ) {
-        internal fun invalidate() {
-            valid = false
-        }
-
-        internal fun isValid(): Boolean = valid
-    }
+    private val blockedReceiveIds = Collections.synchronizedSet(HashSet<String>())
 
     fun importPickedFile(
         context: Context,
@@ -103,7 +93,7 @@ object AttachmentFileStore {
 
     fun deleteReceivedFiles(context: Context, messageId: String) {
         synchronized(receiveFileLock) {
-            receiveHandles.remove(messageId)?.invalidate()
+            blockedReceiveIds += messageId
             receivePart(context, messageId).delete()
             receivedFile(context, messageId).delete()
         }
@@ -114,43 +104,27 @@ object AttachmentFileStore {
         protectedMessageIds: Set<String>,
         cutoff: Long
     ): Int {
-        synchronized(receiveFileLock) {
-            val directory = attachmentDirectory(context)
-            val protectedPaths = protectedMessageIds.mapTo(HashSet()) {
-                receivePart(context, it).absolutePath
-            }
-            return directory.listFiles()
-                ?.count { file ->
-                    if (file.extension != "part" ||
-                        file.absolutePath in protectedPaths ||
-                        file.lastModified() >= cutoff ||
-                        !file.isFile
-                    ) {
-                        false
-                    } else {
-                        receiveHandles.entries
-                            .firstOrNull { (messageId, _) ->
-                                receivePart(context, messageId).absolutePath == file.absolutePath
-                            }
-                            ?.let { (messageId, handle) ->
-                                receiveHandles.remove(messageId)
-                                handle.invalidate()
-                            }
-                        file.delete()
-                    }
-                } ?: 0
+        val directory = attachmentDirectory(context)
+        val protectedPaths = protectedMessageIds.mapTo(HashSet()) {
+            receivePart(context, it).absolutePath
         }
+        return directory.listFiles()
+            ?.count { file ->
+                file.extension == "part" &&
+                    file.absolutePath !in protectedPaths &&
+                    file.lastModified() < cutoff &&
+                    file.isFile &&
+                    file.delete()
+            } ?: 0
     }
 
-    fun prepareReceive(context: Context, manifest: AttachmentTransferManifest): ReceiveHandle? {
+    fun prepareReceive(context: Context, manifest: AttachmentTransferManifest): Long? {
         synchronized(receiveFileLock) {
-            receiveHandles.remove(manifest.messageId)?.invalidate()
+            blockedReceiveIds.remove(manifest.messageId)
             val part = receivePart(context, manifest.messageId)
             val completed = receivedFile(context, manifest.messageId)
             if (completed.isFile && completed.length() == manifest.sizeBytes && sha256(completed) == manifest.sha256) {
-                return ReceiveHandle(manifest.sizeBytes).also {
-                    receiveHandles[manifest.messageId] = it
-                }
+                return manifest.sizeBytes
             }
             if (completed.exists()) completed.delete()
             if (part.exists() && part.length() > manifest.sizeBytes) {
@@ -160,26 +134,15 @@ object AttachmentFileStore {
             val available = runCatching { StatFs(part.parentFile!!.absolutePath).availableBytes }.getOrDefault(0L)
             if (available < manifest.sizeBytes - existingBytes) return null
             if (!part.exists()) part.createNewFile()
-            return part.length().takeIf { it <= manifest.sizeBytes }?.let {
-                ReceiveHandle(it).also { handle ->
-                    receiveHandles[manifest.messageId] = handle
-                }
-            }
+            return part.length().takeIf { it <= manifest.sizeBytes }
         }
     }
 
     /** Must be called with the app context used to prepare this message's part file. */
-    fun appendChunk(
-        context: Context,
-        messageId: String,
-        handle: ReceiveHandle,
-        expectedOffset: Long,
-        bytes: ByteArray,
-        totalBytes: Long
-    ): Long? {
+    fun appendChunk(context: Context, messageId: String, expectedOffset: Long, bytes: ByteArray, totalBytes: Long): Long? {
         if (bytes.isEmpty() || bytes.size > CHUNK_BYTES || expectedOffset < 0L || expectedOffset + bytes.size > totalBytes) return null
         synchronized(receiveFileLock) {
-            if (receiveHandles[messageId] !== handle || !handle.isValid()) return null
+            if (blockedReceiveIds.contains(messageId)) return null
             val part = receivePart(context, messageId)
             return runCatching {
                 RandomAccessFile(part, "rw").use { output ->
@@ -192,19 +155,11 @@ object AttachmentFileStore {
         }
     }
 
-    fun finishReceive(
-        context: Context,
-        manifest: AttachmentTransferManifest,
-        handle: ReceiveHandle
-    ): File? {
+    fun finishReceive(context: Context, manifest: AttachmentTransferManifest): File? {
         synchronized(receiveFileLock) {
-            if (receiveHandles[manifest.messageId] !== handle || !handle.isValid()) return null
+            if (blockedReceiveIds.contains(manifest.messageId)) return null
             val finalFile = receivedFile(context, manifest.messageId)
-            if (finalFile.isFile && finalFile.length() == manifest.sizeBytes && sha256(finalFile) == manifest.sha256) {
-                receiveHandles.remove(manifest.messageId, handle)
-                handle.invalidate()
-                return finalFile
-            }
+            if (finalFile.isFile && finalFile.length() == manifest.sizeBytes && sha256(finalFile) == manifest.sha256) return finalFile
             val part = receivePart(context, manifest.messageId)
             if (!part.isFile || part.length() != manifest.sizeBytes) return null
             if (sha256(part) != manifest.sha256) {
@@ -213,8 +168,6 @@ object AttachmentFileStore {
             }
             if (finalFile.exists()) finalFile.delete()
             if (!part.renameTo(finalFile)) return null
-            receiveHandles.remove(manifest.messageId, handle)
-            handle.invalidate()
             return finalFile
         }
     }

@@ -10,7 +10,5 @@ internal data class MeshEngineTestOverrides(
     val peerDirectory: MeshPeerDirectory,
     val transports: List<MeshTransport>,
     val transportSelection: MeshTransportSelection = MeshTransportSelection(),
-    val nowMillis: () -> Long = System::currentTimeMillis,
-    val runForwardingWorker: Boolean = false,
-    val runOriginWorker: Boolean = false
+    val nowMillis: () -> Long = System::currentTimeMillis
 )

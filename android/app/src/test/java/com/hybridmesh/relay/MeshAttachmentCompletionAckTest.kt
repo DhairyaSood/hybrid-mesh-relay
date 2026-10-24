@@ -80,7 +80,7 @@ class MeshAttachmentCompletionAckTest {
         destinationNodeId = sender,
         createdAt = 1_000L,
         expiresAt = 1_000L + 30 * 60 * 1_000L,
-        ttl = MeshPacketCodec.ACK_INITIAL_TTL,
+        ttl = MeshPacketCodec.INITIAL_TTL,
         hopCount = 0,
         packetType = MeshPacket.PacketType.ATTACHMENT_ACK,
         messageType = MeshPacketCodec.ATTACHMENT_ACK_TYPE,

@@ -4,9 +4,6 @@ import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.CharBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.CodingErrorAction
 
 /** Small application frames carried by the existing reliable BLE/GATT session. */
 object BleAttachmentFrameCodec {
@@ -88,8 +85,7 @@ object BleAttachmentFrameCodec {
         require(offset >= 0L && bytes.isNotEmpty() && bytes.size <= MAX_CHUNK_BYTES)
         require(protocolVersion == LEGACY_PROTOCOL_VERSION ||
             protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION)
-        val id = encodeUtf8(messageId)
-        require(id.size in 1..160) { "messageId is too large in UTF-8 bytes" }
+        val id = messageId.toByteArray(Charsets.UTF_8)
         return ByteBuffer.allocate(4 + 1 + 1 + 8 + 8 + 2 + id.size + bytes.size)
             .order(ByteOrder.BIG_ENDIAN)
             .apply {
@@ -103,7 +99,7 @@ object BleAttachmentFrameCodec {
         messageId: String,
         protocolVersion: Int = LEGACY_PROTOCOL_VERSION
     ): ByteArray {
-        val id = encodeUtf8(messageId)
+        val id = messageId.toByteArray(Charsets.UTF_8)
         require(id.isNotEmpty() && id.size <= 160)
         require(protocolVersion == LEGACY_PROTOCOL_VERSION ||
             protocolVersion == HOP_IDENTITY_PROTOCOL_VERSION)
@@ -152,7 +148,7 @@ object BleAttachmentFrameCodec {
                     val offset = input.long
                     val idLength = input.short.toInt() and 0xFFFF
                     if (idLength !in 1..160 || input.remaining() <= idLength) return null
-                    val id = decodeUtf8(ByteArray(idLength).also { input.get(it) })
+                    val id = ByteArray(idLength).also { input.get(it) }.toString(Charsets.UTF_8)
                     val chunk = ByteArray(input.remaining()).also { input.get(it) }
                     if (offset < 0L || chunk.size > MAX_CHUNK_BYTES) return null
                     Frame.Chunk(transferId, protocolVersion, id, offset, chunk)
@@ -172,7 +168,7 @@ object BleAttachmentFrameCodec {
             .apply { put(MAGIC); put(protocolVersion.toByte()); put(type); putLong(transferId); put(body) }.array()
 
     private fun DataOutputStream.writeUtf8(value: String, maxBytes: Int) {
-        val bytes = encodeUtf8(value)
+        val bytes = value.toByteArray(Charsets.UTF_8)
         require(bytes.size in 1..maxBytes)
         writeShort(bytes.size)
         write(bytes)
@@ -182,25 +178,6 @@ object BleAttachmentFrameCodec {
         if (remaining() < 2) throw IllegalArgumentException("Truncated text field")
         val length = short.toInt() and 0xFFFF
         if (length !in 1..maxBytes || remaining() < length) throw IllegalArgumentException("Invalid text field")
-        val bytes = ByteArray(length).also { get(it) }
-        return decodeUtf8(bytes)
-    }
-
-    private fun decodeUtf8(bytes: ByteArray): String = Charsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-            .decode(ByteBuffer.wrap(bytes))
-            .toString()
-
-    private fun encodeUtf8(value: String): ByteArray {
-        val encoded = try {
-            Charsets.UTF_8.newEncoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .encode(CharBuffer.wrap(value))
-        } catch (failure: CharacterCodingException) {
-            throw IllegalArgumentException("Text contains malformed UTF-16", failure)
-        }
-        return ByteArray(encoded.remaining()).also { encoded.get(it) }
+        return ByteArray(length).also { get(it) }.toString(Charsets.UTF_8)
     }
 }

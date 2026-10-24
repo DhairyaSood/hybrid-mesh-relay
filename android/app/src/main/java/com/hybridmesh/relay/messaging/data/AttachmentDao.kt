@@ -44,7 +44,7 @@ interface AttachmentDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(record: AttachmentRecordEntity)
 
-    @Query("UPDATE mesh_attachments SET status = :status, transferredBytes = :transferredBytes, updatedAt = :updatedAt, lastError = :lastError WHERE messageId = :messageId AND status IN ('QUEUED', 'WAITING_WIFI', 'SENDING', 'RECEIVING', 'RELAY_QUEUED')")
+    @Query("UPDATE mesh_attachments SET status = :status, transferredBytes = :transferredBytes, updatedAt = :updatedAt, lastError = :lastError WHERE messageId = :messageId")
     suspend fun updateProgress(messageId: String, status: String, transferredBytes: Long, updatedAt: Long, lastError: String?): Int
 
     @Query("UPDATE mesh_attachments SET status = 'WAITING_WIFI', lastError = 'TRANSFER_INTERRUPTED' WHERE status IN ('SENDING', 'RECEIVING')")
@@ -65,14 +65,8 @@ interface AttachmentDao {
         lastError: String
     ): Int
 
-    @Query("UPDATE mesh_attachments SET status = :status, localPath = :localPath, updatedAt = :updatedAt, lastError = :lastError WHERE messageId = :messageId AND status IN ('QUEUED', 'WAITING_WIFI', 'SENDING', 'RECEIVING', 'RELAY_QUEUED')")
+    @Query("UPDATE mesh_attachments SET status = :status, localPath = :localPath, updatedAt = :updatedAt, lastError = :lastError WHERE messageId = :messageId")
     suspend fun updateStatusAndPath(messageId: String, status: String, localPath: String?, updatedAt: Long, lastError: String?): Int
-
-    @Query("UPDATE mesh_attachments SET localPath = :localPath WHERE messageId = :messageId AND status = :status")
-    suspend fun updatePathForState(messageId: String, status: String, localPath: String?): Int
-
-    @Query("UPDATE mesh_attachments SET status = 'DELIVERED', transferredBytes = sizeBytes, updatedAt = :now, lastError = NULL WHERE messageId = :messageId AND UPPER(senderNodeId) = UPPER(:localNodeId) AND status != 'DELIVERED'")
-    suspend fun markDeliveredByRecipient(messageId: String, localNodeId: String, now: Long): Int
 
     @Query("DELETE FROM mesh_attachments WHERE messageId = :messageId")
     suspend fun delete(messageId: String)
