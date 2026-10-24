@@ -96,6 +96,7 @@ class WifiDirectManager(
     private val sessions = WifiDirectSessionRegistry<PeerSession>(MAX_WIFI_SESSIONS) { it.peer.host }
     private val activeMediaSockets = ConcurrentHashMap.newKeySet<Socket>()
     private val handshakeSlots = Semaphore(MAX_CONCURRENT_HANDSHAKES)
+    private val groupSessionGeneration = WifiDirectGroupSessionGeneration()
     private val connectAttempts = ConcurrentHashMap.newKeySet<String>()
     private val advertisedServiceDevices = ConcurrentHashMap<String, WifiP2pDevice>()
     private val servicePeerAdvertisements = ConcurrentHashMap<String, WifiDirectPeerAdvertisement>()
@@ -290,6 +291,7 @@ class WifiDirectManager(
             return
         }
         started = false
+        groupSessionGeneration.advance()
         healthProbeJob.getAndSet(null)?.cancel()
         resolveGroupAttemptAsStopped("MANAGER_STOPPED")
         groupFormed = false
@@ -1127,6 +1129,7 @@ class WifiDirectManager(
     }
 
     private fun resetRuntimeForP2pLoss(clearChannel: Boolean) {
+        groupSessionGeneration.advance()
         resolveGroupAttemptAsStopped("P2P_UNAVAILABLE")
         groupFormed = false
         groupOwner = false
@@ -1617,6 +1620,7 @@ class WifiDirectManager(
                     discoveryWatchdogJob?.cancel(); discoveryWatchdogJob = null
                 }
                 discoveryRetryJob?.cancel(); discoveryRetryJob = null
+                if (!sameGroup) groupSessionGeneration.advance()
                 groupFormed = true
                 groupOwner = info.isGroupOwner
                 groupOwnerAddress = ownerAddress
@@ -1793,6 +1797,7 @@ class WifiDirectManager(
     private fun connectToGroupOwner(address: InetAddress) {
         val host = address.hostAddress ?: return
         if (clientJob?.isActive == true) return
+        val sessionGeneration = groupSessionGeneration.current()
         clientJob = scope.launch {
             var attempt = 0
             // The group owner can finish bringing up its TCP listener just after
@@ -1829,7 +1834,11 @@ class WifiDirectManager(
                         result = it.javaClass.simpleName
                     )
                 }.getOrNull()
-                if (socket != null && establishSession(socket, currentAttemptId ?: UUID.randomUUID().toString())) return@launch
+                if (socket != null && establishSession(
+                        socket,
+                        currentAttemptId ?: UUID.randomUUID().toString(),
+                        sessionGeneration
+                    )) return@launch
                 runCatching { socket?.close() }
                 delay(if (attempt <= CLIENT_FAST_RETRY_COUNT) CLIENT_RETRY_DELAY_MS else CLIENT_RETRY_MAX_DELAY_MS)
             }
@@ -1838,6 +1847,7 @@ class WifiDirectManager(
 
     private fun startServer() {
         if (serverJob?.isActive == true) return
+        val sessionGeneration = groupSessionGeneration.current()
         serverJob = scope.launch {
             publishRuntimeState(WifiDirectStage.CONTROL_SERVER_STARTING)
             var server: ServerSocket? = null
@@ -1887,7 +1897,7 @@ class WifiDirectManager(
                             result = "TCP_ACCEPTED"
                         )
                         launch {
-                            try { establishSession(socket, attemptId) } finally { handshakeSlots.release() }
+                            try { establishSession(socket, attemptId, sessionGeneration) } finally { handshakeSlots.release() }
                         }
                     }
                 }
@@ -2013,7 +2023,11 @@ class WifiDirectManager(
         }
     }
 
-    private suspend fun establishSession(socket: Socket, attemptId: String): Boolean {
+    private suspend fun establishSession(
+        socket: Socket,
+        attemptId: String,
+        sessionGeneration: Long
+    ): Boolean {
         val handshakeStartedAt = System.nanoTime()
         socket.soTimeout = HANDSHAKE_TIMEOUT_MS
         val input = runCatching { DataInputStream(BufferedInputStream(socket.getInputStream())) }.getOrNull()
@@ -2083,63 +2097,72 @@ class WifiDirectManager(
             handshakeWatchdog.cancel()
         }
         socket.soTimeout = 0
-        if (!started || !groupFormed || socket.isClosed) {
+        if (!started || !groupFormed || socket.isClosed ||
+            groupSessionGeneration.current() != sessionGeneration
+        ) {
             runCatching { socket.close() }
             return false
         }
         val key = normalize(remote.nodeId)
         val session = PeerSession(remote, socket, input, output)
-        // The registry serializes capacity checks and peer replacement across
-        // concurrent HELLO handlers while keeping unrelated healthy sessions.
-        val admission = sessions.admit(key, remote.host, session)
-        val admitted = admission.accepted
-        if (!admitted) {
-            diagnostics.record(
-                kind = NetworkEventKind.REQUEST_FAILED,
-                operation = "wifi.tcp.session_rejected",
-                correlationId = attemptId,
-                transport = "WIFI_DIRECT",
-                result = "SESSION_CAPACITY_OR_NODE_ID_CONFLICT"
-            )
+        // Hold the group token across admission and publication. A reset cannot
+        // let an in-flight handshake from the previous P2P group replace a new session.
+        val published = groupSessionGeneration.runIfCurrent(sessionGeneration) {
+            if (!started || !groupFormed || socket.isClosed) return@runIfCurrent false
+            val admission = sessions.admit(key, remote.host, session)
+            if (!admission.accepted) {
+                diagnostics.record(
+                    kind = NetworkEventKind.REQUEST_FAILED,
+                    operation = "wifi.tcp.session_rejected",
+                    correlationId = attemptId,
+                    transport = "WIFI_DIRECT",
+                    result = "SESSION_CAPACITY_OR_NODE_ID_CONFLICT"
+                )
+                return@runIfCurrent false
+            }
+            admission.replaced?.takeIf { it !== session }?.close(notify = false)
+            sessions.runIfCurrent(key, session) {
+                val handshakeDurationMs = ((System.nanoTime() - handshakeStartedAt) / 1_000_000L).coerceAtLeast(0L)
+                val groupCorrelationId = groupAttemptId.getAndSet(null)
+                val totalAttemptDurationMs = connectionStarts.remove(attemptId)?.let {
+                    ((System.nanoTime() - it) / 1_000_000L).coerceAtLeast(0L)
+                } ?: groupCorrelationId?.let { groupId ->
+                    connectionStarts.remove(groupId)?.let {
+                        ((System.nanoTime() - it) / 1_000_000L).coerceAtLeast(0L)
+                    }
+                }
+                recordPeerSessionReady(remote, totalAttemptDurationMs ?: handshakeDurationMs)
+                onPeerConnected(remote)
+                groupCorrelationId?.let { correlationId ->
+                    diagnostics.record(
+                        kind = NetworkEventKind.CONNECTION_STAGE,
+                        operation = "wifi.p2p.session_ready",
+                        correlationId = correlationId,
+                        transport = "WIFI_DIRECT",
+                        peerNodeId = remote.nodeId,
+                        durationMs = totalAttemptDurationMs ?: handshakeDurationMs,
+                        result = "TCP_SESSION_ACTIVE; helloMs=$handshakeDurationMs"
+                    )
+                }
+                currentAttemptId = attemptId
+                currentPeer = remote.nodeId
+                diagnostics.record(
+                    kind = NetworkEventKind.CONNECTION_STAGE,
+                    operation = "wifi.tcp.session_active",
+                    correlationId = attemptId,
+                    transport = "WIFI_DIRECT",
+                    peerNodeId = remote.nodeId,
+                    durationMs = totalAttemptDurationMs ?: handshakeDurationMs,
+                    result = "PROTOCOL_${remote.protocolVersion}; helloMs=$handshakeDurationMs"
+                )
+                publishRuntimeState(WifiDirectStage.SESSION_READY)
+                session.startReader()
+            }
+        } == true
+        if (!published) {
             runCatching { socket.close() }
             return false
         }
-        val handshakeDurationMs = ((System.nanoTime() - handshakeStartedAt) / 1_000_000L).coerceAtLeast(0L)
-        val groupCorrelationId = groupAttemptId.getAndSet(null)
-        val totalAttemptDurationMs = connectionStarts.remove(attemptId)?.let {
-            ((System.nanoTime() - it) / 1_000_000L).coerceAtLeast(0L)
-        } ?: groupCorrelationId?.let { groupId ->
-            connectionStarts.remove(groupId)?.let {
-                ((System.nanoTime() - it) / 1_000_000L).coerceAtLeast(0L)
-            }
-        }
-        recordPeerSessionReady(remote, totalAttemptDurationMs ?: handshakeDurationMs)
-        admission.replaced?.takeIf { it !== session }?.close(notify = false)
-        onPeerConnected(remote)
-        groupCorrelationId?.let { correlationId ->
-            diagnostics.record(
-                kind = NetworkEventKind.CONNECTION_STAGE,
-                operation = "wifi.p2p.session_ready",
-                correlationId = correlationId,
-                transport = "WIFI_DIRECT",
-                peerNodeId = remote.nodeId,
-                durationMs = totalAttemptDurationMs ?: handshakeDurationMs,
-                result = "TCP_SESSION_ACTIVE; helloMs=$handshakeDurationMs"
-            )
-        }
-        currentAttemptId = attemptId
-        currentPeer = remote.nodeId
-        diagnostics.record(
-            kind = NetworkEventKind.CONNECTION_STAGE,
-            operation = "wifi.tcp.session_active",
-            correlationId = attemptId,
-            transport = "WIFI_DIRECT",
-            peerNodeId = remote.nodeId,
-            durationMs = totalAttemptDurationMs ?: handshakeDurationMs,
-            result = "PROTOCOL_${remote.protocolVersion}; helloMs=$handshakeDurationMs"
-        )
-        publishRuntimeState(WifiDirectStage.SESSION_READY)
-        session.startReader()
         ensureHealthProbeLoop()
         return true
     }
@@ -2154,16 +2177,18 @@ class WifiDirectManager(
                         val startedAt = System.nanoTime()
                         val success = peerSession.probe()
                         val durationMs = ((System.nanoTime() - startedAt) / 1_000_000L).coerceAtLeast(0L)
-                        onPeerHealthSample(
-                            peerSession.peer.nodeId,
-                            durationMs,
-                            success
-                        )
-                        val invalidated = peerSession.probeFailurePolicy.record(success)
-                        recordPeerHealth(peerSession, durationMs)
-                        publishRuntimeState(runtimeStageAfterPeerChange(), error = _runtimeState.value.lastError)
-                        if (invalidated) {
-                            peerSession.close(notify = true, failureReason = "HEALTH_PROBE_FAILURE_THRESHOLD")
+                        sessions.runIfCurrent(normalize(peerSession.peer.nodeId), peerSession) {
+                            onPeerHealthSample(
+                                peerSession.peer.nodeId,
+                                durationMs,
+                                success
+                            )
+                            val invalidated = peerSession.probeFailurePolicy.record(success)
+                            recordPeerHealth(peerSession, durationMs)
+                            publishRuntimeState(runtimeStageAfterPeerChange(), error = _runtimeState.value.lastError)
+                            if (invalidated) {
+                                peerSession.close(notify = true, failureReason = "HEALTH_PROBE_FAILURE_THRESHOLD")
+                            }
                         }
                     }
                     delay(10_000L)
@@ -2326,10 +2351,11 @@ class WifiDirectManager(
             readerJob?.cancel()
             pendingAcks.values.forEach { it.complete(false) }
             pendingAcks.clear()
-            sessions.remove(normalize(peer.nodeId), this)
-            if (notify) {
-                recordPeerSessionClosed(peer, failureReason)
-                onPeerDisconnected(peer.nodeId)
+            sessions.remove(normalize(peer.nodeId), this) {
+                if (notify) {
+                    recordPeerSessionClosed(peer, failureReason)
+                    onPeerDisconnected(peer.nodeId)
+                }
             }
             publishRuntimeState(runtimeStageAfterPeerChange())
             if (started && groupFormed && !groupOwner && sessions.isEmpty()) {
@@ -2347,6 +2373,7 @@ class WifiDirectManager(
     }
 
     private fun resetGroupConnections() {
+        groupSessionGeneration.advance()
         resolveGroupAttemptAsStopped("GROUP_DISCONNECTED")
         connectAttempts.clear()
         candidateRetryJobs.values.forEach { it.cancel() }

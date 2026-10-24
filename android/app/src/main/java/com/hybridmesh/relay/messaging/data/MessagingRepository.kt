@@ -16,6 +16,8 @@ import com.hybridmesh.relay.model.MessageType
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 
 class MessagingRepository internal constructor(
@@ -36,6 +38,7 @@ class MessagingRepository internal constructor(
     private val traceEvents = database.messageTraceEventDao()
     private val attachments = database.attachmentDao()
     private val tracePurgeCounter = AtomicInteger(0)
+    private val receiveHandles = ConcurrentHashMap<String, AttachmentFileStore.ReceiveHandle>()
 
     private class RepositoryIdentityProvider(
         private val delegate: IdentityStore,
@@ -87,14 +90,17 @@ class MessagingRepository internal constructor(
             )
             if (stale.isEmpty()) break
             stale.forEach { record ->
-                AttachmentFileStore.deleteReceivedFiles(appContext, record.messageId)
-                attachments.markStaleIncomingTransfer(
+                val expired = attachments.markStaleIncomingTransfer(
                     messageId = record.messageId,
                     localNodeId = localNodeId,
                     cutoff = staleBefore,
                     now = now,
                     lastError = "TRANSFER_EXPIRED"
                 )
+                if (expired > 0) {
+                    receiveHandles.remove(record.messageId)
+                    AttachmentFileStore.deleteReceivedFiles(appContext, record.messageId)
+                }
             }
         }
         AttachmentFileStore.deleteStaleOrphanReceiveParts(
@@ -117,23 +123,31 @@ class MessagingRepository internal constructor(
         occurredAt: Long = System.currentTimeMillis()
     ) {
         if (messageId.isBlank()) return
-        traceEvents.insert(
-            MessageTraceEventEntity(
-                messageId = messageId,
-                packetId = packetId,
-                occurredAt = occurredAt,
-                eventType = eventType.take(48),
-                transport = transport?.take(32),
-                peerNodeId = peerNodeId?.take(128),
-                attemptNumber = attemptNumber,
-                durationMs = durationMs,
-                resultCode = resultCode?.take(96),
-                detail = detail?.take(256)
+        try {
+            traceEvents.insert(
+                MessageTraceEventEntity(
+                    messageId = messageId,
+                    packetId = packetId,
+                    occurredAt = occurredAt,
+                    eventType = eventType.take(48),
+                    transport = transport?.take(32),
+                    peerNodeId = peerNodeId?.take(128),
+                    attemptNumber = attemptNumber,
+                    durationMs = durationMs,
+                    resultCode = resultCode?.take(96),
+                    detail = detail?.take(256)
+                )
             )
-        )
-        // Bounded local history; no payload/body is ever written to trace events.
-        if (tracePurgeCounter.incrementAndGet() % 64 == 0) {
-            traceEvents.deleteOlderThan(occurredAt - 7L * 24 * 60 * 60 * 1000)
+            // Bounded local history; no payload/body is ever written to trace events.
+            if (tracePurgeCounter.incrementAndGet() % 64 == 0) {
+                traceEvents.deleteOlderThan(occurredAt - 7L * 24 * 60 * 60 * 1000)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            // Trace persistence is observational. A full or unavailable trace table
+            // must never prevent a packet from being accepted, forwarded, or ACKed.
+            android.util.Log.w("NeyraMeshTrace", "Trace persistence failed (${failure.javaClass.simpleName})")
         }
     }
 
@@ -405,94 +419,156 @@ class MessagingRepository internal constructor(
     suspend fun prepareIncomingAttachment(
         manifest: AttachmentTransferManifest,
         localPath: String,
-        resumeOffset: Long,
         receivedFromNodeId: String,
         localCanRelay: Boolean
-    ): Boolean {
+    ): Long? {
         val localNodeId = identityStore.getIdentity().nodeId
         val isFinalRecipient = manifest.recipientNodeId.equals(localNodeId, true)
         if (!manifest.isValid() || receivedFromNodeId.isBlank() ||
-            (!isFinalRecipient && (!localCanRelay || manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS))) return false
+            (!isFinalRecipient && (!localCanRelay || manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS))) return null
         val now = System.currentTimeMillis()
         reclaimExpiredRemoteHistory(now)
-        val attachment = AttachmentRecordEntity(
-            messageId = manifest.messageId,
-            senderNodeId = manifest.senderNodeId,
-            recipientNodeId = manifest.recipientNodeId,
-            mimeType = manifest.mimeType,
-            displayName = manifest.displayName,
-            sizeBytes = manifest.sizeBytes,
-            sha256 = manifest.sha256.lowercase(),
-            // Do not expose a partial .part receive as an outgoing relay file.
-            // The completed path only becomes routable after its hash is verified.
-            localPath = java.io.File(localPath).takeIf { it.isFile && it.length() == manifest.sizeBytes }?.absolutePath,
-            status = AttachmentTransferStatus.RECEIVING,
-            receivedFromNodeId = receivedFromNodeId,
-            hopCount = manifest.hopCount,
-            createdAt = manifest.createdAt,
-            transferredBytes = resumeOffset.coerceIn(0L, manifest.sizeBytes),
-            updatedAt = now
-        )
-        val persisted = database.withTransaction {
-            val existing = attachments.get(manifest.messageId)
-            if (existing != null && (
-                    !existing.senderNodeId.equals(manifest.senderNodeId, true) ||
-                        !existing.recipientNodeId.equals(manifest.recipientNodeId, true) ||
-                        existing.sizeBytes != manifest.sizeBytes ||
-                        !existing.sha256.equals(manifest.sha256, true) ||
-                        !existing.mimeType.equals(manifest.mimeType, true)
-                    )) return@withTransaction false
-            if (existing?.status == AttachmentTransferStatus.DELIVERED && existing.localPath != null) {
-                return@withTransaction true
+        val resumeOffset = try {
+            database.withTransaction {
+                val existing = attachments.get(manifest.messageId)
+                if (existing != null && !existing.matches(manifest)) return@withTransaction null
+                if (existing?.status == AttachmentTransferStatus.FAILED &&
+                    existing.lastError == "TRANSFER_EXPIRED") return@withTransaction null
+                if (isFinalRecipient) {
+                    val existingMessage = messages.getById(manifest.messageId)
+                    if (existingMessage != null && !existingMessage.matchesAttachment(manifest)) {
+                        return@withTransaction null
+                    }
+                }
+
+                // Validate the durable identity before touching the message-ID keyed
+                // receive files. Room serializes concurrent BEGINs so the first
+                // accepted manifest becomes authoritative before another one can
+                // prepare the same file path.
+                if (existing?.status == AttachmentTransferStatus.DELIVERED && existing.localPath != null) {
+                    val receiveHandle = AttachmentFileStore.prepareReceive(appContext, manifest)
+                    if (receiveHandle == null) {
+                        receiveHandles.remove(manifest.messageId)
+                        AttachmentFileStore.deleteReceivedFiles(appContext, manifest.messageId)
+                        return@withTransaction null
+                    }
+                    receiveHandles[manifest.messageId] = receiveHandle
+                    return@withTransaction receiveHandle.offset
+                }
+                if (!hasRemoteAttachmentCapacity(localNodeId, manifest.messageId, manifest.sizeBytes)) {
+                    return@withTransaction null
+                }
+                val receiveHandle = AttachmentFileStore.prepareReceive(appContext, manifest)
+                    ?: run {
+                        receiveHandles.remove(manifest.messageId)
+                        AttachmentFileStore.deleteReceivedFiles(appContext, manifest.messageId)
+                        return@withTransaction null
+                    }
+                receiveHandles[manifest.messageId] = receiveHandle
+                attachments.upsert(
+                    AttachmentRecordEntity(
+                        messageId = manifest.messageId,
+                        senderNodeId = manifest.senderNodeId,
+                        recipientNodeId = manifest.recipientNodeId,
+                        mimeType = manifest.mimeType,
+                        displayName = manifest.displayName,
+                        sizeBytes = manifest.sizeBytes,
+                        sha256 = manifest.sha256.lowercase(),
+                        // Do not expose a partial .part receive as an outgoing relay file.
+                        // The completed path only becomes routable after its hash is verified.
+                        localPath = java.io.File(localPath)
+                            .takeIf { it.isFile && it.length() == manifest.sizeBytes }?.absolutePath,
+                        status = AttachmentTransferStatus.RECEIVING,
+                        receivedFromNodeId = receivedFromNodeId,
+                        hopCount = manifest.hopCount,
+                        createdAt = manifest.createdAt,
+                        transferredBytes = receiveHandle.offset.coerceIn(0L, manifest.sizeBytes),
+                        updatedAt = now
+                    )
+                )
+                receiveHandle.offset
             }
-            if (!hasRemoteAttachmentCapacity(localNodeId, manifest.messageId, manifest.sizeBytes)) {
-                return@withTransaction false
-            }
-            attachments.upsert(attachment)
-            true
+        } catch (failure: Throwable) {
+            receiveHandles.remove(manifest.messageId)
+            AttachmentFileStore.deleteReceivedFiles(appContext, manifest.messageId)
+            throw failure
         }
-        if (persisted && isFinalRecipient) ensurePeer(manifest.senderNodeId)
-        return persisted
+        if (resumeOffset != null && isFinalRecipient) ensurePeer(manifest.senderNodeId)
+        return resumeOffset
+    }
+
+    suspend fun appendIncomingAttachmentChunk(
+        manifest: AttachmentTransferManifest,
+        receivedFromNodeId: String,
+        offset: Long,
+        bytes: ByteArray
+    ): Long? = database.withTransaction {
+        val existing = attachments.get(manifest.messageId) ?: return@withTransaction null
+        if (!manifest.isValid() || !existing.matches(manifest) ||
+            existing.status != AttachmentTransferStatus.RECEIVING ||
+            existing.receivedFromNodeId?.equals(receivedFromNodeId, true) != true) {
+            return@withTransaction null
+        }
+
+        val receiveHandle = receiveHandles[manifest.messageId] ?: return@withTransaction null
+        val nextOffset = AttachmentFileStore.appendChunk(
+            appContext, manifest.messageId, receiveHandle, offset, bytes, manifest.sizeBytes
+        ) ?: return@withTransaction null
+        val updated = attachments.updateProgress(
+            messageId = manifest.messageId,
+            status = AttachmentTransferStatus.RECEIVING,
+            transferredBytes = nextOffset,
+            updatedAt = System.currentTimeMillis(),
+            lastError = null
+        )
+        nextOffset.takeIf { updated > 0 }
     }
 
     suspend fun completeIncomingAttachment(
         manifest: AttachmentTransferManifest,
-        localPath: String,
         receivedFromNodeId: String,
         localCanRelay: Boolean,
         transport: String = "WIFI_DIRECT"
     ): Boolean {
         reclaimExpiredRemoteHistory(System.currentTimeMillis())
-        return database.withTransaction {
+        var finalized = false
+        val completed = try {
+            database.withTransaction {
             val localNodeId = identityStore.getIdentity().nodeId
             val isFinalRecipient = manifest.recipientNodeId.equals(localNodeId, true)
             if (!manifest.isValid() || receivedFromNodeId.isBlank() ||
                 (!isFinalRecipient && (!localCanRelay || manifest.hopCount >= AttachmentTransferManifest.MAX_HOPS))) return@withTransaction false
             val now = System.currentTimeMillis()
             val existing = attachments.get(manifest.messageId)
-            if (existing != null && (
-                    !existing.senderNodeId.equals(manifest.senderNodeId, true) ||
-                        !existing.recipientNodeId.equals(manifest.recipientNodeId, true) ||
-                        existing.sizeBytes != manifest.sizeBytes ||
-                        !existing.sha256.equals(manifest.sha256, true) ||
-                        !existing.mimeType.equals(manifest.mimeType, true)
-                    )) return@withTransaction false
+            if (existing == null || !existing.matches(manifest) ||
+                existing.receivedFromNodeId?.equals(receivedFromNodeId, true) != true) {
+                return@withTransaction false
+            }
+            if (existing.status !in setOf(
+                    AttachmentTransferStatus.RECEIVING,
+                    AttachmentTransferStatus.WAITING_WIFI,
+                    AttachmentTransferStatus.RELAY_QUEUED,
+                    AttachmentTransferStatus.DELIVERED
+                )) return@withTransaction false
+            val existingMessage = if (isFinalRecipient) messages.getById(manifest.messageId) else null
+            if (existingMessage != null && !existingMessage.matchesAttachment(manifest)) {
+                return@withTransaction false
+            }
             if (!hasRemoteAttachmentCapacity(localNodeId, manifest.messageId, manifest.sizeBytes)) {
                 return@withTransaction false
             }
-            if (isFinalRecipient && messages.getById(manifest.messageId) == null) {
-                val descriptor = AttachmentDescriptor(
-                    messageId = manifest.messageId,
-                    mimeType = manifest.mimeType,
-                    displayName = manifest.displayName,
-                    sizeBytes = manifest.sizeBytes,
-                    sha256 = manifest.sha256.lowercase()
-                )
-                val incomingMessage = MessageRecordEntity(
+            val incomingMessage = if (isFinalRecipient && existingMessage == null) {
+                MessageRecordEntity(
                     messageId = manifest.messageId,
                     senderNodeId = manifest.senderNodeId,
                     recipientNodeId = manifest.recipientNodeId,
-                    content = descriptor.encode(),
+                    content = AttachmentDescriptor(
+                        messageId = manifest.messageId,
+                        mimeType = manifest.mimeType,
+                        displayName = manifest.displayName,
+                        sizeBytes = manifest.sizeBytes,
+                        sha256 = manifest.sha256.lowercase()
+                    ).encode(),
                     createdAt = manifest.createdAt,
                     messageType = MessageType.ATTACHMENT.name,
                     status = DeliveryStatus.DELIVERED.name,
@@ -503,7 +579,19 @@ class MessagingRepository internal constructor(
                     lastError = null,
                     deliveryHopCount = manifest.hopCount
                 )
-                if (!hasRemoteMessageCapacity(localNodeId, incomingMessage)) return@withTransaction false
+            } else null
+            if (incomingMessage != null && !hasRemoteMessageCapacity(localNodeId, incomingMessage)) {
+                return@withTransaction false
+            }
+            // Verify and finalize only after the persisted transfer identity and
+            // predecessor have been checked. Room serializes this with cleanup and
+            // chunk progress; the file store also serializes rename/delete operations.
+            val receiveHandle = receiveHandles[manifest.messageId] ?: return@withTransaction false
+            val completedFile = AttachmentFileStore.finishReceive(appContext, manifest, receiveHandle)
+                ?: return@withTransaction false
+            receiveHandles.remove(manifest.messageId, receiveHandle)
+            finalized = true
+            if (incomingMessage != null) {
                 messages.insertIncoming(incomingMessage)
                 if (messages.getById(manifest.messageId) == null) return@withTransaction false
             }
@@ -516,7 +604,7 @@ class MessagingRepository internal constructor(
                     displayName = manifest.displayName,
                     sizeBytes = manifest.sizeBytes,
                     sha256 = manifest.sha256.lowercase(),
-                    localPath = localPath,
+                    localPath = completedFile.absolutePath,
                     status = if (isFinalRecipient) AttachmentTransferStatus.DELIVERED else AttachmentTransferStatus.RELAY_QUEUED,
                     receivedFromNodeId = receivedFromNodeId,
                     hopCount = manifest.hopCount,
@@ -525,22 +613,77 @@ class MessagingRepository internal constructor(
                     updatedAt = now
                 )
             )
-            (existing == null || existing.messageId == manifest.messageId) &&
-                (!isFinalRecipient || messages.getById(manifest.messageId) != null)
+            !isFinalRecipient || messages.getById(manifest.messageId) != null
+            }
+        } catch (failure: Throwable) {
+            if (finalized) {
+                receiveHandles.remove(manifest.messageId)
+                AttachmentFileStore.deleteReceivedFiles(appContext, manifest.messageId)
+            }
+            throw failure
         }
+        if (!completed && finalized) {
+            receiveHandles.remove(manifest.messageId)
+            AttachmentFileStore.deleteReceivedFiles(appContext, manifest.messageId)
+        }
+        return completed
     }
+
+    private fun AttachmentRecordEntity.matches(manifest: AttachmentTransferManifest): Boolean =
+        senderNodeId.equals(manifest.senderNodeId, true) &&
+            recipientNodeId.equals(manifest.recipientNodeId, true) &&
+            sizeBytes == manifest.sizeBytes &&
+            sha256.equals(manifest.sha256, true) &&
+            mimeType.equals(manifest.mimeType, true) &&
+            displayName == manifest.displayName &&
+            createdAt == manifest.createdAt
+
+    private fun MessageRecordEntity.matchesAttachment(manifest: AttachmentTransferManifest): Boolean {
+        val descriptor = AttachmentDescriptor.decode(content) ?: return false
+        return messageType == MessageType.ATTACHMENT.name &&
+            senderNodeId.equals(manifest.senderNodeId, true) &&
+            recipientNodeId.equals(manifest.recipientNodeId, true) &&
+            createdAt == manifest.createdAt &&
+            descriptor.messageId == manifest.messageId &&
+            descriptor.mimeType.equals(manifest.mimeType, true) &&
+            descriptor.displayName == manifest.displayName &&
+            descriptor.sizeBytes == manifest.sizeBytes &&
+            descriptor.sha256.equals(manifest.sha256, true)
+    }
+
+    private fun MessageRecordEntity.matchesImmutableMessage(other: MessageRecordEntity): Boolean =
+        messageId == other.messageId &&
+            senderNodeId.equals(other.senderNodeId, true) &&
+            recipientNodeId.equals(other.recipientNodeId, true) &&
+            content == other.content &&
+            createdAt == other.createdAt &&
+            messageType == other.messageType
+
+    private fun AttachmentRecordEntity.matches(other: AttachmentRecordEntity): Boolean =
+        senderNodeId.equals(other.senderNodeId, true) &&
+            recipientNodeId.equals(other.recipientNodeId, true) &&
+            sizeBytes == other.sizeBytes &&
+            sha256.equals(other.sha256, true) &&
+            mimeType.equals(other.mimeType, true) &&
+            displayName == other.displayName &&
+            createdAt == other.createdAt
 
     suspend fun markAttachmentForwarded(record: AttachmentRecordEntity) {
         val isOrigin = record.senderNodeId.equals(identityStore.getIdentity().nodeId, true)
         if (!isOrigin) {
-            val remainingPayloadPath = deleteAttachmentPayloadFiles(record)
-            attachments.updateStatusAndPath(
+            val updated = attachments.updateStatusAndPath(
                 record.messageId,
                 AttachmentTransferStatus.RELAYED,
-                remainingPayloadPath,
+                record.localPath,
                 System.currentTimeMillis(),
                 null
             )
+            if (updated > 0) {
+                val remainingPath = deleteAttachmentPayloadFiles(record)
+                attachments.updatePathForState(
+                    record.messageId, AttachmentTransferStatus.RELAYED, remainingPath
+                )
+            }
         } else {
             attachments.updateProgress(
                 record.messageId,
@@ -559,25 +702,25 @@ class MessagingRepository internal constructor(
         val attachment = attachments.get(messageId) ?: return false
         if (!attachment.senderNodeId.equals(localNodeId, true)) return false
         if (attachment.status == AttachmentTransferStatus.DELIVERED) return true
-        return attachments.updateProgress(
-            messageId = messageId,
-            status = AttachmentTransferStatus.DELIVERED,
-            transferredBytes = attachment.sizeBytes,
-            updatedAt = now,
-            lastError = null
-        ) > 0
+        val updated = attachments.markDeliveredByRecipient(messageId, localNodeId, now)
+        return updated > 0 || attachments.get(messageId)?.let {
+            it.senderNodeId.equals(localNodeId, true) && it.status == AttachmentTransferStatus.DELIVERED
+        } == true
     }
 
     suspend fun expireAttachment(record: AttachmentRecordEntity) {
         val isOrigin = record.senderNodeId.equals(identityStore.getIdentity().nodeId, true)
-        val retainedPath = if (isOrigin) record.localPath else deleteAttachmentPayloadFiles(record)
-        attachments.updateStatusAndPath(
+        val updated = attachments.updateStatusAndPath(
             record.messageId,
             AttachmentTransferStatus.FAILED,
-            retainedPath,
+            record.localPath,
             System.currentTimeMillis(),
             "ATTACHMENT_EXPIRED"
         )
+        if (updated > 0 && !isOrigin) {
+            val remainingPath = deleteAttachmentPayloadFiles(record)
+            attachments.updatePathForState(record.messageId, AttachmentTransferStatus.FAILED, remainingPath)
+        }
     }
 
     suspend fun claimForDelivery(messageId: String, deliveryDeadline: Long): Boolean =
@@ -607,14 +750,11 @@ class MessagingRepository internal constructor(
         transport: String?,
         error: String
     ) {
-        messages.updateStatus(
+        messages.markFailedIfUndelivered(
             messageId = messageId,
-            status = DeliveryStatus.FAILED.name,
+            localNodeId = identityStore.getIdentity().nodeId,
             transport = transport,
-            deliveredAt = null,
-            nextAttemptAt = null,
-            lastError = error,
-            deliveryHopCount = null
+            lastError = error
         )
     }
 
@@ -623,9 +763,10 @@ class MessagingRepository internal constructor(
         attemptCount: Int,
         nextAttemptAt: Long,
         error: String
-    ) {
-        messages.scheduleRetry(
+    ): Int {
+        return messages.scheduleRetry(
             messageId = messageId,
+            localNodeId = identityStore.getIdentity().nodeId,
             transport = "BLE",
             attemptCount = attemptCount,
             nextAttemptAt = nextAttemptAt,
@@ -702,7 +843,26 @@ class MessagingRepository internal constructor(
         reclaimExpiredRemoteHistory(System.currentTimeMillis())
         return database.withTransaction {
             val existing = messages.getById(record.messageId)
+            val existingAttachment = attachment?.let { attachments.get(it.messageId) }
             val localNodeId = identityStore.getIdentity().nodeId
+
+            if (existing != null && !existing.matchesImmutableMessage(record)) {
+                return@withTransaction DestinationAcceptance(
+                    firstPacket = false,
+                    insertedMessage = false,
+                    messagePersisted = false,
+                    deliveryHopCount = existing.deliveryHopCount ?: 0
+                )
+            }
+            if (attachment != null && existingAttachment != null &&
+                !existingAttachment.matches(attachment)) {
+                return@withTransaction DestinationAcceptance(
+                    firstPacket = false,
+                    insertedMessage = false,
+                    messagePersisted = false,
+                    deliveryHopCount = existing?.deliveryHopCount ?: 0
+                )
+            }
 
             if (existing == null && !hasRemoteMessageCapacity(localNodeId, record)) {
                 return@withTransaction DestinationAcceptance(
@@ -712,7 +872,7 @@ class MessagingRepository internal constructor(
                     deliveryHopCount = 0
                 )
             }
-            if (attachment != null && attachments.get(attachment.messageId) == null &&
+            if (attachment != null && existingAttachment == null &&
                 !hasRemoteAttachmentCapacity(localNodeId, attachment.messageId, attachment.sizeBytes)) {
                 return@withTransaction DestinationAcceptance(
                     firstPacket = false,
@@ -828,7 +988,8 @@ class MessagingRepository internal constructor(
         receivedFromAddress: String?,
         routeTrace: String,
         routeTraceComplete: Boolean,
-        nextAttemptAt: Long
+        nextAttemptAt: Long,
+        now: Long = System.currentTimeMillis()
     ): Boolean =
         forwarding.improveRecord(
             packetId = packetId,
@@ -838,8 +999,45 @@ class MessagingRepository internal constructor(
             receivedFromAddress = receivedFromAddress,
             routeTrace = routeTrace.take(32),
             routeTraceComplete = routeTraceComplete,
-            nextAttemptAt = nextAttemptAt
+            nextAttemptAt = nextAttemptAt,
+            now = now
         ) > 0
+
+    /**
+     * Updates duplicate suppression and its durable route as one commit. Keeping
+     * the seen-cache hop count ahead of the forwarding row can strand the older
+     * route if the process stops between those writes.
+     */
+    suspend fun updateDuplicateRelayPath(
+        packetId: String,
+        ttl: Int,
+        hopCount: Int,
+        receivedFromNodeId: String?,
+        receivedFromAddress: String?,
+        routeTrace: String,
+        routeTraceComplete: Boolean,
+        expiresAt: Long,
+        nextAttemptAt: Long,
+        now: Long
+    ): Boolean = database.withTransaction {
+        if (seenPackets.get(packetId) == null) return@withTransaction false
+
+        seenPackets.updateObservation(packetId, hopCount, expiresAt)
+        val current = forwarding.get(packetId) ?: return@withTransaction false
+        if (current.hopCount <= hopCount) return@withTransaction false
+
+        forwarding.improveRecord(
+            packetId = packetId,
+            ttl = ttl,
+            hopCount = hopCount,
+            receivedFromNodeId = receivedFromNodeId,
+            receivedFromAddress = receivedFromAddress,
+            routeTrace = routeTrace.take(32),
+            routeTraceComplete = routeTraceComplete,
+            nextAttemptAt = nextAttemptAt,
+            now = now
+        ) > 0
+    }
 
     suspend fun updateSeenObservation(
         packetId: String,
@@ -1054,6 +1252,7 @@ class MessagingRepository internal constructor(
     suspend fun deleteMessage(messageId: String) {
         traceEvents.deleteForMessage(messageId)
         attachments.get(messageId)?.localPath?.let { path -> runCatching { java.io.File(path).delete() } }
+        receiveHandles.remove(messageId)
         AttachmentFileStore.deleteReceivedFiles(appContext, messageId)
         attachments.delete(messageId)
         messages.delete(messageId)
@@ -1066,7 +1265,10 @@ class MessagingRepository internal constructor(
         // Collect once so files are removed before their durable metadata rows.
         val attachmentRows = attachments.getForConversation(localId, normalizedPeer)
         attachmentRows.mapNotNull { it.localPath }.forEach { path -> runCatching { java.io.File(path).delete() } }
-        attachmentRows.forEach { AttachmentFileStore.deleteReceivedFiles(appContext, it.messageId) }
+        attachmentRows.forEach {
+            receiveHandles.remove(it.messageId)
+            AttachmentFileStore.deleteReceivedFiles(appContext, it.messageId)
+        }
         attachments.deleteConversation(localId, normalizedPeer)
         messages.deleteConversation(localId, normalizedPeer)
         peers.removeFromChats(normalizedPeer)

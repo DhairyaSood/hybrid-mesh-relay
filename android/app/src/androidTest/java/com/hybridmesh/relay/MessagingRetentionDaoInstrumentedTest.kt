@@ -177,6 +177,53 @@ class MessagingRetentionDaoInstrumentedTest {
         assertEquals(1, messages.countRemoteMessages(localId))
     }
 
+    @Test
+    fun staleAttachmentUpdatesCannotReplaceDeliveredState() = runBlocking {
+        val attachments = database.attachmentDao()
+        val messageId = "HMRM-$localId::attachment-state-race"
+        attachments.upsert(
+            attachment("attachment-state-race", "RECEIVING", "/attachments/race.media")
+                .copy(messageId = messageId, senderNodeId = localId, recipientNodeId = remoteId)
+        )
+
+        assertEquals(1, attachments.markDeliveredByRecipient(messageId, localId, cutoff))
+        assertEquals(
+            0,
+            attachments.updateProgress(messageId, "SENDING", 4L, cutoff + 1L, "stale-progress")
+        )
+        assertEquals(
+            0,
+            attachments.updateStatusAndPath(messageId, "FAILED", null, cutoff + 2L, "stale-expiry")
+        )
+        assertEquals("DELIVERED", attachments.get(messageId)!!.status)
+    }
+
+    @Test
+    fun retrySchedulingCannotRequeueDeliveredOrRemoteMessages() = runBlocking {
+        val messages = database.messageDao()
+        val deliveredLocal = message("retry-delivered-local", localId, cutoff, status = "DELIVERED")
+        val deliveredRemote = message("retry-delivered-remote", remoteId, cutoff, status = "DELIVERED")
+        val queuedLocal = message("retry-queued-local", localId, cutoff, status = "QUEUED")
+        messages.insert(deliveredLocal)
+        messages.insert(deliveredRemote)
+        messages.insert(queuedLocal)
+
+        assertEquals(0, messages.scheduleRetry(
+            deliveredLocal.messageId, localId, "BLE", 3, cutoff + 1_000L, "stale-retry"
+        ))
+        assertEquals(0, messages.scheduleRetry(
+            deliveredRemote.messageId, localId, "BLE", 3, cutoff + 1_000L, "wrong-owner"
+        ))
+        assertEquals(1, messages.scheduleRetry(
+            queuedLocal.messageId, localId, "BLE", 3, cutoff + 1_000L, "retryable"
+        ))
+
+        assertEquals("DELIVERED", messages.getById(deliveredLocal.messageId)!!.status)
+        assertEquals("DELIVERED", messages.getById(deliveredRemote.messageId)!!.status)
+        assertEquals("QUEUED", messages.getById(queuedLocal.messageId)!!.status)
+        assertEquals("retryable", messages.getById(queuedLocal.messageId)!!.lastError)
+    }
+
     private fun attachment(
         id: String,
         status: String,
@@ -200,14 +247,19 @@ class MessagingRetentionDaoInstrumentedTest {
         updatedAt = updatedAt
     )
 
-    private fun message(id: String, senderId: String, createdAt: Long) = MessageRecordEntity(
+    private fun message(
+        id: String,
+        senderId: String,
+        createdAt: Long,
+        status: String = "DELIVERED"
+    ) = MessageRecordEntity(
         messageId = "HMRM-$remoteId::$id",
         senderNodeId = senderId,
         recipientNodeId = localId,
         content = "text",
         createdAt = createdAt,
         messageType = "NORMAL",
-        status = "DELIVERED",
+        status = status,
         lastTransport = "BLE_MESH",
         deliveredAt = createdAt,
         attemptCount = 0,

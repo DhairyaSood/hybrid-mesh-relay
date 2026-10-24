@@ -61,7 +61,7 @@ interface MessageDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIncoming(message: MessageRecordEntity): Long
 
-    @Query("UPDATE mesh_messages SET status = :status, lastTransport = COALESCE(:transport, lastTransport), deliveredAt = :deliveredAt, nextAttemptAt = :nextAttemptAt, lastError = :lastError, deliveryHopCount = :deliveryHopCount WHERE messageId = :messageId")
+    @Query("UPDATE mesh_messages SET status = :status, lastTransport = COALESCE(:transport, lastTransport), deliveredAt = :deliveredAt, nextAttemptAt = :nextAttemptAt, lastError = :lastError, deliveryHopCount = :deliveryHopCount WHERE messageId = :messageId AND status != 'DELIVERED'")
     suspend fun updateStatus(
         messageId: String,
         status: String,
@@ -72,13 +72,21 @@ interface MessageDao {
         deliveryHopCount: Int?
     )
 
-    @Query("UPDATE mesh_messages SET status = 'DELIVERED', lastTransport = COALESCE(:transport, lastTransport), deliveredAt = :deliveredAt, nextAttemptAt = NULL, lastError = NULL, deliveryHopCount = :deliveryHopCount WHERE messageId = :messageId AND senderNodeId = :localNodeId AND status IN ('QUEUED', 'IN_FLIGHT')")
+    @Query("UPDATE mesh_messages SET status = 'DELIVERED', lastTransport = COALESCE(:transport, lastTransport), deliveredAt = :deliveredAt, nextAttemptAt = NULL, lastError = NULL, deliveryHopCount = :deliveryHopCount WHERE messageId = :messageId AND senderNodeId = :localNodeId AND (status IN ('QUEUED', 'IN_FLIGHT') OR (status = 'FAILED' AND lastError = 'DELIVERY_EXPIRED'))")
     suspend fun markDelivered(
         messageId: String,
         localNodeId: String,
         transport: String?,
         deliveredAt: Long,
         deliveryHopCount: Int
+    ): Int
+
+    @Query("UPDATE mesh_messages SET status = 'FAILED', lastTransport = COALESCE(:transport, lastTransport), deliveredAt = NULL, nextAttemptAt = NULL, lastError = :lastError, deliveryHopCount = NULL WHERE messageId = :messageId AND senderNodeId = :localNodeId AND status IN ('QUEUED', 'IN_FLIGHT')")
+    suspend fun markFailedIfUndelivered(
+        messageId: String,
+        localNodeId: String,
+        transport: String?,
+        lastError: String
     ): Int
 
     @Query("UPDATE mesh_messages SET status = 'IN_FLIGHT', attemptCount = attemptCount + 1, nextAttemptAt = :deliveryDeadline, lastError = NULL WHERE messageId = :messageId AND status = 'QUEUED'")
@@ -103,14 +111,15 @@ interface MessageDao {
         lastError: String
     ): Int
 
-    @Query("UPDATE mesh_messages SET status = 'QUEUED', lastTransport = :transport, deliveredAt = NULL, deliveryHopCount = NULL, attemptCount = :attemptCount, nextAttemptAt = :nextAttemptAt, lastError = :lastError WHERE messageId = :messageId")
+    @Query("UPDATE mesh_messages SET status = 'QUEUED', lastTransport = :transport, deliveredAt = NULL, deliveryHopCount = NULL, attemptCount = :attemptCount, nextAttemptAt = :nextAttemptAt, lastError = :lastError WHERE messageId = :messageId AND senderNodeId = :localNodeId AND status IN ('QUEUED', 'IN_FLIGHT')")
     suspend fun scheduleRetry(
         messageId: String,
+        localNodeId: String,
         transport: String,
         attemptCount: Int,
         nextAttemptAt: Long,
         lastError: String
-    )
+    ): Int
 
     @Query("UPDATE mesh_messages SET status = 'QUEUED', nextAttemptAt = COALESCE(nextAttemptAt, :now), lastError = :lastError WHERE senderNodeId = :localNodeId AND status = 'IN_FLIGHT'")
     suspend fun resetInFlight(localNodeId: String, now: Long, lastError: String?)

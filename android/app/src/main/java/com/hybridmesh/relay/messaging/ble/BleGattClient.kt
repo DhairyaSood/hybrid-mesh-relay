@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
+import com.hybridmesh.relay.ble.BleConstants
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.model.GattTransportError
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
@@ -931,8 +932,9 @@ class BleGattClient(context: Context) {
             val name = ByteArray(nameLength)
             buffer.get(name)
             val deviceType = if (buffer.get().toInt() == 2) "RELAY" else "PHONE"
+            val displayName = BleConstants.decodeUtf8(name) ?: return null
             RemoteIdentity(
-                displayName = name.toString(Charsets.UTF_8).ifBlank { "Hybrid Mesh Device" },
+                displayName = displayName.ifBlank { "Hybrid Mesh Device" },
                 deviceType = deviceType
             )
         }.getOrNull()
