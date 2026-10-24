@@ -46,10 +46,26 @@ internal class WifiDirectSessionRegistry<T>(
         }
     }
 
-    /** A stale socket close cannot remove a newer session for the same logical peer. */
-    fun remove(nodeId: String, expectedSession: T): Boolean = synchronized(lock) {
+    /**
+     * A stale socket close cannot remove or report a newer session as disconnected.
+     * Run the disconnect event while admission is excluded so a reconnect cannot
+     * publish SESSION_READY before this session publishes its stale close event.
+     */
+    fun remove(
+        nodeId: String,
+        expectedSession: T,
+        onRemoved: () -> Unit = {}
+    ): Boolean = synchronized(lock) {
         if (sessions[nodeId] !== expectedSession) return@synchronized false
         sessions.remove(nodeId)
+        onRemoved()
+        true
+    }
+
+    /** Serialize setup completion with replacement so stale handshakes cannot publish readiness. */
+    fun runIfCurrent(nodeId: String, expectedSession: T, action: () -> Unit): Boolean = synchronized(lock) {
+        if (sessions[nodeId] !== expectedSession) return@synchronized false
+        action()
         true
     }
 }

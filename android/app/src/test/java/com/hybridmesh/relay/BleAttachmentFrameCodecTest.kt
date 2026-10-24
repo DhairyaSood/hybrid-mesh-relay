@@ -2,7 +2,12 @@ package com.hybridmesh.relay
 
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -81,5 +86,71 @@ class BleAttachmentFrameCodecTest {
         val encoded = BleAttachmentFrameCodec.encodeBegin(80L, manifest()) + byteArrayOf(1)
 
         assertNull(BleAttachmentFrameCodec.decode(encoded))
+    }
+
+    @Test
+    fun beginRejectsMalformedUtf8DisplayNameInsteadOfPersistingReplacementText() {
+        val encoded = BleAttachmentFrameCodec.encodeBegin(81L, manifest()).copyOf()
+        val buffer = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN)
+        var fieldOffset = BEGIN_HEADER_BYTES
+        repeat(4) {
+            val length = buffer.getShort(fieldOffset).toInt() and 0xFFFF
+            fieldOffset += SHORT_BYTES + length
+        }
+        encoded[fieldOffset + SHORT_BYTES] = 0xC3.toByte()
+
+        assertNull(BleAttachmentFrameCodec.decode(encoded))
+    }
+
+    @Test
+    fun chunkRejectsMalformedUtf8MessageIdBeforeItCanReachTransferState() {
+        val encoded = BleAttachmentFrameCodec.encodeChunk(
+            80L, "\uFFFD", 0L, byteArrayOf(7)
+        ).copyOf()
+        val buffer = ByteBuffer.wrap(encoded).order(ByteOrder.BIG_ENDIAN)
+        buffer.putShort(CHUNK_ID_LENGTH_OFFSET, 1)
+        encoded[CHUNK_ID_OFFSET] = 0xC3.toByte()
+
+        assertNull(BleAttachmentFrameCodec.decode(encoded))
+    }
+
+    @Test
+    fun beginEncoderRejectsMalformedUtf16DisplayNameInsteadOfReplacingIt() {
+        val malformed = manifest().copy(displayName = "invalid\uD800name.jpg")
+
+        assertFalse(runCatching { BleAttachmentFrameCodec.encodeBegin(82L, malformed) }.isSuccess)
+    }
+
+    @Test
+    fun chunkMessageIdLimitIsMeasuredInUtf8Bytes() {
+        val maximum = "é".repeat(80)
+        val maximumFrame = BleAttachmentFrameCodec.encodeChunk(83L, maximum, 0L, byteArrayOf(1))
+        assertNotNull(BleAttachmentFrameCodec.decode(maximumFrame))
+
+        val oversizedFrame = runCatching {
+            BleAttachmentFrameCodec.encodeChunk(84L, "${maximum}é", 0L, byteArrayOf(1))
+        }
+        assertFalse(oversizedFrame.isSuccess)
+    }
+
+    @Test
+    fun maximumChunkPayloadPreservesArbitraryBinaryBytes() {
+        val payload = ByteArray(BleAttachmentFrameCodec.MAX_CHUNK_BYTES) { it.toByte() }
+        val frame = BleAttachmentFrameCodec.encodeChunk(85L, "attachment-id", 0L, payload)
+        val decoded = BleAttachmentFrameCodec.decode(frame) as BleAttachmentFrameCodec.Frame.Chunk
+
+        assertArrayEquals(payload, decoded.bytes)
+        assertFalse(runCatching {
+            BleAttachmentFrameCodec.encodeChunk(
+                86L, "attachment-id", 0L, ByteArray(BleAttachmentFrameCodec.MAX_CHUNK_BYTES + 1)
+            )
+        }.isSuccess)
+    }
+
+    private companion object {
+        const val BEGIN_HEADER_BYTES = 4 + 1 + 1 + Long.SIZE_BYTES
+        const val CHUNK_ID_LENGTH_OFFSET = 4 + 1 + 1 + Long.SIZE_BYTES + Long.SIZE_BYTES
+        const val CHUNK_ID_OFFSET = CHUNK_ID_LENGTH_OFFSET + Short.SIZE_BYTES
+        const val SHORT_BYTES = Short.SIZE_BYTES
     }
 }

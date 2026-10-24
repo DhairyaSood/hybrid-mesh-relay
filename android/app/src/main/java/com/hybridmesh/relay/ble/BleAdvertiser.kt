@@ -282,10 +282,9 @@ class BleAdvertiser(context: Context) {
             UUID(0L, 0L)
         }
 
-        val nicknameBytes = identity.deviceName
-            .trim()
-            .toByteArray(Charsets.UTF_8)
-            .truncateUtf8(BleConstants.MESH_DISCOVERY_NAME_MAX_BYTES)
+        val nicknameBytes = BleConstants.encodeUtf8Truncated(
+            identity.deviceName.trim(), BleConstants.MESH_DISCOVERY_NAME_MAX_BYTES
+        )
 
         return ByteBuffer
             .allocate(BleConstants.DISCOVERY_BASE_BYTES + nicknameBytes.size)
@@ -310,20 +309,6 @@ class BleAdvertiser(context: Context) {
                 put(nicknameBytes)
             }
             .array()
-    }
-
-    private fun ByteArray.truncateUtf8(
-        maxBytes: Int
-    ): ByteArray {
-        if (size <= maxBytes) return this
-        var end = maxBytes
-        while (
-            end > 0 &&
-            (this[end - 1].toInt() and 0xC0) == 0x80
-        ) {
-            end--
-        }
-        return copyOf(end)
     }
 
     private fun hasAdvertisePermission(): Boolean {

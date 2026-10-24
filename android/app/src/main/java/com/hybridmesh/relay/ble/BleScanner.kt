@@ -275,7 +275,10 @@ class BleScanner(
             if (discoveryVersion.toInt() >= 3 && meshProtocolVersion < 1) return
             val nameBytes = ByteArray(nameLength)
             buffer.get(nameBytes)
-            val deviceName = nameBytes.toString(Charsets.UTF_8).trim().ifBlank { "Hybrid Mesh Device" }
+            val deviceName = BleConstants.decodeUtf8(nameBytes)
+                ?.trim()
+                ?.ifBlank { "Hybrid Mesh Device" }
+                ?: return
             val address = runCatching { result.device.address }.getOrDefault("Unknown")
             val seenAt = System.currentTimeMillis()
 

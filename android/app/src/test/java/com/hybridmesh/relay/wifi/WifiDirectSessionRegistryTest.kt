@@ -43,6 +43,38 @@ class WifiDirectSessionRegistryTest {
     }
 
     @Test
+    fun staleCloseCannotPublishDisconnectAfterPeerSessionWasReplaced() {
+        val registry = WifiDirectSessionRegistry<Session>(maxSessions = 8) { it.host }
+        val oldA = Session("192.168.49.2", "old-a")
+        val newA = Session("192.168.49.2", "new-a")
+        val disconnectEvents = mutableListOf<String>()
+        registry.admit("node-a", oldA.host, oldA)
+        registry.admit("node-a", newA.host, newA)
+
+        assertFalse(registry.remove("node-a", oldA) { disconnectEvents += "node-a" })
+        assertTrue(disconnectEvents.isEmpty())
+        assertSame(newA, registry["node-a"])
+
+        assertTrue(registry.remove("node-a", newA) { disconnectEvents += "node-a" })
+        assertEquals(listOf("node-a"), disconnectEvents)
+    }
+
+    @Test
+    fun delayedSetupCompletionCannotPublishAfterReplacementSessionWasAdmitted() {
+        val registry = WifiDirectSessionRegistry<Session>(maxSessions = 8) { it.host }
+        val oldSession = Session("192.168.49.2", "old")
+        val currentSession = Session("192.168.49.2", "current")
+        val readyEvents = mutableListOf<String>()
+        registry.admit("node-a", oldSession.host, oldSession)
+        registry.admit("node-a", currentSession.host, currentSession)
+
+        assertFalse(registry.runIfCurrent("node-a", oldSession) { readyEvents += "old" })
+        assertTrue(registry.runIfCurrent("node-a", currentSession) { readyEvents += "current" })
+        assertEquals(listOf("current"), readyEvents)
+        assertSame(currentSession, registry["node-a"])
+    }
+
+    @Test
     fun rejectsIdentityAddressConflictsAndCapacityWithoutEvictingHealthyPeers() {
         val registry = WifiDirectSessionRegistry<Session>(maxSessions = 2) { it.host }
         val a = Session("192.168.49.2", "a")
