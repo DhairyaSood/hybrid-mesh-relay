@@ -4,20 +4,18 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-  <title>Hybrid Mesh Relay — Resilient communication, without infrastructure</title>
-
+  <title>Neyra — Communication beyond conventional networks</title>
   <meta
     name="description"
-    content="Hybrid Mesh Relay is an experimental offline communication system combining smartphone peer-to-peer networking with portable long-range relay nodes."
+    content="Neyra is an experimental Android communication project exploring offline messaging through nearby devices and portable relay nodes."
   />
 
   <link rel="icon" type="image/png" href="assets/logo.png" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-
   <link
-    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
     rel="stylesheet"
   />
 
@@ -32,43 +30,33 @@
 </head>
 
 <body>
-
 <a class="visually-hidden" href="#main">Skip to content</a>
-
-<!-- ============================================================
-     HEADER
-============================================================ -->
 
 <header class="site-header" id="site-header">
   <div class="container">
-
     <a href="#top" class="brand">
       <img
         src="assets/logo.png"
-        alt="Hybrid Mesh Relay logo"
+        alt="Neyra logo"
         width="22"
         height="22"
       />
-      <span>Hybrid Mesh Relay</span>
+      <span>Neyra</span>
     </a>
 
     <nav class="main-nav" id="main-nav" aria-label="Primary">
+      <a href="#features">Product</a>
       <a href="#how-it-works">How it works</a>
-      <a href="#features">Features</a>
-      <a href="#status">Status</a>
-      <a href="#installation">Install</a>
+      <a href="#status">Project</a>
+      <a href="#installation">Get started</a>
       <a href="https://github.com/DhairyaSood/hybrid-mesh-relay">
         GitHub
       </a>
     </nav>
 
     <div class="nav-actions">
-
-      <a
-        class="btn btn-secondary"
-        href="https://github.com/DhairyaSood/hybrid-mesh-relay"
-      >
-        View on GitHub
+      <a class="btn btn-secondary" href="/api/download">
+        Try the prototype
       </a>
 
       <button
@@ -90,1123 +78,763 @@
           <line x1="3" y1="18" x2="21" y2="18" />
         </svg>
       </button>
-
     </div>
-
   </div>
 </header>
 
-
 <main id="main">
 
-<!-- ============================================================
-     HERO
-============================================================ -->
-
-<section class="hero" id="top" style="border-top:none;">
-
-  <div class="container hero-grid">
-
-    <div class="hero-copy">
-
-      <div class="hero-badge">
-        <span class="pulse-dot" aria-hidden="true"></span>
-        Open-source · Android prototype
-      </div>
-
-      <h1>Hybrid Mesh Relay</h1>
-
-      <p class="tagline">
-        Resilient communication, without infrastructure.
-      </p>
-
-      <p class="supporting">
-        An experimental offline communication system that combines
-        smartphone peer-to-peer networking with portable long-range
-        relay nodes to keep messages moving when conventional
-        connectivity is unavailable.
-      </p>
-
-      <div class="hero-actions">
-
-        <a
-          class="btn btn-primary"
-          href="/api/download"
-        >
-          Download APK
-        </a>
-
-        <a
-          class="btn btn-secondary"
-          href="https://github.com/DhairyaSood/hybrid-mesh-relay"
-        >
-          View on GitHub
-        </a>
-
-      </div>
-
-      <div class="hero-status">
-        <span class="pulse-dot" aria-hidden="true"></span>
-        Latest Android build available
-      </div>
-
-    </div>
-
-
-    <!-- ========================================================
-         ARCHITECTURE DIAGRAM
-    ========================================================= -->
-
-    <div class="hero-visual">
-
-      <div class="diagram-card">
-
-        <svg
-          class="mesh-diagram"
-          viewBox="0 0 640 380"
-          role="img"
-          aria-labelledby="mesh-diagram-title mesh-diagram-desc"
-          preserveAspectRatio="xMidYMid meet"
-        >
-
-          <title id="mesh-diagram-title">
-            Hybrid Mesh Relay network architecture
-          </title>
-
-          <desc id="mesh-diagram-desc">
-            Two local smartphone mesh clusters communicate using
-            Wi-Fi peer-to-peer and Bluetooth Low Energy. Each cluster
-            connects to a portable relay node over Bluetooth Low Energy.
-            Relay A and Relay B communicate over a long-range LoRa link.
-          </desc>
-
-
-          <!-- ==================================================
-               LOCAL MESH COVERAGE
-          =================================================== -->
-
-          <circle
-            class="cluster-ring"
-            cx="128"
-            cy="150"
-            r="96"
-          />
-
-          <circle
-            class="cluster-ring"
-            cx="512"
-            cy="150"
-            r="96"
-          />
-
-
-          <!-- ==================================================
-               LEFT LOCAL PHONE MESH
-          =================================================== -->
-
-          <!-- Symmetrical triangular mesh -->
-
-          <line
-            class="mesh-link"
-            x1="88"
-            y1="122"
-            x2="168"
-            y2="122"
-          />
-
-          <line
-            class="mesh-link"
-            x1="88"
-            y1="122"
-            x2="128"
-            y2="192"
-          />
-
-          <line
-            class="mesh-link"
-            x1="168"
-            y1="122"
-            x2="128"
-            y2="192"
-          />
-
-
-          <!-- Phone 1 -->
-
-          <g
-            class="phone-node"
-            transform="translate(88 122)"
-            aria-hidden="true"
-          >
-            <rect
-              x="-9"
-              y="-15"
-              width="18"
-              height="30"
-              rx="4"
-            />
-            <circle
-              cx="0"
-              cy="10"
-              r="1.7"
-            />
-          </g>
-
-
-          <!-- Phone 2 -->
-
-          <g
-            class="phone-node"
-            transform="translate(168 122)"
-            aria-hidden="true"
-          >
-            <rect
-              x="-9"
-              y="-15"
-              width="18"
-              height="30"
-              rx="4"
-            />
-            <circle
-              cx="0"
-              cy="10"
-              r="1.7"
-            />
-          </g>
-
-
-          <!-- Phone 3 -->
-
-          <g
-            class="phone-node"
-            transform="translate(128 192)"
-            aria-hidden="true"
-          >
-            <rect
-              x="-9"
-              y="-15"
-              width="18"
-              height="30"
-              rx="4"
-            />
-            <circle
-              cx="0"
-              cy="10"
-              r="1.7"
-            />
-          </g>
-
-
-          <!-- Left cluster labels -->
-
-          <text
-            class="cluster-label"
-            x="128"
-            y="66"
-            text-anchor="middle"
-          >
-            LOCAL MESH
-          </text>
-
-          <text
-            class="cluster-subtitle"
-            x="128"
-            y="84"
-            text-anchor="middle"
-          >
-            Wi-Fi P2P + BLE
-          </text>
-
-
-          <!-- ==================================================
-               RIGHT LOCAL PHONE MESH
-          =================================================== -->
-
-          <!-- Symmetrical triangular mesh -->
-
-          <line
-            class="mesh-link"
-            x1="472"
-            y1="122"
-            x2="552"
-            y2="122"
-          />
-
-          <line
-            class="mesh-link"
-            x1="472"
-            y1="122"
-            x2="512"
-            y2="192"
-          />
-
-          <line
-            class="mesh-link"
-            x1="552"
-            y1="122"
-            x2="512"
-            y2="192"
-          />
-
-
-          <!-- Phone 1 -->
-
-          <g
-            class="phone-node"
-            transform="translate(472 122)"
-            aria-hidden="true"
-          >
-            <rect
-              x="-9"
-              y="-15"
-              width="18"
-              height="30"
-              rx="4"
-            />
-            <circle
-              cx="0"
-              cy="10"
-              r="1.7"
-            />
-          </g>
-
-
-          <!-- Phone 2 -->
-
-          <g
-            class="phone-node"
-            transform="translate(552 122)"
-            aria-hidden="true"
-          >
-            <rect
-              x="-9"
-              y="-15"
-              width="18"
-              height="30"
-              rx="4"
-            />
-            <circle
-              cx="0"
-              cy="10"
-              r="1.7"
-            />
-          </g>
-
-
-          <!-- Phone 3 -->
-
-          <g
-            class="phone-node"
-            transform="translate(512 192)"
-            aria-hidden="true"
-          >
-            <rect
-              x="-9"
-              y="-15"
-              width="18"
-              height="30"
-              rx="4"
-            />
-            <circle
-              cx="0"
-              cy="10"
-              r="1.7"
-            />
-          </g>
-
-
-          <!-- Right cluster labels -->
-
-          <text
-            class="cluster-label"
-            x="512"
-            y="66"
-            text-anchor="middle"
-          >
-            LOCAL MESH
-          </text>
-
-          <text
-            class="cluster-subtitle"
-            x="512"
-            y="84"
-            text-anchor="middle"
-          >
-            Wi-Fi P2P + BLE
-          </text>
-
-
-          <!-- ==================================================
-               PHONE → RELAY CONNECTIONS
-          =================================================== -->
-
-          <line
-            class="ble-link"
-            x1="128"
-            y1="209"
-            x2="216"
-            y2="270"
-          />
-
-          <line
-            class="ble-link"
-            x1="512"
-            y1="209"
-            x2="424"
-            y2="270"
-          />
-
-
-          <text
-            class="transport-label"
-            x="170"
-            y="250"
-            text-anchor="middle"
-          >
-            BLE
-          </text>
-
-          <text
-            class="transport-label"
-            x="470"
-            y="250"
-            text-anchor="middle"
-          >
-            BLE
-          </text>
-
-
-          <!-- ==================================================
-               RELAY A
-          =================================================== -->
-
-          <g
-            class="relay-node"
-            transform="translate(236 293)"
-            aria-hidden="true"
-          >
-
-            <!-- antenna -->
-
-            <line
-              x1="0"
-              y1="-26"
-              x2="0"
-              y2="-39"
-            />
-
-            <line
-              x1="-5"
-              y1="-39"
-              x2="0"
-              y2="-46"
-            />
-
-            <line
-              x1="5"
-              y1="-39"
-              x2="0"
-              y2="-46"
-            />
-
-            <!-- device body -->
-
-            <rect
-              x="-21"
-              y="-26"
-              width="42"
-              height="52"
-              rx="8"
-            />
-
-            <!-- device details -->
-
-            <line
-              x1="-9"
-              y1="-7"
-              x2="9"
-              y2="-7"
-            />
-
-            <circle
-              cx="0"
-              cy="10"
-              r="3"
-            />
-
-          </g>
-
-
-          <!-- ==================================================
-               RELAY B
-          =================================================== -->
-
-          <g
-            class="relay-node"
-            transform="translate(404 293)"
-            aria-hidden="true"
-          >
-
-            <!-- antenna -->
-
-            <line
-              x1="0"
-              y1="-26"
-              x2="0"
-              y2="-39"
-            />
-
-            <line
-              x1="-5"
-              y1="-39"
-              x2="0"
-              y2="-46"
-            />
-
-            <line
-              x1="5"
-              y1="-39"
-              x2="0"
-              y2="-46"
-            />
-
-            <!-- device body -->
-
-            <rect
-              x="-21"
-              y="-26"
-              width="42"
-              height="52"
-              rx="8"
-            />
-
-            <!-- device details -->
-
-            <line
-              x1="-9"
-              y1="-7"
-              x2="9"
-              y2="-7"
-            />
-
-            <circle
-              cx="0"
-              cy="10"
-              r="3"
-            />
-
-          </g>
-
-
-          <!-- ==================================================
-               RELAY LABELS
-          =================================================== -->
-
-          <text
-            class="relay-label"
-            x="236"
-            y="344"
-            text-anchor="middle"
-          >
-            Relay A
-          </text>
-
-          <text
-            class="relay-label"
-            x="404"
-            y="344"
-            text-anchor="middle"
-          >
-            Relay B
-          </text>
-
-
-          <!-- ==================================================
-               LoRa LONG-RANGE LINK
-          =================================================== -->
-
-          <line
-            class="lora-link"
-            x1="257"
-            y1="293"
-            x2="383"
-            y2="293"
-          />
-
-          <circle
-            class="lora-endpoint"
-            cx="257"
-            cy="293"
-            r="3.5"
-          />
-
-          <circle
-            class="lora-endpoint"
-            cx="383"
-            cy="293"
-            r="3.5"
-          />
-
-          <text
-            class="lora-label"
-            x="320"
-            y="272"
-            text-anchor="middle"
-          >
-            LoRa
-          </text>
-
-          <text
-            class="lora-subtitle"
-            x="320"
-            y="315"
-            text-anchor="middle"
-          >
-            long-range link
-          </text>
-
-        </svg>
-
-
-        <!-- ======================================================
-             DIAGRAM LEGEND
-        ======================================================= -->
-
-        <div class="diagram-legend">
-
-          <span>
-            <span class="legend-dot mesh"></span>
-            local phone mesh
-          </span>
-
-          <span>
-            <span class="legend-dot relay"></span>
-            portable relay
-          </span>
-
-          <span>
-            <span class="legend-line lora"></span>
-            LoRa long-range link
-          </span>
-
+  <!-- HERO -->
+
+  <section class="hero" id="top" style="border-top:none;">
+    <div class="container hero-grid">
+
+      <div class="hero-copy">
+        <div class="hero-badge">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          An open-source Android prototype
         </div>
 
-      </div>
+        <h1>Messages beyond the usual network.</h1>
 
-    </div>
-
-  </div>
-
-</section>
-
-
-<!-- ============================================================
-     HOW IT WORKS
-============================================================ -->
-
-<section id="how-it-works">
-
-  <div class="container">
-
-    <div class="section-head">
-
-      <h2 class="section-heading">
-        A two-tier architecture
-      </h2>
-
-      <p class="section-lede">
-        Hybrid Mesh Relay isn't only a phone mesh or only a LoRa
-        network — it's designed as a hybrid of both.
-      </p>
-
-    </div>
-
-
-    <div class="tier-cols">
-
-      <div class="tier-col">
-
-        <div class="tier-label">
-          <span class="legend-dot mesh"></span>
-          Local mesh
-        </div>
-
-        <h3>
-          Phone to phone
-        </h3>
-
-        <p>
-          Nearby smartphones communicate directly using supported
-          infrastructure-free Wi-Fi peer-to-peer and Bluetooth
-          Low Energy links — without towers, internet or a server
-          in between.
+        <p class="tagline">
+          A different approach to staying connected offline.
         </p>
 
-      </div>
-
-
-      <div class="tier-col">
-
-        <div class="tier-label">
-          <span class="legend-dot relay"></span>
-          Portable relay
-        </div>
-
-        <h3>
-          Relay to relay
-        </h3>
-
-        <p>
-          When a direct local path isn't available, a portable
-          relay bridges the gap — BLE between phone and relay,
-          with LoRa providing the long-range relay-to-relay link.
+        <p class="supporting">
+          Neyra is an experimental Android project exploring how nearby
+          phones and portable relay devices can pass messages without
+          relying on cellular service or internet at every step.
         </p>
 
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="/api/download">
+            Try the Android prototype
+          </a>
+
+          <a class="btn btn-secondary" href="#how-it-works">
+            How it works
+          </a>
+        </div>
+
+        <div class="hero-status">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          Experimental build · active development
+        </div>
       </div>
 
-    </div>
+      <!-- ORIGINAL INLINE ARCHITECTURE SVG PRESERVED -->
 
+      <div class="hero-visual">
+        <div class="diagram-card">
 
-    <div class="path-strip">
+          <svg
+            class="mesh-diagram"
+            viewBox="0 0 640 380"
+            role="img"
+            aria-labelledby="mesh-diagram-title mesh-diagram-desc"
+            preserveAspectRatio="xMidYMid meet"
+          >
+            <title id="mesh-diagram-title">
+              Neyra communication system architecture
+            </title>
 
-      <span>Phone A</span>
+            <desc id="mesh-diagram-desc">
+              A conceptual view of two local phone groups connected
+              through nearby relay nodes. Phones connect locally,
+              while relay nodes use a long-range LoRa link.
+            </desc>
 
-      <span class="arrow">→</span>
+            <!-- Local mesh coverage -->
+            <circle
+              class="cluster-ring"
+              cx="128"
+              cy="150"
+              r="96"
+            />
 
-      <span class="relay-text">Relay A</span>
+            <circle
+              class="cluster-ring"
+              cx="512"
+              cy="150"
+              r="96"
+            />
 
-      <span class="arrow">→</span>
+            <!-- Left phone mesh -->
+            <line
+              class="mesh-link"
+              x1="88" y1="122"
+              x2="168" y2="122"
+            />
 
-      <span class="relay-text">Relay B</span>
+            <line
+              class="mesh-link"
+              x1="88" y1="122"
+              x2="128" y2="192"
+            />
 
-      <span class="arrow">→</span>
+            <line
+              class="mesh-link"
+              x1="168" y1="122"
+              x2="128" y2="192"
+            />
 
-      <span>Phone B</span>
+            <g
+              class="phone-node"
+              transform="translate(88 122)"
+              aria-hidden="true"
+            >
+              <rect
+                x="-9" y="-15"
+                width="18" height="30"
+                rx="4"
+              />
+              <circle cx="0" cy="10" r="1.7" />
+            </g>
 
-    </div>
+            <g
+              class="phone-node"
+              transform="translate(168 122)"
+              aria-hidden="true"
+            >
+              <rect
+                x="-9" y="-15"
+                width="18" height="30"
+                rx="4"
+              />
+              <circle cx="0" cy="10" r="1.7" />
+            </g>
 
+            <g
+              class="phone-node"
+              transform="translate(128 192)"
+              aria-hidden="true"
+            >
+              <rect
+                x="-9" y="-15"
+                width="18" height="30"
+                rx="4"
+              />
+              <circle cx="0" cy="10" r="1.7" />
+            </g>
 
-    <dl class="spec-list">
+            <text
+              class="cluster-label"
+              x="128" y="66"
+              text-anchor="middle"
+            >
+              LOCAL MESH
+            </text>
 
-      <div class="spec-row">
-        <dt>Platform</dt>
-        <dd>Android-first prototype</dd>
-      </div>
+            <text
+              class="cluster-subtitle"
+              x="128" y="84"
+              text-anchor="middle"
+            >
+              Wi-Fi P2P + BLE
+            </text>
 
-      <div class="spec-row">
-        <dt>Phone ↔ Phone</dt>
-        <dd>Wi-Fi P2P + Bluetooth Low Energy</dd>
-      </div>
+            <!-- Right phone mesh -->
+            <line
+              class="mesh-link"
+              x1="472" y1="122"
+              x2="552" y2="122"
+            />
 
-      <div class="spec-row">
-        <dt>Phone ↔ Relay</dt>
-        <dd>Bluetooth Low Energy</dd>
-      </div>
+            <line
+              class="mesh-link"
+              x1="472" y1="122"
+              x2="512" y2="192"
+            />
 
-      <div class="spec-row">
-        <dt>Relay ↔ Relay</dt>
-        <dd>
-          LoRa, ESP32 + SX1278 / Ra-02 class hardware
-        </dd>
-      </div>
+            <line
+              class="mesh-link"
+              x1="552" y1="122"
+              x2="512" y2="192"
+            />
 
-      <div class="spec-row">
+            <g
+              class="phone-node"
+              transform="translate(472 122)"
+              aria-hidden="true"
+            >
+              <rect
+                x="-9" y="-15"
+                width="18" height="30"
+                rx="4"
+              />
+              <circle cx="0" cy="10" r="1.7" />
+            </g>
 
-        <dt>Routing</dt>
+            <g
+              class="phone-node"
+              transform="translate(552 122)"
+              aria-hidden="true"
+            >
+              <rect
+                x="-9" y="-15"
+                width="18" height="30"
+                rx="4"
+              />
+              <circle cx="0" cy="10" r="1.7" />
+            </g>
 
-        <dd>
+            <g
+              class="phone-node"
+              transform="translate(512 192)"
+              aria-hidden="true"
+            >
+              <rect
+                x="-9" y="-15"
+                width="18" height="30"
+                rx="4"
+              />
+              <circle cx="0" cy="10" r="1.7" />
+            </g>
 
-          <div class="chip-row">
+            <text
+              class="cluster-label"
+              x="512" y="66"
+              text-anchor="middle"
+            >
+              LOCAL MESH
+            </text>
 
-            <span class="chip">TTL</span>
-            <span class="chip">Message IDs</span>
-            <span class="chip">Deduplication</span>
-            <span class="chip">ACKs</span>
-            <span class="chip">Store-and-forward</span>
+            <text
+              class="cluster-subtitle"
+              x="512" y="84"
+              text-anchor="middle"
+            >
+              Wi-Fi P2P + BLE
+            </text>
 
+            <!-- Phone-to-relay BLE links -->
+            <line
+              class="ble-link"
+              x1="128" y1="209"
+              x2="216" y2="270"
+            />
+
+            <line
+              class="ble-link"
+              x1="512" y1="209"
+              x2="424" y2="270"
+            />
+
+            <text
+              class="transport-label"
+              x="170" y="250"
+              text-anchor="middle"
+            >
+              BLE
+            </text>
+
+            <text
+              class="transport-label"
+              x="470" y="250"
+              text-anchor="middle"
+            >
+              BLE
+            </text>
+
+            <!-- Relay A -->
+            <g
+              class="relay-node"
+              transform="translate(236 293)"
+              aria-hidden="true"
+            >
+              <line x1="0" y1="-26" x2="0" y2="-39" />
+              <line x1="-5" y1="-39" x2="0" y2="-46" />
+              <line x1="5" y1="-39" x2="0" y2="-46" />
+
+              <rect
+                x="-21" y="-26"
+                width="42" height="52"
+                rx="8"
+              />
+
+              <line x1="-9" y1="-7" x2="9" y2="-7" />
+              <circle cx="0" cy="10" r="3" />
+            </g>
+
+            <!-- Relay B -->
+            <g
+              class="relay-node"
+              transform="translate(404 293)"
+              aria-hidden="true"
+            >
+              <line x1="0" y1="-26" x2="0" y2="-39" />
+              <line x1="-5" y1="-39" x2="0" y2="-46" />
+              <line x1="5" y1="-39" x2="0" y2="-46" />
+
+              <rect
+                x="-21" y="-26"
+                width="42" height="52"
+                rx="8"
+              />
+
+              <line x1="-9" y1="-7" x2="9" y2="-7" />
+              <circle cx="0" cy="10" r="3" />
+            </g>
+
+            <!-- Relay labels -->
+            <text
+              class="relay-label"
+              x="236" y="344"
+              text-anchor="middle"
+            >
+              Relay A
+            </text>
+
+            <text
+              class="relay-label"
+              x="404" y="344"
+              text-anchor="middle"
+            >
+              Relay B
+            </text>
+
+            <!-- Long-range LoRa link -->
+            <line
+              class="lora-link"
+              x1="257" y1="293"
+              x2="383" y2="293"
+            />
+
+            <circle
+              class="lora-endpoint"
+              cx="257" cy="293"
+              r="3.5"
+            />
+
+            <circle
+              class="lora-endpoint"
+              cx="383" cy="293"
+              r="3.5"
+            />
+
+            <text
+              class="lora-label"
+              x="320" y="272"
+              text-anchor="middle"
+            >
+              LoRa
+            </text>
+
+            <text
+              class="lora-subtitle"
+              x="320" y="315"
+              text-anchor="middle"
+            >
+              long-range link
+            </text>
+          </svg>
+
+          <div class="diagram-legend">
+            <span>
+              <span class="legend-dot mesh"></span>
+              local phone mesh
+            </span>
+
+            <span>
+              <span class="legend-dot relay"></span>
+              portable relay
+            </span>
+
+            <span>
+              <span class="legend-line lora"></span>
+              LoRa long-range link
+            </span>
           </div>
 
-        </dd>
-
-      </div>
-
-    </dl>
-
-  </div>
-
-</section>
-
-
-<!-- ============================================================
-     FEATURES
-============================================================ -->
-
-<section id="features">
-
-  <div class="container">
-
-    <div class="section-head">
-
-      <h2 class="section-heading">
-        What it does
-      </h2>
-
-    </div>
-
-
-    <div class="feature-list">
-
-      <div class="feature-row">
-
-        <svg
-          class="feature-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <path
-            d="M21 11.5a8.38 8.38 0 0 1-8.5 8.4 8.5 8.5 0 0 1-4-1L3 20l1.2-5.5A8.4 8.4 0 0 1 3.5 11.5 8.38 8.38 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5Z"
-          />
-        </svg>
-
-        <div>
-          <h3>Offline messaging</h3>
-
-          <p>
-            Exchange messages without relying on cellular service
-            or internet connectivity.
-          </p>
         </div>
-
-      </div>
-
-
-      <div class="feature-row">
-
-        <svg
-          class="feature-icon relay-tint"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <rect
-            x="4"
-            y="4"
-            width="16"
-            height="16"
-            rx="2"
-          />
-
-          <path d="M9 9h.01M15 9h.01M9 15h6" />
-        </svg>
-
-        <div>
-          <h3>Portable relay nodes</h3>
-
-          <p>
-            Low-cost ESP32-based devices extend communication between
-            separated phone clusters.
-          </p>
-        </div>
-
-      </div>
-
-
-      <div class="feature-row">
-
-        <svg
-          class="feature-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <circle
-            cx="6"
-            cy="6"
-            r="2.4"
-          />
-
-          <circle
-            cx="18"
-            cy="6"
-            r="2.4"
-          />
-
-          <circle
-            cx="12"
-            cy="18"
-            r="2.4"
-          />
-
-          <path
-            d="M6 8.4V12l6 4M18 8.4V12l-6 4"
-          />
-        </svg>
-
-        <div>
-          <h3>Hybrid networking</h3>
-
-          <p>
-            Combines local Wi-Fi P2P and BLE phone links with
-            long-range relay hops.
-          </p>
-        </div>
-
-      </div>
-
-
-      <div class="feature-row">
-
-        <svg
-          class="feature-icon relay-tint"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <path d="M3 12h4l2-7 4 14 2-7h6" />
-        </svg>
-
-        <div>
-          <h3>Store and forward</h3>
-
-          <p>
-            Relay nodes queue messages temporarily and forward them
-            once a path opens up.
-          </p>
-        </div>
-
-      </div>
-
-
-      <div class="feature-row">
-
-        <svg
-          class="feature-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <path d="M4 12l5 5L20 6" />
-        </svg>
-
-        <div>
-          <h3>Delivery tracking</h3>
-
-          <p>
-            Every message carries a transport state — queued,
-            relaying, delivered.
-          </p>
-        </div>
-
-      </div>
-
-
-      <div class="feature-row">
-
-        <svg
-          class="feature-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.6"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <circle
-            cx="12"
-            cy="12"
-            r="9"
-          />
-
-          <path d="M12 7v5l3.5 2" />
-        </svg>
-
-        <div>
-          <h3>Network visibility</h3>
-
-          <p>
-            See nearby devices, relay nodes and transport
-            diagnostics as they happen.
-          </p>
-        </div>
-
       </div>
 
     </div>
+  </section>
 
-  </div>
+  <!-- HOW IT WORKS -->
 
-</section>
+  <section id="how-it-works">
+    <div class="container">
 
+      <div class="section-head">
+        <p class="eyebrow">HOW IT WORKS</p>
 
-<!-- ============================================================
-     STATUS + RELEASE
-============================================================ -->
+        <h2 class="section-heading">
+          Nearby first. Further when needed.
+        </h2>
 
-<section id="status">
-
-  <div class="container">
-
-    <div class="status-release">
-
-      <div class="status-copy">
-
-        <div class="status-indicator">
-
-          <span
-            class="pulse-dot"
-            aria-hidden="true"
-          ></span>
-
-          Active development
-
-        </div>
-
-        <p>
-          An experimental, open-source engineering project —
-          developed and evaluated through controlled testing,
-          not presented as a production-grade emergency
-          communications service.
+        <p class="section-lede">
+          Neyra explores a combination of direct phone connections
+          and portable relays. The aim is to move small messages
+          even when conventional connectivity is unavailable.
         </p>
+      </div>
+
+      <div class="tier-cols">
+        <div class="tier-col">
+
+          <div class="tier-label">
+            <span class="legend-dot mesh"></span>
+            Nearby connections
+          </div>
+
+          <h3>Phones connect directly</h3>
+
+          <p>
+            Nearby Android phones can connect over Wi-Fi peer-to-peer
+            and Bluetooth Low Energy. This local path is designed
+            to work without a cellular connection or internet access.
+          </p>
+
+        </div>
+
+        <div class="tier-col">
+
+          <div class="tier-label">
+            <span class="legend-dot relay"></span>
+            Longer-range relay
+          </div>
+
+          <h3>Small relays bridge the gap</h3>
+
+          <p>
+            A phone can connect to a nearby relay over BLE. Relay
+            devices can then pass small packets over LoRa, extending
+            the path beyond the immediate phone-to-phone range.
+          </p>
+
+        </div>
+      </div>
+
+      <div class="path-strip">
+        <span>Phone A</span>
+        <span class="arrow">→</span>
+        <span class="relay-text">Relay A</span>
+        <span class="arrow">→</span>
+        <span class="relay-text">Relay B</span>
+        <span class="arrow">→</span>
+        <span>Phone B</span>
+      </div>
+
+      <details class="technical-details">
+        <summary>Technical details</summary>
+
+        <dl class="spec-list">
+          <div class="spec-row">
+            <dt>Platform</dt>
+            <dd>Android-first prototype</dd>
+          </div>
+
+          <div class="spec-row">
+            <dt>Phone ↔ Phone</dt>
+            <dd>Wi-Fi P2P + Bluetooth Low Energy</dd>
+          </div>
+
+          <div class="spec-row">
+            <dt>Phone ↔ Relay</dt>
+            <dd>Bluetooth Low Energy</dd>
+          </div>
+
+          <div class="spec-row">
+            <dt>Relay ↔ Relay</dt>
+            <dd>LoRa, ESP32 + SX1278 / Ra-02 class hardware</dd>
+          </div>
+
+          <div class="spec-row">
+            <dt>Routing</dt>
+            <dd>
+              <div class="chip-row">
+                <span class="chip">TTL</span>
+                <span class="chip">Message IDs</span>
+                <span class="chip">Deduplication</span>
+                <span class="chip">ACKs</span>
+                <span class="chip">Store-and-forward</span>
+              </div>
+            </dd>
+          </div>
+        </dl>
+      </details>
+
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+
+  <section id="features">
+    <div class="container">
+
+      <div class="section-head">
+        <p class="eyebrow">THE PRODUCT</p>
+
+        <h2 class="section-heading">
+          Built around a few practical ideas.
+        </h2>
+
+        <p class="section-lede">
+          Neyra is being developed in the open. These are the core
+          ideas behind the prototype, with implementation and reliability
+          continuing to evolve.
+        </p>
+      </div>
+
+      <div class="feature-list">
+
+        <div class="feature-row">
+          <svg
+            class="feature-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.4 8.5 8.5 0 0 1-4-1L3 20l1.2-5.5A8.4 8.4 0 0 1 3.5 11.5 8.38 8.38 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5Z" />
+          </svg>
+
+          <div>
+            <h3>Messaging without the internet</h3>
+            <p>
+              Explore direct device-to-device messaging when a cellular
+              connection or internet access is not available.
+            </p>
+          </div>
+        </div>
+
+        <div class="feature-row">
+          <svg
+            class="feature-icon relay-tint"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="4" y="4" width="16" height="16" rx="2" />
+            <path d="M9 9h.01M15 9h.01M9 15h6" />
+          </svg>
+
+          <div>
+            <h3>Portable relay devices</h3>
+            <p>
+              ESP32-based hardware is being explored to pass messages
+              between phone groups that are farther apart.
+            </p>
+          </div>
+        </div>
+
+        <div class="feature-row">
+          <svg
+            class="feature-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="6" cy="6" r="2.4" />
+            <circle cx="18" cy="6" r="2.4" />
+            <circle cx="12" cy="18" r="2.4" />
+            <path d="M6 8.4V12l6 4M18 8.4V12l-6 4" />
+          </svg>
+
+          <div>
+            <h3>More than one connection path</h3>
+            <p>
+              The design combines local Wi-Fi peer-to-peer and BLE links
+              with longer-range relay hops.
+            </p>
+          </div>
+        </div>
+
+        <div class="feature-row">
+          <svg
+            class="feature-icon relay-tint"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M3 12h4l2-7 4 14 2-7h6" />
+          </svg>
+
+          <div>
+            <h3>Store and forward</h3>
+            <p>
+              The system is designed to hold messages and pass them
+              along when a suitable relay path becomes available.
+            </p>
+          </div>
+        </div>
+
+        <div class="feature-row">
+          <svg
+            class="feature-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M4 12l5 5L20 6" />
+          </svg>
+
+          <div>
+            <h3>Understand message state</h3>
+            <p>
+              Message transport states are part of the app; end-to-end
+              delivery confirmation and reliability remain areas to test.
+            </p>
+          </div>
+        </div>
+
+        <div class="feature-row">
+          <svg
+            class="feature-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 7v5l3.5 2" />
+          </svg>
+
+          <div>
+            <h3>Useful diagnostics</h3>
+            <p>
+              Inspect nearby devices, relay nodes and transport details
+              while testing the prototype.
+            </p>
+          </div>
+        </div>
 
       </div>
 
+      <p class="section-note">
+        Neyra is an experimental project, not a substitute for emergency
+        communications. Supported features and behaviour can vary by build
+        and device; check the project status before testing.
+      </p>
 
-      <div class="release-info">
+    </div>
+  </section>
 
-        <h3>
-          Latest release
-        </h3>
+  <!-- STATUS AND RELEASE -->
 
-        <div class="platform">
-          Android APK
+  <section id="status">
+    <div class="container">
+
+      <div class="status-release">
+
+        <div class="status-copy">
+          <div class="status-indicator">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            Active development
+          </div>
+
+          <p>
+            Neyra is an experimental, open-source Android prototype.
+            It is being tested as an engineering project and is not a
+            production-grade or emergency communications service.
+          </p>
         </div>
 
-        <div class="release-actions">
+        <div class="release-info">
+          <h3>Try the prototype</h3>
+          <div class="platform">Android APK</div>
 
-          <a
-            class="btn btn-primary"
-            href="/api/download"
-          >
-            Download latest APK
-          </a>
+          <div class="release-actions">
+            <a class="btn btn-primary" href="/api/download">
+              Download the APK
+            </a>
 
-          <a
-            class="btn btn-ghost"
-            href="https://github.com/DhairyaSood/hybrid-mesh-relay/releases"
-          >
-            View releases
-          </a>
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/DhairyaSood/hybrid-mesh-relay/releases"
+            >
+              View releases
+            </a>
+          </div>
 
-        </div>
-
-        <div
-          class="release-version mono"
-          id="release-version"
-        >
-          version: latest
+          <div class="release-version mono" id="release-version">
+            version: latest
+          </div>
         </div>
 
       </div>
+    </div>
+  </section>
+
+  <!-- INSTALLATION -->
+
+  <section id="installation">
+    <div class="container">
+
+      <div class="section-head">
+        <p class="eyebrow">GET STARTED</p>
+
+        <h2 class="section-heading">
+          Try Neyra on Android.
+        </h2>
+
+        <p class="section-lede">
+          The prototype is distributed as an APK outside Google Play.
+          Install it only if you're comfortable testing experimental software.
+        </p>
+      </div>
+
+      <ol class="steps">
+        <li>Download the APK.</li>
+        <li>Open the downloaded file on Android.</li>
+        <li>
+          Allow installation from the browser or file manager if prompted.
+        </li>
+        <li>
+          Install the app and grant the requested wireless permissions.
+        </li>
+      </ol>
+
+      <p class="install-note">
+        Distributed as an Android APK outside Google Play.
+      </p>
 
     </div>
-
-  </div>
-
-</section>
-
-
-<!-- ============================================================
-     INSTALLATION
-============================================================ -->
-
-<section id="installation">
-
-  <div class="container">
-
-    <div class="section-head">
-
-      <h2 class="section-heading">
-        Installation
-      </h2>
-
-    </div>
-
-
-    <ol class="steps">
-
-      <li>
-        Download the APK.
-      </li>
-
-      <li>
-        Open the downloaded file on Android.
-      </li>
-
-      <li>
-        Allow installation from the browser or file manager
-        if prompted.
-      </li>
-
-      <li>
-        Install the app and grant the requested wireless
-        permissions.
-      </li>
-
-    </ol>
-
-
-    <p class="install-note">
-      Distributed as an Android APK outside Google Play.
-    </p>
-
-  </div>
-
-</section>
+  </section>
 
 </main>
 
-
-<!-- ============================================================
-     FOOTER
-============================================================ -->
+<!-- FOOTER -->
 
 <footer class="site-footer">
-
   <div class="container">
 
     <div class="footer-top">
 
       <div class="footer-oss">
-
         <div class="footer-brand">
-
           <img
             src="assets/logo.png"
-            alt="Hybrid Mesh Relay logo"
+            alt="Neyra logo"
             width="20"
             height="20"
           />
-
-          <span>
-            Hybrid Mesh Relay
-          </span>
-
+          <span>Neyra</span>
         </div>
 
         <p>
@@ -1214,102 +842,55 @@
           and documentation all live on GitHub.
         </p>
 
-        <a
-          href="https://github.com/DhairyaSood/hybrid-mesh-relay"
-        >
+        <a href="https://github.com/DhairyaSood/hybrid-mesh-relay">
           View source →
         </a>
-
       </div>
 
-
       <div class="footer-creator">
-
-        <div class="eyebrow">
-          Built by
-        </div>
-
-        <div class="creator-name">
-          Dhairya Sood
-        </div>
+        <div class="eyebrow">Built by</div>
+        <div class="creator-name">Dhairya Sood</div>
 
         <div class="creator-links">
-
           <a
             class="icon-link"
             href="https://github.com/DhairyaSood"
             aria-label="Dhairya Sood on GitHub"
           >
-
-            <svg
-              viewBox="0 0 24 24"
-              fill="currentColor"
-            >
-
-              <path
-                d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.93.57.1.78-.25.78-.55-.0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.34-1.28-1.7-1.28-1.7-1.04-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.26-1.28-5.26-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.76.12 3.05.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.4-5.28 5.69.42.36.78 1.08.78 2.18 0 .1.01.27.02.45.01.39.01 2.83.01 3.22 0 .3.2.66.79.55A10.52 10.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"
-              />
-
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.09 3.29 9.4 7.86 10.93.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.34-1.28-1.7-1.28-1.7-1.04-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.26-1.28-5.26-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.76.12 3.05.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.4-5.28 5.69.42.36.78 1.08.78 2.18 0 .1.01.27.02.45.01.39.01 2.83.01 3.22 0 .3.2.66.79.55A10.52 10.52 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
             </svg>
-
           </a>
-
 
           <a
             class="icon-link"
             href="https://www.linkedin.com/in/dhairya-sood/"
             aria-label="Dhairya Sood on LinkedIn"
           >
-
-            <svg
-              viewBox="0 0 24 24"
-              fill="currentColor"
-            >
-
-              <path
-                d="M4.98 3.5a2.5 2.5 0 1 1 0 5.001 2.5 2.5 0 0 1-5.001 0ZM.5 8.98h8.96V23.5H.5V8.98ZM8.98 8.98h8.6v2h.12c.37-.7 1.62-2.32 4.14-2.32 4.42 0 5.24 2.91 5.24 6.69v7.15h-8.96v-6.34c0-1.51-.03-3.45-2.1-3.45-2.1 0-2.43 1.64-2.43 3.34v6.45H8.98V8.98Z"
-              />
-
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M4.98 3.5a2.5 2.5 0 1 1 0 5.001 2.5 2.5 0 0 1-5.001 0ZM.5 8.98h8.96V23.5H.5V8.98ZM8.98 8.98h8.6v2h.12c.37-.7 1.62-2.32 4.14-2.32 4.42 0 5.24 2.91 5.24 6.69v7.15h-8.96v-6.34c0-1.51-.03-3.45-2.1-3.45-2.1 0-2.43 1.64-2.43 3.34v6.45H8.98V8.98Z" />
             </svg>
-
           </a>
-
         </div>
-
       </div>
 
     </div>
 
-
     <div class="footer-bottom">
-
-      <nav
-        class="footer-links"
-        aria-label="Footer"
-      >
-
-        <a
-          href="https://github.com/DhairyaSood/hybrid-mesh-relay"
-        >
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/DhairyaSood/hybrid-mesh-relay">
           GitHub
         </a>
-
-        <a href="/api/download">
-          Download APK
-        </a>
-
+        <a href="/api/download">Download APK</a>
       </nav>
 
       <div class="footer-meta">
-        Open-source project · Android prototype
+        Open-source project · Experimental Android build
       </div>
-
     </div>
 
   </div>
-
 </footer>
-
 
 <script src="script.js"></script>
 
