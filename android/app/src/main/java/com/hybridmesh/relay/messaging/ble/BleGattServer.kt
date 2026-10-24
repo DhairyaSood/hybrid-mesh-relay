@@ -16,7 +16,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
-import com.hybridmesh.relay.ble.BleConstants
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
@@ -29,6 +28,7 @@ import com.hybridmesh.relay.network.NetworkEventKind
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -62,8 +62,10 @@ class BleGattServer(context: Context) {
     @Volatile
     private var serverGeneration: Long = 0L
 
+    private val subscribedDevices = ConcurrentHashMap.newKeySet<String>()
+    private val assemblies = ConcurrentHashMap<String, Assembly>()
     private val nextConnectionId = AtomicLong(0L)
-    private val peerSessionState = BleGattPeerSessionState<Assembly>()
+    private val activeConnectionIds = ConcurrentHashMap<String, Long>()
     private val receiveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var assemblyCleanupJob: Job? = null
 
@@ -235,10 +237,14 @@ class BleGattServer(context: Context) {
         isReady = false
         readiness?.complete(false)
         readiness = null
+        assemblies.clear()
         assemblyCleanupJob?.cancel()
         assemblyCleanupJob = null
-        peerSessionState.clearForServerStop().forEach { (address, connectionId) ->
-            connectionStateReceiver?.invoke(address, connectionId, false)
+        subscribedDevices.clear()
+        activeConnectionIds.entries.toList().forEach { (address, connectionId) ->
+            if (activeConnectionIds.remove(address, connectionId)) {
+                connectionStateReceiver?.invoke(address, connectionId, false)
+            }
         }
         lastAckDeliverySucceeded = null
         if (hasConnectPermission()) {
@@ -258,7 +264,7 @@ class BleGattServer(context: Context) {
             while (server != null) {
                 delay(ASSEMBLY_CLEANUP_INTERVAL_MS)
                 val cutoff = System.currentTimeMillis() - ASSEMBLY_TIMEOUT_MS
-                peerSessionState.removeExpiredAssemblies(cutoff) { it.lastUpdatedAt }
+                assemblies.entries.removeIf { it.value.lastUpdatedAt < cutoff }
             }
         }
     }
@@ -348,19 +354,22 @@ class BleGattServer(context: Context) {
                 )
                 val address = safeAddress(device)
                 if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                    peerSessionState.onConnected(
-                        address,
+                    val connectionId = activeConnectionIds.computeIfAbsent(address) {
                         nextConnectionId.incrementAndGet()
-                    ) { connectionId ->
-                        connectionStateReceiver?.invoke(address, connectionId, true)
                     }
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    peerSessionState.onDisconnected(
-                        address,
-                        isAddressConnected = { isGattDeviceConnected(device) }
-                    ) { connectionId ->
+                    connectionStateReceiver?.invoke(address, connectionId, true)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED &&
+                    !isGattDeviceConnected(device)
+                ) {
+                    val connectionId = activeConnectionIds.remove(address)
+                    if (connectionId != null) {
                         connectionStateReceiver?.invoke(address, connectionId, false)
                     }
+                }
+                if (newState != BluetoothProfile.STATE_CONNECTED) {
+                    val prefix = "$address|"
+                    assemblies.keys.removeIf { it.startsWith(prefix) }
+                    subscribedDevices.remove(address)
                 }
             }
 
@@ -388,13 +397,13 @@ class BleGattServer(context: Context) {
                         BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                     )
                 ) {
-                    peerSessionState.setSubscribed(safeAddress(device), subscribed = true)
+                    subscribedDevices.add(safeAddress(device))
                 } else if (
                     value.contentEquals(
                         BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
                     )
                 ) {
-                    peerSessionState.setSubscribed(safeAddress(device), subscribed = false)
+                    subscribedDevices.remove(safeAddress(device))
                 } else {
                     status = BluetoothGatt.GATT_FAILURE
                 }
@@ -504,17 +513,6 @@ class BleGattServer(context: Context) {
         bytes: ByteArray,
         callbackGeneration: Long
     ) {
-        peerSessionState.withAssemblies { assemblies ->
-            handleIncomingLocked(device, bytes, callbackGeneration, assemblies)
-        }
-    }
-
-    private fun handleIncomingLocked(
-        device: BluetoothDevice,
-        bytes: ByteArray,
-        callbackGeneration: Long,
-        assemblies: MutableMap<String, Assembly>
-    ) {
         if (callbackGeneration != serverGeneration) return
 
         val frame =
@@ -524,8 +522,7 @@ class BleGattServer(context: Context) {
         if (frame.chunkCount !in 1..GattPacketCodec.MAX_CHUNKS) return
 
         val address = safeAddress(device)
-        val connectionId = peerSessionState.currentConnectionId(address) ?: return
-        val key = "$address|$connectionId|${frame.transferId}"
+        val key = "$address|${frame.transferId}"
 
         if (
             !assemblies.containsKey(key) &&
@@ -534,30 +531,30 @@ class BleGattServer(context: Context) {
             sendAck(
                 device,
                 frame.transferId,
-                connectionId,
                 accepted = false,
                 rejection = BleAttachmentRejection.ASSEMBLY_LIMIT
             )
             return
         }
 
-        val assembly = assemblies[key] ?: run {
-            val deviceAssemblyCount = assemblies.keys.count { it.startsWith("$address|") }
-            if (assemblies.size >= MAX_CONCURRENT_ASSEMBLIES ||
-                deviceAssemblyCount >= MAX_ASSEMBLIES_PER_DEVICE) {
-                null
-            } else {
-                Assembly(
-                    transferId = frame.transferId,
-                    chunkCount = frame.chunkCount
-                ).also { assemblies[key] = it }
+        val assembly = synchronized(assemblies) {
+            assemblies[key] ?: run {
+                val deviceAssemblyCount = assemblies.keys.count { it.startsWith("$address|") }
+                if (assemblies.size >= MAX_CONCURRENT_ASSEMBLIES ||
+                    deviceAssemblyCount >= MAX_ASSEMBLIES_PER_DEVICE) {
+                    null
+                } else {
+                    Assembly(
+                        transferId = frame.transferId,
+                        chunkCount = frame.chunkCount
+                    ).also { assemblies[key] = it }
+                }
             }
         }
         if (assembly == null) {
             sendAck(
                 device,
                 frame.transferId,
-                connectionId,
                 accepted = false,
                 rejection = BleAttachmentRejection.ASSEMBLY_LIMIT
             )
@@ -569,7 +566,6 @@ class BleGattServer(context: Context) {
             sendAck(
                 device,
                 frame.transferId,
-                connectionId,
                 accepted = false,
                 rejection = BleAttachmentRejection.ASSEMBLY_INVALID
             )
@@ -591,7 +587,6 @@ class BleGattServer(context: Context) {
                 sendAck(
                     device,
                     frame.transferId,
-                    connectionId,
                     accepted = false,
                     rejection = BleAttachmentRejection.ASSEMBLY_INVALID
                 )
@@ -639,7 +634,6 @@ class BleGattServer(context: Context) {
             sendAck(
                 device,
                 frame.transferId,
-                connectionId,
                 accepted = false,
                 rejection = if (isAttachmentFrame) BleAttachmentRejection.RECEIVER_UNAVAILABLE else null
             )
@@ -652,7 +646,6 @@ class BleGattServer(context: Context) {
                     sendAck(
                         device,
                         frame.transferId,
-                        connectionId,
                         accepted = false,
                         rejection = if (isAttachmentFrame) BleAttachmentRejection.RECEIVER_BUSY else null
                     )
@@ -675,10 +668,10 @@ class BleGattServer(context: Context) {
                     if (callbackGeneration == serverGeneration) {
                         when (result) {
                             is BleAttachmentReceiveResult.Accepted -> sendAck(
-                                device, frame.transferId, connectionId, accepted = true, offset = result.offset
+                                device, frame.transferId, accepted = true, offset = result.offset
                             )
                             is BleAttachmentReceiveResult.Rejected -> sendAck(
-                                device, frame.transferId, connectionId, accepted = false, rejection = result.reason
+                                device, frame.transferId, accepted = false, rejection = result.reason
                             )
                         }
                     }
@@ -716,7 +709,7 @@ class BleGattServer(context: Context) {
                         result = outcome
                     )
                     if (callbackGeneration == serverGeneration) {
-                        sendAck(device, frame.transferId, connectionId, receiveOutcome == true)
+                        sendAck(device, frame.transferId, receiveOutcome == true)
                     }
                 }
             } finally {
@@ -729,11 +722,12 @@ class BleGattServer(context: Context) {
     private fun sendAck(
         device: BluetoothDevice,
         transferId: Long,
-        expectedConnectionId: Long,
         accepted: Boolean,
         offset: Long? = null,
         rejection: BleAttachmentRejection? = null
     ): Boolean {
+        if (!subscribedDevices.contains(safeAddress(device))) return false
+
         val characteristic = txCharacteristic ?: return false
         val currentServer = server ?: return false
         val value = GattPacketCodec.encodeAck(
@@ -743,34 +737,30 @@ class BleGattServer(context: Context) {
             rejectionCode = rejection?.wireCode
         )
 
-        val success = peerSessionState.withSubscribedSession(
-            safeAddress(device), expectedConnectionId
-        ) {
-            try {
-                if (Build.VERSION.SDK_INT >= 33) {
-                    currentServer.notifyCharacteristicChanged(
-                        device,
-                        characteristic,
-                        false,
-                        value
-                    ) == BluetoothStatusCodes.SUCCESS
-                } else {
-                    @Suppress("DEPRECATION")
-                    characteristic.value = value
+        val success = try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                currentServer.notifyCharacteristicChanged(
+                    device,
+                    characteristic,
+                    false,
+                    value
+                ) == BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                characteristic.value = value
 
-                    @Suppress("DEPRECATION")
-                    currentServer.notifyCharacteristicChanged(
-                        device,
-                        characteristic,
-                        false
-                    )
-                }
-            } catch (_: SecurityException) {
-                false
-            } catch (_: Exception) {
-                false
+                @Suppress("DEPRECATION")
+                currentServer.notifyCharacteristicChanged(
+                    device,
+                    characteristic,
+                    false
+                )
             }
-        } ?: return false
+        } catch (_: SecurityException) {
+            false
+        } catch (_: Exception) {
+            false
+        }
 
         lastAckDeliverySucceeded = success
         return success
@@ -779,9 +769,10 @@ class BleGattServer(context: Context) {
     private fun buildIdentityPayload(): ByteArray {
         val identity = identityStore.getIdentity()
 
-        val name = BleConstants.encodeUtf8Truncated(
-            identity.deviceName.trim(), BleGattConstants.IDENTITY_NAME_MAX_BYTES
-        )
+        val name = identity.deviceName
+            .trim()
+            .toByteArray(Charsets.UTF_8)
+            .truncateUtf8(BleGattConstants.IDENTITY_NAME_MAX_BYTES)
 
         return ByteBuffer.allocate(1 + 1 + name.size + 1)
             .order(ByteOrder.BIG_ENDIAN)
@@ -792,6 +783,20 @@ class BleGattServer(context: Context) {
                 put(if (identity.deviceType.name == "RELAY") 2 else 1)
             }
             .array()
+    }
+
+    private fun ByteArray.truncateUtf8(maxBytes: Int): ByteArray {
+        if (size <= maxBytes) return this
+
+        var end = maxBytes
+        while (
+            end > 0 &&
+            (this[end - 1].toInt() and 0xC0) == 0x80
+        ) {
+            end--
+        }
+
+        return copyOf(end)
     }
 
     private fun decodeMessageType(value: Byte): String =

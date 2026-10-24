@@ -3,9 +3,6 @@ package com.hybridmesh.relay.messaging.mesh
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.CharBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.CodingErrorAction
 import java.util.UUID
 import java.util.zip.CRC32
 
@@ -49,18 +46,13 @@ object MeshPacketCodec {
     const val MAX_PACKET_BYTES = 16 * 1024
     const val MAX_TEXT_BYTES = 12 * 1024
     const val INITIAL_TTL = 8
-    // DATA's first origin transmission does not consume TTL, so its final ACK needs one extra return link.
-    const val ACK_INITIAL_TTL = INITIAL_TTL + 1
     private const val MAX_TTL_WIRE = 32
 
     fun encode(packet: MeshPacket, wireVersionNumber: Int = PROTOCOL_VERSION): ByteArray {
         val packetUuid = uuid(packet.packetId)
-        require(packetUuid == uuid(stablePacketId(packet.packetType, packet.messageId))) {
-            "packetId must be stable for its message and packet type"
-        }
-        val messageId = encodeUtf8(packet.messageId)
-        val messageType = encodeUtf8(packet.messageType)
-        val content = encodeUtf8(packet.content)
+        val messageId = packet.messageId.toByteArray(Charsets.UTF_8)
+        val messageType = packet.messageType.toByteArray(Charsets.UTF_8)
+        val content = packet.content.toByteArray(Charsets.UTF_8)
 
         require(messageId.size <= MAX_TEXT_BYTES) { "messageId too large" }
         require(messageType.size <= 255) { "messageType too large" }
@@ -74,7 +66,7 @@ object MeshPacketCodec {
         require(packet.routeTransportCodes.all { it in 1..3 }) { "unknown route transport code" }
         require(packet.ttl in 0..MAX_TTL_WIRE) { "ttl out of range" }
         require(packet.hopCount in 0..MAX_TTL_WIRE) { "hopCount out of range" }
-        require(packet.ttl + packet.hopCount == ttlBudget(packet.packetType)) {
+        require(packet.ttl + packet.hopCount == INITIAL_TTL) {
             "invalid ttl/hopCount relationship"
         }
         require(packet.messageId.isNotBlank()) { "messageId is blank" }
@@ -207,7 +199,7 @@ object MeshPacketCodec {
             if (createdAt <= 0L || expiresAt <= createdAt) return null
             if (expiresAt - createdAt > 30 * 60 * 1000L) return null
             if (ttl > MAX_TTL_WIRE || hopCount > MAX_TTL_WIRE) return null
-            if (ttl + hopCount != ttlBudget(packetType)) return null
+            if (ttl + hopCount != INITIAL_TTL) return null
             if (messageIdLength == 0 || messageTypeLength == 0) return null
 
             val messageIdBytes = ByteArray(messageIdLength)
@@ -219,10 +211,8 @@ object MeshPacketCodec {
 
             if (originUuid == destinationUuid) return null
 
-            val messageIdText = decodeUtf8(messageIdBytes) ?: return null
-            val messageTypeText = decodeUtf8(messageTypeBytes) ?: return null
-            val contentText = decodeUtf8(contentBytes) ?: return null
-            if (packetUuid != uuid(stablePacketId(packetType, messageIdText))) return null
+            val messageIdText = messageIdBytes.toString(Charsets.UTF_8)
+            val messageTypeText = messageTypeBytes.toString(Charsets.UTF_8)
             if (messageIdText.length > 512 || messageTypeText.length > 64) return null
             if (!messageIdText.all { it.isLetterOrDigit() || it in "-_:" }) return null
 
@@ -249,7 +239,7 @@ object MeshPacketCodec {
                 hopCount = hopCount,
                 packetType = packetType,
                 messageType = messageTypeText,
-                content = contentText,
+                content = contentBytes.toString(Charsets.UTF_8),
                 deliveryHopCount = if (encodedDeliveryHop == 0) null else encodedDeliveryHop - 1,
                 routeTransportCodes = routeTransportCodes,
                 routeTraceComplete = routeTraceComplete
@@ -295,36 +285,6 @@ object MeshPacketCodec {
         "HMR-${UUID.nameUUIDFromBytes((messageId + "::ATTACHMENT_ACK").toByteArray(Charsets.UTF_8))}"
 
     fun newTransferId(): Long = UUID.randomUUID().leastSignificantBits
-
-    private fun ttlBudget(packetType: MeshPacket.PacketType): Int =
-        if (packetType == MeshPacket.PacketType.DATA) INITIAL_TTL else ACK_INITIAL_TTL
-
-    private fun stablePacketId(packetType: MeshPacket.PacketType, messageId: String): String =
-        when (packetType) {
-            MeshPacket.PacketType.DATA -> stableDataPacketId(messageId)
-            MeshPacket.PacketType.DELIVERY_ACK -> stableDeliveryAckPacketId(messageId)
-            MeshPacket.PacketType.ATTACHMENT_ACK -> stableAttachmentAckPacketId(messageId)
-        }
-
-    private fun decodeUtf8(bytes: ByteArray): String? = runCatching {
-        Charsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-            .decode(ByteBuffer.wrap(bytes))
-            .toString()
-    }.getOrNull()
-
-    private fun encodeUtf8(value: String): ByteArray {
-        val encoded = try {
-            Charsets.UTF_8.newEncoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .encode(CharBuffer.wrap(value))
-        } catch (failure: CharacterCodingException) {
-            throw IllegalArgumentException("Text contains malformed UTF-16", failure)
-        }
-        return ByteArray(encoded.remaining()).also { encoded.get(it) }
-    }
 
     private fun uuid(nodeId: String): UUID = UUID.fromString(nodeId.removePrefix("HMR-"))
 

@@ -1,9 +1,5 @@
 package com.hybridmesh.relay.ble
 
-import java.nio.ByteBuffer
-import java.nio.CharBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.CodingErrorAction
 import java.util.UUID
 
 object BleConstants {
@@ -32,30 +28,4 @@ object BleConstants {
     const val DISCOVERY_MAX_BYTES = DISCOVERY_BASE_BYTES + MESH_DISCOVERY_NAME_MAX_BYTES
 
     const val PEER_STALE_AFTER_MS = 8_000L
-
-    fun encodeUtf8Truncated(value: String, maxBytes: Int): ByteArray {
-        require(maxBytes >= 0)
-        val encoded = try {
-            Charsets.UTF_8.newEncoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .encode(CharBuffer.wrap(value))
-        } catch (failure: CharacterCodingException) {
-            throw IllegalArgumentException("Text contains malformed UTF-16", failure)
-        }
-        val bytes = ByteArray(encoded.remaining()).also { encoded.get(it) }
-        if (bytes.size <= maxBytes) return bytes
-
-        var end = maxBytes
-        while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) end--
-        return bytes.copyOf(end)
-    }
-
-    fun decodeUtf8(bytes: ByteArray): String? = runCatching {
-        Charsets.UTF_8.newDecoder()
-            .onMalformedInput(CodingErrorAction.REPORT)
-            .onUnmappableCharacter(CodingErrorAction.REPORT)
-            .decode(ByteBuffer.wrap(bytes))
-            .toString()
-    }.getOrNull()
 }
