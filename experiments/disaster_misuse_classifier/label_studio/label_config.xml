@@ -1,0 +1,36 @@
+<View>
+  <Header value="Disaster misuse pilot — content review only (not criminal findings)"/>
+  <Text name="text" value="$message_text"/>
+  <Header value="Metadata (read-only)"/>
+  <Text name="meta" value="ID: $sample_id | Event: $event_id | Strategy: $sampling_strategy"/>
+  <Text name="hint" value="Keyword hint (NOT a label): $keyword_bucket_hint" visibleWhen="$keyword_bucket_hint != null"/>
+  <Header value="Discourse type (single)"/>
+  <Choices name="discourse_type" toName="text" choice="single" required="true">
+    <Choice value="D0" hint="personal_statement"/>
+    <Choice value="D1" hint="reported_unverified"/>
+    <Choice value="D2" hint="quoted_third_party"/>
+    <Choice value="D3" hint="official_or_media"/>
+    <Choice value="D4" hint="warning_or_debunk"/>
+    <Choice value="D5" hint="denial_refutation"/>
+    <Choice value="D6" hint="hypothetical_or_conditional"/>
+  </Choices>
+  <Header value="Content concern (multi-label)"/>
+  <Choices name="content_labels" toName="text" choice="multiple" required="true">
+    <Choice value="M0" hint="none_benign"/>
+    <Choice value="M1" hint="violence_threat"/>
+    <Choice value="M2" hint="looting_theft_exploitation"/>
+    <Choice value="M3" hint="impersonation_fraud"/>
+    <Choice value="M4" hint="coercion_exploitation"/>
+    <Choice value="M5" hint="rescue_interference"/>
+    <Choice value="M6" hint="harmful_misinformation"/>
+    <Choice value="M7" hint="unclear_needs_context"/>
+  </Choices>
+  <Header value="Primary label (single, for agreement)"/>
+  <Choices name="primary_content_label" toName="text" choice="single" required="true">
+    <Choice value="M0"/><Choice value="M1"/><Choice value="M2"/><Choice value="M3"/>
+    <Choice value="M4"/><Choice value="M5"/><Choice value="M6"/><Choice value="M7"/>
+  </Choices>
+  <Header value="Confidence"/>
+  <Rating name="confidence" toName="text" maxRating="3" required="true"/>
+  <TextArea name="annotator_notes" toName="text" placeholder="Optional notes (no sender identity)" rows="2"/>
+</View>

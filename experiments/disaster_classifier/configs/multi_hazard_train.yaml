@@ -1,0 +1,9 @@
+models_dir: models/multi_hazard_v1
+model_basename: multi_hazard_tfidf_logreg_v1
+data:
+  train_split: data/synthetic_multi_hazard_v1/splits/train.jsonl
+  validation_split: data/synthetic_multi_hazard_v1/splits/validation.jsonl
+  test_split: data/synthetic_multi_hazard_v1/splits/test.jsonl
+tuning_grid:
+  word_max_features: [4000, 8000]
+  C: [0.25, 1.0]
