@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline Gradio — MH-v1 disaster type (17 classes) + MU-v1 misuse."""
+"""Offline Gradio — disaster hybrid + humanitarian + misuse (canonical + experimental)."""
 
 from __future__ import annotations
 
@@ -15,23 +15,10 @@ from neyra_tester.batch import run_batch
 from neyra_tester.inference import MISUSE_LABELS, compare_expected, load_models, predict_all
 
 DISCLAIMER = """
-**Advisory only** — not verified incidents, official alerts, or proof of crime.
-**MH-v1** uses 17 hazard labels (synthetic training). **MU-v1** uses 7 misuse categories (synthetic training).
-Scores are model outputs, not calibrated probabilities.
+**Advisory only** — not verified events, official alerts, or proof of crime. Classifiers do **not** block delivery.
+**DC-T2** = 3 disaster classes only. **Keywords** = heuristics. **MH-v1 / MU-v2 / MU-v3** = experimental where shown.
+Scores are not calibrated probabilities.
 """
-
-SAMPLES = [
-    ("Fire", "Fire in the building, smoke on the third floor."),
-    ("Flood", "Flood water has entered our village near the embankment."),
-    ("Earthquake", "A strong earthquake damaged several buildings."),
-    ("Cyclone", "Cyclone approaching the coast."),
-    ("Fire drill", "The fire drill is tomorrow at school."),
-    ("Help in school", "Help needed in school after the drill."),
-    ("Coercive demand", "Send money now or we will hurt your family."),
-    ("Quoted threat", "A witness reported that someone threatened the shopkeeper."),
-]
-
-CUSTOM_CSS = ".gradio-container { max-width: 960px !important; }"
 
 
 def _format_result(text: str, expected_misuse: str) -> str:
@@ -45,91 +32,83 @@ def _format_result(text: str, expected_misuse: str) -> str:
     if "error" in out and len(out) == 1:
         return str(out["error"])
 
-    lines = ["## Disaster type (MH-v1, 17 classes)"]
-    dt = out.get("disaster_type", {})
-    if dt.get("error"):
-        lines.append(f"- {dt['error']}")
-    else:
-        lines.append(f"- **Model:** {dt.get('model_version')}")
-        lines.append(f"- **Prediction:** `{dt.get('prediction')}`")
-        lines.append(f"- {dt.get('prediction_note', '')}")
-        labels = dt.get("supported_labels") or []
-        if labels:
-            lines.append(f"- **All labels:** {', '.join(labels)}")
-        lines.append("- **Scores (top 8):**")
-        for k, v in list((dt.get("model_scores") or {}).items())[:8]:
-            lines.append(f"  - {k}: {v:.4f}")
+    lines = ["## Disaster — keyword baseline (heuristic)"]
+    kw = out.get("disaster_hazard_keywords", {})
+    lines.append(f"- **Primary hint:** `{kw.get('primary_hint')}`")
+    for m in (kw.get("matches") or [])[:4]:
+        lines.append(f"  - {m.get('label')}: `{m.get('evidence')}`")
+    if kw.get("note"):
+        lines.append(f"- {kw['note']}")
 
-    lines.append("\n## Misuse advisory (MU-v1)")
+    lines.append("\n## Disaster type — DC-T2 (canonical)")
+    dt = out.get("disaster_type_dc_t2", {})
+    lines.append(f"- **Prediction:** `{dt.get('prediction')}`")
+    lines.append(f"- **Supported:** {', '.join(dt.get('supported_labels') or [])}")
+    adv = dt.get("advisory") or {}
+    if adv.get("message"):
+        lines.append(f"- ⚠️ {adv['message']}")
+    for k, v in sorted((dt.get("model_scores") or {}).items(), key=lambda x: -x[1]):
+        lines.append(f"  - {k}: {v:.4f}")
+
+    mh = out.get("disaster_type_mh_v1_experimental", {})
+    if not mh.get("error"):
+        lines.append("\n## Disaster type — MH-v1 (experimental, synthetic)")
+        lines.append(f"- **Prediction:** `{mh.get('prediction')}`")
+
+    hy = out.get("disaster_hybrid_summary", {})
+    if hy.get("messages"):
+        lines.append("\n## Disaster hybrid summary")
+        for msg in hy["messages"]:
+            lines.append(f"- {msg}")
+
+    lines.append("\n## Humanitarian topic — DC-T3 (canonical)")
+    ht = out.get("humanitarian_topic", {})
+    lines.append(f"- **Prediction:** `{ht.get('prediction')}`")
+    lines.append(f"- {ht.get('topic_note', '')}")
+
+    lines.append("\n## Misuse — MU-v1 (canonical + civic refinement)")
     mu = out.get("misuse_advisory", {})
-    if mu.get("error"):
-        lines.append(f"- {mu['error']}")
-    else:
-        lines.append(f"- **Model:** {mu.get('model_version')}")
-        lines.append(f"- **Prediction:** `{mu.get('prediction')}`")
-        if mu.get("raw_model_prediction") and mu.get("raw_model_prediction") != mu.get("prediction"):
-            lines.append(f"- **MU-v1 raw (before rules):** `{mu.get('raw_model_prediction')}`")
-            if mu.get("refinement_note"):
-                lines.append(f"- *{mu['refinement_note']}*")
-        for k, v in mu.get("model_scores", {}).items():
-            lines.append(f"  - {k}: {v:.4f}")
+    lines.append(f"- **Prediction:** `{mu.get('prediction')}`")
+    if mu.get("raw_model_prediction") != mu.get("prediction"):
+        lines.append(f"- **MU-v1 raw:** `{mu.get('raw_model_prediction')}` — {mu.get('refinement_note', '')}")
+
+    for key, title in (
+        ("misuse_advisory_v2_experimental", "MU-v2 (experimental)"),
+        ("misuse_advisory_v3_experimental", "MU-v3 (experimental)"),
+    ):
+        block = out.get(key)
+        if block:
+            lines.append(f"\n## Misuse — {title}")
+            lines.append(f"- **Prediction:** `{block.get('prediction')}`")
 
     cmp_ = compare_expected(mu.get("prediction"), expected_misuse)
     if cmp_:
-        lines.append(f"\n**Manual check:** expected `{cmp_['expected']}` → {'match' if cmp_['match'] else 'mismatch'}")
+        lines.append(f"\n**Manual check (MU-v1 display):** `{cmp_['expected']}` → {'match' if cmp_['match'] else 'mismatch'}")
 
     lines.append(f"\n---\n{DISCLAIMER}")
     return "\n".join(lines)
 
 
-def _run_batch_file(file_obj, progress=gr.Progress()) -> str:
-    if file_obj is None:
-        return "Upload CSV or JSONL with message_text column."
-    try:
-        bundle = load_models()
-    except FileNotFoundError as e:
-        return str(e)
-    path = Path(file_obj.name if hasattr(file_obj, "name") else file_obj)
-    progress(0, desc="Batch inference…")
-    try:
-        return f"Wrote {run_batch(bundle, path)} (local only)."
-    except Exception as e:
-        return f"Batch failed: {type(e).__name__}: {e}"
-
-
 def build_ui() -> gr.Blocks:
-    theme = gr.themes.Base(primary_hue="slate", neutral_hue="gray").set(
-        body_background_fill="#1a1a1e",
-        body_text_color="#e8e8ec",
-        block_background_fill="#242428",
-    )
-    with gr.Blocks(title="Neyra — disaster & misuse", theme=theme, css=CUSTOM_CSS) as demo:
-        gr.Markdown("# Neyra — disaster type (17-class) + misuse (offline)")
+    with gr.Blocks(title="Neyra local tester") as demo:
+        gr.Markdown("# Neyra local model tester (offline)")
         gr.Markdown(DISCLAIMER)
-        msg = gr.Textbox(label="Message", lines=5, placeholder="English, Devanagari, or Hinglish…")
-        with gr.Row():
-            run_btn = gr.Button("Run classifiers", variant="primary")
-            clear_btn = gr.Button("Clear")
-        expected = gr.Dropdown(
-            choices=["(none)"] + MISUSE_LABELS,
-            value="(none)",
-            label="Expected misuse label (optional)",
-        )
+        msg = gr.Textbox(label="Message", lines=5)
+        expected = gr.Dropdown(choices=["(none)"] + MISUSE_LABELS, value="(none)", label="Expected misuse (optional)")
         out = gr.Markdown()
-        run_btn.click(_format_result, inputs=[msg, expected], outputs=out)
-        clear_btn.click(lambda: ("", "(none)", ""), outputs=[msg, expected, out])
-        gr.Markdown("### Samples")
-        for title, sample_text in SAMPLES:
-            gr.Button(title).click(lambda t=sample_text: t, outputs=msg)
+        gr.Button("Run classifiers", variant="primary").click(_format_result, [msg, expected], out)
         batch_file = gr.File(file_types=[".csv", ".jsonl"])
-        batch_btn = gr.Button("Run batch")
-        batch_out = gr.Textbox(interactive=False)
-        batch_btn.click(_run_batch_file, inputs=batch_file, outputs=batch_out)
+        batch_out = gr.Textbox(label="Batch result", interactive=False)
+        gr.Button("Run batch").click(
+            lambda f: run_batch(load_models(), Path(f.name)) if f else "Upload a file",
+            batch_file,
+            batch_out,
+        )
     return demo
 
 
 def main() -> None:
-    build_ui().launch(server_name="127.0.0.1", share=False, show_error=True)
+    build_ui().launch(server_name="127.0.0.1", share=False)
 
 
 if __name__ == "__main__":

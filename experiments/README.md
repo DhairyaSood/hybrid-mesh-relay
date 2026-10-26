@@ -1,4 +1,6 @@
-# Neyra ML / censor (`feature/censor` only)
+# Neyra ML / censor (`feature/censor`)
+
+Full handoff: **`docs/PROJECT_HANDOFF.md`** (repo root).
 
 Offline **disaster-type** and **misuse** classifiers for local demo. **Android integration is deferred** — push work on `feature/censor` under `experiments/`; keep `.joblib` models local (gitignored).
 
