@@ -1,12 +1,14 @@
-# Shipped model artifacts (`feature/censor`)
+# Shipped model artifacts
 
-Canonical copies for teammates and the local tester. **Advisory only** — not wired into Android yet.
+Canonical **Python** weights for the Neyra local tester and training workflows. Overview: **[docs/NEYRA_ML_README.md](../docs/NEYRA_ML_README.md)**.
 
 | File | ID | Role |
 |------|-----|------|
-| `multi_hazard_tfidf_logreg_v1.joblib` | **MH-v1** | Disaster type (17 labels) |
 | `synthetic_misuse_tfidf_logreg.joblib` | **MU-v1** | Misuse advisory (7 labels) |
+| `multi_hazard_tfidf_logreg_v1.joblib` | **MH-v1** | Experimental disaster type (17 labels) |
 
-**Tester paths:** `experiments/neyra_local_tester/config.yaml` points here.
+**Android** uses exported JSON under `android/app/src/main/assets/ml/` (DC-T2, DC-T3, MU-v1)—not these joblibs directly.
 
-Retrain copies: see `experiments/disaster_classifier/scripts/train_multi_hazard.py` and `experiments/disaster_misuse_classifier/scripts/train_synthetic_baseline.py`, then refresh these files.
+**Tester config:** `experiments/neyra_local_tester/config.yaml`
+
+Retrain and refresh: `experiments/disaster_classifier/scripts/train_multi_hazard.py`, `experiments/disaster_misuse_classifier/scripts/train_synthetic_baseline.py`, then mobile export scripts as needed.
