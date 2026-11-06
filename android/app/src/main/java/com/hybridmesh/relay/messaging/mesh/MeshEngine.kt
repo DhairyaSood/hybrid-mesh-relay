@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.content.Context
 import java.util.UUID
+import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
@@ -1549,6 +1550,7 @@ class MeshEngine internal constructor(
         }
         peers.forEach { peer ->
             if (!started) {
+                meshDbg("fanout skip peer=${peer.nodeId} packet=${packet.packetId} reason=ENGINE_STOPPED")
                 markAttemptDone()
                 return@forEach
             }
@@ -1565,9 +1567,16 @@ class MeshEngine internal constructor(
             }
             val job = scope.launch {
                 try {
-                    if (!slot.acquire(FANOUT_SLOT_WAIT_MS)) return@launch
+                    if (!slot.acquire(FANOUT_SLOT_WAIT_MS)) {
+                        val reason = if (completion.isCompleted) "ACCEPTED_ELSEWHERE" else "NO_FANOUT_SLOT"
+                        meshDbg("fanout skip peer=${peer.nodeId} packet=${packet.packetId} reason=$reason")
+                        return@launch
+                    }
                     // Another peer accepted while this one waited for a slot.
-                    if (completion.isCompleted) return@launch
+                    if (completion.isCompleted) {
+                        meshDbg("fanout skip peer=${peer.nodeId} packet=${packet.packetId} reason=ACCEPTED_ELSEWHERE")
+                        return@launch
+                    }
                     val requiresRelay = requireRelayCapability &&
                         !peer.nodeId.equals(packet.destinationNodeId, ignoreCase = true)
                     val acceptedTransport = sendPacketToPeer(peer, packet, requiresRelay)
@@ -1616,6 +1625,11 @@ class MeshEngine internal constructor(
             attempts.forEach(Job::cancel)
             throw cancelled
         }
+    }
+
+    private fun meshDbg(message: String) {
+        // android.util.Log is not mocked in JVM unit tests; diagnostics must never throw.
+        runCatching { Log.d("MESHDBG", message) }
     }
 
     /**

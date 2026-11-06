@@ -14,6 +14,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.model.NodeType
 import java.nio.ByteBuffer
@@ -165,12 +166,22 @@ class BleScanner(
 
     fun expireStalePeers(now: Long = System.currentTimeMillis()) {
         if (!scanning) return
-        val changed = synchronized(discoveredPeers) {
-            val before = discoveredPeers.size
-            discoveredPeers.entries.removeIf { now - it.value.lastSeen > BleConstants.PEER_STALE_AFTER_MS }
-            before != discoveredPeers.size
+        val removed = synchronized(discoveredPeers) {
+            val stale = discoveredPeers.values.filter { now - it.lastSeen > BleConstants.PEER_STALE_AFTER_MS }
+            stale.forEach { discoveredPeers.remove(it.nodeId) }
+            stale
         }
-        if (changed) publishPeers()
+        removed.forEach { peer ->
+            // android.util.Log is not mocked in JVM unit tests; diagnostics must never throw.
+            runCatching {
+                Log.d(
+                    "MESHDBG",
+                    "ble peer stale-removed node=${peer.nodeId} addr=${peer.address} " +
+                        "unseenMs=${now - peer.lastSeen} remaining=${discoveredPeers.size}"
+                )
+            }
+        }
+        if (removed.isNotEmpty()) publishPeers()
     }
 
     @Volatile
