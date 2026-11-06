@@ -26,6 +26,8 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
@@ -561,15 +563,20 @@ class BleGattClient(context: Context) {
             withTimeout(BleGattConstants.CONNECT_TIMEOUT_MS) {
                 connectInternal(device, session)
             }
+        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            // TimeoutCancellationException is a CancellationException, so it must be
+            // caught first. Our own connect timeout is an ordinary connect failure that
+            // lets the caller fall back to another transport.
+            session.fail(GattTransportError.CONNECTION_FAILED)
+            session.gatt?.let(::closeGatt)
+            // If the caller itself was cancelled meanwhile, that cancellation still wins.
+            currentCoroutineContext().ensureActive()
+            null
         } catch (_: CancellationException) {
             // Cancellation can land after connectInternal resumed with a live handle,
             // in which case the cancellation handler never ran and nobody else owns it.
             session.gatt?.let(::closeGatt)
             throw CancellationException()
-        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-            session.fail(GattTransportError.CONNECTION_FAILED)
-            session.gatt?.let(::closeGatt)
-            null
         } catch (_: SecurityException) {
             session.fail(GattTransportError.PERMISSION_DENIED)
             session.gatt?.let(::closeGatt)
