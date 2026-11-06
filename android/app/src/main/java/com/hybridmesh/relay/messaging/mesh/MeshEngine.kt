@@ -54,7 +54,6 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -1311,9 +1310,7 @@ class MeshEngine internal constructor(
                 return@forEach
             }
             val slot = FanoutSlot(fanoutAttemptSlots)
-            completion.invokeOnCompletion {
-                if (runCatching { completion.getCompleted().accepted }.getOrDefault(false)) slot.release()
-            }
+            slot.releaseWhen(completion) { it.accepted }
             val attemptCompleted = AtomicBoolean(false)
             val releaseAttempt = {
                 if (attemptCompleted.compareAndSet(false, true)) {
@@ -1386,34 +1383,6 @@ class MeshEngine internal constructor(
     private fun meshDbg(message: String) {
         // android.util.Log is not mocked in JVM unit tests; diagnostics must never throw.
         runCatching { Log.d("MESHDBG", message) }
-    }
-
-    /**
-     * One fan-out permit for one peer attempt. Release is idempotent and may happen
-     * before acquire completes (e.g. another peer already accepted); a permit obtained
-     * after that point is handed straight back.
-     */
-    private class FanoutSlot(private val semaphore: Semaphore) {
-        // 0 = not held, 1 = held, 2 = released
-        private val state = AtomicInteger(0)
-
-        suspend fun acquire(timeoutMs: Long): Boolean {
-            var acquired = false
-            withTimeoutOrNull(timeoutMs) {
-                semaphore.acquire()
-                acquired = true
-            }
-            if (!acquired) return false
-            if (!state.compareAndSet(0, 1)) {
-                semaphore.release()
-                return false
-            }
-            return true
-        }
-
-        fun release() {
-            if (state.compareAndSet(1, 2)) semaphore.release() else state.compareAndSet(0, 2)
-        }
     }
 
     private suspend fun sendPacketToPeer(
