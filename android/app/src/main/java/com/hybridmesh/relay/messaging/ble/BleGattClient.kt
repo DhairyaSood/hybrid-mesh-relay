@@ -95,6 +95,8 @@ class BleGattClient(context: Context) {
         }
 
         if (gatt == null) {
+            // connect() may have opened a handle before failing; never leave it registered.
+            session.gatt?.let(::closeGatt)
             return GattSendResult.Failed(
                 error = session.error,
                 snapshot = session.snapshot()
@@ -292,7 +294,11 @@ class BleGattClient(context: Context) {
 
         transferStage = "CONNECT"
         val gatt = try { connect(device, session) } catch (_: CancellationException) { throw CancellationException() }
-            ?: return failed(session.error.takeIf { it != GattTransportError.NONE }?.name ?: "CONNECTION_FAILED")
+            ?: run {
+                // connect() may have opened a handle before failing; never leave it registered.
+                session.gatt?.let(::closeGatt)
+                return failed(session.error.takeIf { it != GattTransportError.NONE }?.name ?: "CONNECTION_FAILED")
+            }
 
         try {
             session.requireRuntime()
@@ -490,7 +496,11 @@ class BleGattClient(context: Context) {
             publish = onState
         )
 
-        val gatt = connect(device, session) ?: return null
+        val gatt = connect(device, session) ?: run {
+            // connect() may have opened a handle before failing; never leave it registered.
+            session.gatt?.let(::closeGatt)
+            return null
+        }
         try {
             session.requireRuntime()
             session.transition(GattTransportState.DISCOVERING_SERVICES)
@@ -553,6 +563,9 @@ class BleGattClient(context: Context) {
                 connectInternal(device, session)
             }
         } catch (_: CancellationException) {
+            // Cancellation can land after connectInternal resumed with a live handle,
+            // in which case the cancellation handler never ran and nobody else owns it.
+            session.gatt?.let(::closeGatt)
             throw CancellationException()
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
             session.fail(GattTransportError.CONNECTION_FAILED)
@@ -598,7 +611,12 @@ class BleGattClient(context: Context) {
                     if (!resumed.getAndSet(true)) continuation.resume(gatt)
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                     session.fail(if (status == BluetoothGatt.GATT_SUCCESS) GattTransportError.DISCONNECTED else GattTransportError.CONNECTION_FAILED)
-                    if (!resumed.getAndSet(true)) continuation.resume(null)
+                    if (!resumed.getAndSet(true)) {
+                        // The connect never completed, so no caller will own this
+                        // handle; release the client interface before reporting failure.
+                        closeGatt(gatt)
+                        continuation.resume(null)
+                    }
                 }
             }
 
