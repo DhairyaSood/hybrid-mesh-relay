@@ -1,0 +1,35 @@
+random_seed: 42
+
+data:
+  dataset_config: configs/synthetic_dataset_v3.yaml
+  train_split: data/synthetic_misuse_v3_22k/splits/train.jsonl
+  validation_split: data/synthetic_misuse_v3_22k/splits/validation.jsonl
+  test_split: data/synthetic_misuse_v3_22k/splits/test.jsonl
+  train_families_manifest: data/synthetic_misuse_v3_22k/manifests/train_families.txt
+  validation_families_manifest: data/synthetic_misuse_v3_22k/manifests/validation_families.txt
+  test_families_manifest: data/synthetic_misuse_v3_22k/manifests/test_families.txt
+
+tuning_grid:
+  word_max_features: [4000, 8000, 12000]
+  C: [0.25, 1.0, 4.0]
+
+features:
+  word_ngram_range: [1, 2]
+  min_df: 2
+  sublinear_tf: true
+
+classifier:
+  class_weight: balanced
+  max_iter: 3000
+  solver: lbfgs
+
+selection_metric: macro_f1
+
+outputs_dir: outputs
+models_dir: models/synthetic_baseline_v3
+model_basename: synthetic_misuse_tfidf_logreg_v3
+
+latency:
+  warmup_predictions: 50
+  timed_batches: 20
+  batch_size: 32

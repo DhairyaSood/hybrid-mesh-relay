@@ -32,3 +32,15 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Python experiment artifacts (dataset stays outside the repo)
+experiments/**/.venv/
+experiments/**/models/
+experiments/**/outputs/
+experiments/**/__pycache__/
+experiments/**/.pytest_cache/
+experiments/**/*.pyc
+experiments/**/.DS_Store
+__pycache__/
+*.pyc
+.venv/

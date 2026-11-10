@@ -1,0 +1,33 @@
+# Pilot pool: 1,000 messages (output under data/pilot/, gitignored).
+
+dataset_root: "/Users/purusharth/Desktop/Hierarchical Disaster Tweet Classification Corpus/dataset"
+
+random_seed: 42
+pilot_size: 1000
+
+# Allocation (must sum to pilot_size).
+allocation:
+  random_stratified: 400   # bias baseline — stratified by event_id
+  keyword_candidate: 400     # rare-theme candidates — NOT auto-labelled
+  discourse_candidate: 200   # denial/rumor/warning wording for D4/D5 practice
+
+# Keyword patterns: candidate retrieval only (see configs/audit.yaml buckets).
+keyword_config: "configs/audit.yaml"
+
+# Map corpus files → event_id for hold-out / leakage checks.
+event_id_by_file:
+  TweetMasterData.csv: crisislex_mixed_task1
+  INDIANTWEETMASTER.csv: india_mixed_task1
+  "TWEETDATASET( CLASS 0,1 AND 2).csv": crisislex_type_task2
+  INDIANTWEETDATASET.csv: india_type_task2
+  NEPALEARTHQUAKE.csv: nepal_earthquake_2015
+  INDIANEARTHQUAKE.csv: india_earthquake
+  INDIANFLOOD.csv: india_flood
+
+# Evaluation reserve: fraction of pilot IDs marked holdout_eval only (no training labels until split script).
+eval_reserve_fraction: 0.15
+
+min_text_chars: 3
+drop_duplicate_text: true
+
+output_dir: data/pilot

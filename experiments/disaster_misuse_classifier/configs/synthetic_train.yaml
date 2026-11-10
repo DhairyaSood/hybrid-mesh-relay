@@ -1,0 +1,36 @@
+random_seed: 42
+
+data:
+  dataset_config: configs/synthetic_dataset.yaml
+  train_split: data/synthetic_misuse_10k/splits/train.jsonl
+  validation_split: data/synthetic_misuse_10k/splits/validation.jsonl
+  test_split: data/synthetic_misuse_10k/splits/test.jsonl
+  train_families_manifest: data/synthetic_misuse_10k/manifests/train_families.txt
+  validation_families_manifest: data/synthetic_misuse_10k/manifests/validation_families.txt
+  test_families_manifest: data/synthetic_misuse_10k/manifests/test_families.txt
+
+# Validation-only grid (test split touched once after selection)
+tuning_grid:
+  word_max_features: [4000, 8000, 12000]
+  C: [0.25, 1.0, 4.0]
+
+features:
+  word_ngram_range: [1, 2]
+  min_df: 2
+  sublinear_tf: true
+
+classifier:
+  class_weight: balanced
+  max_iter: 3000
+  solver: lbfgs
+
+selection_metric: macro_f1
+
+outputs_dir: outputs
+models_dir: models/synthetic_baseline
+model_basename: synthetic_misuse_tfidf_logreg
+
+latency:
+  warmup_predictions: 50
+  timed_batches: 20
+  batch_size: 32

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MisusePilotPoolRecord",
+  "description": "One message in the pilot pool (text stored only under gitignored data/).",
+  "type": "object",
+  "required": ["sample_id", "message_text", "event_id", "source_collection", "sampling_strategy"],
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "pattern": "^PILOT-[0-9a-f]{32}$",
+      "description": "Anonymized ID; do not use platform user IDs."
+    },
+    "message_text": { "type": "string", "minLength": 1 },
+    "event_id": { "type": "string" },
+    "source_collection": { "type": "string", "description": "Corpus filename only." },
+    "sampling_strategy": {
+      "type": "string",
+      "enum": ["random_stratified", "keyword_candidate", "discourse_candidate"]
+    },
+    "keyword_bucket_hint": {
+      "type": ["string", "null"],
+      "description": "Retrieval bucket name if keyword-sampled; NOT a misuse label."
+    },
+    "contains_url": { "type": "boolean" },
+    "corpus_target": {
+      "type": ["string", "null"],
+      "description": "Original corpus Target field if present; not misuse ground truth."
+    },
+    "corpus_help": {
+      "type": ["string", "null"],
+      "description": "Original Help class if present; humanitarian label only."
+    },
+    "split_role": {
+      "type": "string",
+      "enum": ["pilot_annotation", "pilot_eval_reserve"],
+      "default": "pilot_annotation"
+    },
+    "language_guess": { "type": "string", "enum": ["en", "mixed", "other", "unknown"] }
+  },
+  "additionalProperties": false
+}

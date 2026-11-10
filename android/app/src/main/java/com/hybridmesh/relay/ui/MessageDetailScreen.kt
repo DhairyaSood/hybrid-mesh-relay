@@ -1,6 +1,5 @@
 package com.hybridmesh.relay.ui
 
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -14,13 +13,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.hybridmesh.relay.ml.MessageLocalClassifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -81,9 +84,17 @@ private fun ActualMessageDetail(
     message: MessageRecordEntity
 ) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val isEmergency =
         message.messageType == "EMERGENCY"
+    var advisoryDismissed by remember(message.messageId) { mutableStateOf(false) }
+    var advisory by remember(message.messageId) {
+        mutableStateOf<MessageLocalClassifier.AdvisoryResult?>(null)
+    }
+    LaunchedEffect(message.messageId, message.content) {
+        if (message.messageType != MessageType.ATTACHMENT.name) {
+            advisory = MessageLocalClassifier(context.applicationContext).classify(message.content)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -116,6 +127,30 @@ private fun ActualMessageDetail(
             message = message,
             isEmergency = isEmergency
         )
+
+        if (!advisoryDismissed && advisory != null && message.messageType != MessageType.ATTACHMENT.name) {
+            val a = advisory!!
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(RelaySurface, RoundedCornerShape(12.dp))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text("LOCAL ADVISORY (offline)", style = TechnicalTextStyle, color = RelayTextMuted)
+                Text("Disaster (DC-T2): ${a.disasterTypeDcT2}", style = MaterialTheme.typography.bodySmall)
+                Text("Keyword hint: ${a.disasterKeywordHint}", style = MaterialTheme.typography.bodySmall)
+                Text("Help topic (DC-T3): ${a.humanitarianTopic}", style = MaterialTheme.typography.bodySmall)
+                Text("Misuse (MU-v1): ${a.misuseLabel}", style = MaterialTheme.typography.bodySmall)
+                if (a.misuseRawLabel != a.misuseLabel) {
+                    Text("MU-v1 raw: ${a.misuseRawLabel}", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
+                }
+                Text(a.disclaimer, style = MaterialTheme.typography.bodySmall, color = RelayTextMuted)
+                TextButton(onClick = { advisoryDismissed = true }) {
+                    Text("Dismiss")
+                }
+            }
+        }
 
         MessageInfo(
             message = message

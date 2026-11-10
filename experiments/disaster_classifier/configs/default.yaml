@@ -1,0 +1,49 @@
+# Paths — dataset stays outside the git repo.
+dataset_root: "/Users/purusharth/Desktop/Hierarchical Disaster Tweet Classification Corpus/dataset"
+
+# Which paper cascade stage to train.
+#   task1_binary  — disaster (1) vs non-disaster (0)
+#   task2_type    — non-disaster (0) / flood (1) / earthquake (2)
+#   task3_help    — five humanitarian Help classes (disaster tweets only)
+task: task3_help
+
+random_seed: 42
+
+# Fractions of the filtered corpus (must sum to 1.0).
+split:
+  train: 0.70
+  validation: 0.15
+  test: 0.15
+
+# Drop exact duplicate Tweet_text (case-normalized) before splitting.
+drop_duplicate_text: true
+
+# Minimum non-empty text length after strip (characters).
+min_text_chars: 3
+
+# TF-IDF + Logistic Regression.
+features:
+  word_ngram_range: [1, 2]
+  word_max_features: 50000
+  char_ngram_range: [3, 5]
+  char_max_features: 30000
+  lowercase: true
+  # Dataset text is already noisy/lowercased; keep light cleaning only.
+  strip_urls: true
+  strip_mentions: true
+
+classifier:
+  # Imbalance is material for Task 3 Help classes; leave null to disable.
+  class_weight: balanced
+  max_iter: 2000
+  # Solve multinomial logistic regression with L2.
+  solver: lbfgs
+  C: 1.0
+
+outputs_dir: "outputs"
+models_dir: "models"
+
+# Persist the fitted pipeline locally (gitignored). Confirm redistribution terms separately.
+save_model: true
+# Soften Food and Medicine wording in reports: treat as a Help class, not validated urgency.
+report_food_medicine_as_urgency: false
