@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.model.GattTransportError
 import com.hybridmesh.relay.messaging.model.GattTransportSnapshot
@@ -21,11 +22,15 @@ import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
 import com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.UUID
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
@@ -33,6 +38,14 @@ import kotlinx.coroutines.withTimeout
 import kotlin.coroutines.resume
 
 class BleGattClient(context: Context) {
+    private companion object {
+        const val MESHDBG_TAG = "MESHDBG"
+
+        // Identity set: tracks every BluetoothGatt this process has opened and not yet closed.
+        val openGattHandles: MutableSet<BluetoothGatt> =
+            Collections.newSetFromMap(IdentityHashMap())
+    }
+
     private val appContext = context.applicationContext
 
     @SuppressLint("MissingPermission")
@@ -94,6 +107,8 @@ class BleGattClient(context: Context) {
         }
 
         if (gatt == null) {
+            // connect() may have opened a handle before failing; never leave it registered.
+            session.gatt?.let(::closeGatt)
             return GattSendResult.Failed(
                 error = session.error,
                 snapshot = session.snapshot()
@@ -291,7 +306,11 @@ class BleGattClient(context: Context) {
 
         transferStage = "CONNECT"
         val gatt = try { connect(device, session) } catch (_: CancellationException) { throw CancellationException() }
-            ?: return failed(session.error.takeIf { it != GattTransportError.NONE }?.name ?: "CONNECTION_FAILED")
+            ?: run {
+                // connect() may have opened a handle before failing; never leave it registered.
+                session.gatt?.let(::closeGatt)
+                return failed(session.error.takeIf { it != GattTransportError.NONE }?.name ?: "CONNECTION_FAILED")
+            }
 
         try {
             session.requireRuntime()
@@ -489,7 +508,11 @@ class BleGattClient(context: Context) {
             publish = onState
         )
 
-        val gatt = connect(device, session) ?: return null
+        val gatt = connect(device, session) ?: run {
+            // connect() may have opened a handle before failing; never leave it registered.
+            session.gatt?.let(::closeGatt)
+            return null
+        }
         try {
             session.requireRuntime()
             session.transition(GattTransportState.DISCOVERING_SERVICES)
@@ -551,12 +574,21 @@ class BleGattClient(context: Context) {
             withTimeout(BleGattConstants.CONNECT_TIMEOUT_MS) {
                 connectInternal(device, session)
             }
-        } catch (_: CancellationException) {
-            throw CancellationException()
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            // TimeoutCancellationException is a CancellationException, so it must be
+            // caught first. Our own connect timeout is an ordinary connect failure that
+            // lets the caller fall back to another transport.
             session.fail(GattTransportError.CONNECTION_FAILED)
+            meshDbg("gatt connect timeout addr=${safeAddress(device)} after=${BleGattConstants.CONNECT_TIMEOUT_MS}ms")
             session.gatt?.let(::closeGatt)
+            // If the caller itself was cancelled meanwhile, that cancellation still wins.
+            currentCoroutineContext().ensureActive()
             null
+        } catch (_: CancellationException) {
+            // Cancellation can land after connectInternal resumed with a live handle,
+            // in which case the cancellation handler never ran and nobody else owns it.
+            session.gatt?.let(::closeGatt)
+            throw CancellationException()
         } catch (_: SecurityException) {
             session.fail(GattTransportError.PERMISSION_DENIED)
             session.gatt?.let(::closeGatt)
@@ -583,8 +615,7 @@ class BleGattClient(context: Context) {
             ) {
                 if (!session.isRuntimeCurrent()) {
                     session.fail(GattTransportError.RUNTIME_CHANGED)
-                    runCatching { gatt.disconnect() }
-                    runCatching { gatt.close() }
+                    closeGatt(gatt)
                     if (!resumed.getAndSet(true)) continuation.resume(null)
                     return
                 }
@@ -597,7 +628,12 @@ class BleGattClient(context: Context) {
                     if (!resumed.getAndSet(true)) continuation.resume(gatt)
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                     session.fail(if (status == BluetoothGatt.GATT_SUCCESS) GattTransportError.DISCONNECTED else GattTransportError.CONNECTION_FAILED)
-                    if (!resumed.getAndSet(true)) continuation.resume(null)
+                    if (!resumed.getAndSet(true)) {
+                        // The connect never completed, so no caller will own this
+                        // handle; release the client interface before reporting failure.
+                        closeGatt(gatt)
+                        continuation.resume(null)
+                    }
                 }
             }
 
@@ -736,8 +772,7 @@ class BleGattClient(context: Context) {
         continuation.invokeOnCancellation {
             resumed.set(true)
             session.fail(GattTransportError.CONNECTION_FAILED)
-            runCatching { session.gatt?.disconnect() }
-            runCatching { session.gatt?.close() }
+            session.gatt?.let(::closeGatt)
         }
 
         try {
@@ -748,6 +783,7 @@ class BleGattClient(context: Context) {
                 BluetoothDevice.TRANSPORT_LE
             )
             session.gatt = opened
+            if (opened != null) onGattOpened(opened)
         } catch (_: SecurityException) {
             session.fail(GattTransportError.PERMISSION_DENIED)
             if (!resumed.getAndSet(true)) continuation.resume(null)
@@ -950,6 +986,27 @@ class BleGattClient(context: Context) {
     private fun closeGatt(gatt: BluetoothGatt) {
         runCatching { gatt.disconnect() }
         runCatching { gatt.close() }
+        // Close may run more than once per handle; only the first one is counted.
+        val (wasOpen, openCount) = synchronized(openGattHandles) {
+            openGattHandles.remove(gatt) to openGattHandles.size
+        }
+        if (wasOpen) meshDbg("gatt closed addr=${gattAddress(gatt)} open=$openCount")
+    }
+
+    private fun onGattOpened(gatt: BluetoothGatt) {
+        val openCount = synchronized(openGattHandles) {
+            openGattHandles.add(gatt)
+            openGattHandles.size
+        }
+        meshDbg("gatt opened addr=${gattAddress(gatt)} open=$openCount")
+    }
+
+    private fun gattAddress(gatt: BluetoothGatt): String =
+        runCatching { gatt.device.address }.getOrDefault("Unknown")
+
+    private fun meshDbg(message: String) {
+        // android.util.Log is not mocked in JVM unit tests; diagnostics must never throw.
+        runCatching { Log.d(MESHDBG_TAG, message) }
     }
 
     @SuppressLint("MissingPermission")

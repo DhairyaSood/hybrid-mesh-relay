@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.content.Context
 import java.util.UUID
+import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicBoolean
@@ -1290,24 +1291,45 @@ class MeshEngine internal constructor(
         // secondary peers may finish in the background and cannot stall the next
         // forwarding stage. If every peer fails, wait until all attempts finish
         // before scheduling a durable retry. Jobs are tracked and cancelled on stop.
+        //
+        // Each attempt waits briefly for a fan-out slot instead of being dropped when
+        // the pool is momentarily full. Once any peer accepts, every attempt of this
+        // packet gives its slot back: secondary sends still in flight stay bounded by
+        // transportSendSlots and per-peer locks, so they no longer starve other packets.
         if (!started) return MeshSendOutcome(false)
         val completion = CompletableDeferred<MeshSendOutcome>()
         val remaining = AtomicInteger(peers.size)
         val attempts = ArrayList<Job>(peers.size)
+        val markAttemptDone = {
+            if (remaining.decrementAndGet() == 0) completion.complete(MeshSendOutcome(false))
+        }
         peers.forEach { peer ->
-            if (!started || !fanoutAttemptSlots.tryAcquire()) {
-                if (remaining.decrementAndGet() == 0) completion.complete(MeshSendOutcome(false))
+            if (!started) {
+                meshDbg("fanout skip peer=${peer.nodeId} packet=${packet.packetId} reason=ENGINE_STOPPED")
+                markAttemptDone()
                 return@forEach
             }
+            val slot = FanoutSlot(fanoutAttemptSlots)
+            slot.releaseWhen(completion) { it.accepted }
             val attemptCompleted = AtomicBoolean(false)
             val releaseAttempt = {
                 if (attemptCompleted.compareAndSet(false, true)) {
-                    fanoutAttemptSlots.release()
-                    if (remaining.decrementAndGet() == 0) completion.complete(MeshSendOutcome(false))
+                    slot.release()
+                    markAttemptDone()
                 }
             }
             val job = scope.launch {
                 try {
+                    if (!slot.acquire(FANOUT_SLOT_WAIT_MS)) {
+                        val reason = if (completion.isCompleted) "ACCEPTED_ELSEWHERE" else "NO_FANOUT_SLOT"
+                        meshDbg("fanout skip peer=${peer.nodeId} packet=${packet.packetId} reason=$reason")
+                        return@launch
+                    }
+                    // Another peer accepted while this one waited for a slot.
+                    if (completion.isCompleted) {
+                        meshDbg("fanout skip peer=${peer.nodeId} packet=${packet.packetId} reason=ACCEPTED_ELSEWHERE")
+                        return@launch
+                    }
                     val requiresRelay = requireRelayCapability &&
                         !peer.nodeId.equals(packet.destinationNodeId, ignoreCase = true)
                     val acceptedTransport = sendPacketToPeer(peer, packet, requiresRelay)
@@ -1356,6 +1378,11 @@ class MeshEngine internal constructor(
             attempts.forEach(Job::cancel)
             throw cancelled
         }
+    }
+
+    private fun meshDbg(message: String) {
+        // android.util.Log is not mocked in JVM unit tests; diagnostics must never throw.
+        runCatching { Log.d("MESHDBG", message) }
     }
 
     private suspend fun sendPacketToPeer(
@@ -2255,6 +2282,7 @@ class MeshEngine internal constructor(
         private const val MAX_CONCURRENT_ORIGIN_SENDS = 3
         private const val MAX_CONCURRENT_TRANSPORT_SENDS = 8
         private const val MAX_CONCURRENT_FANOUT_ATTEMPTS = 12
+        private const val FANOUT_SLOT_WAIT_MS = 2_000L
         private const val MAX_FORWARD_BATCH = 16
         private const val MAX_CONCURRENT_FORWARD_PACKETS = 4
         private const val MAX_TRACKED_RECEIVE_TIMESTAMPS = 1_024
