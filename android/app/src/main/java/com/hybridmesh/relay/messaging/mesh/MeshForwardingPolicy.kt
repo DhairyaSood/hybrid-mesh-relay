@@ -62,4 +62,24 @@ object MeshForwardingPolicy {
             }.thenBy { it.nodeId.lowercase(Locale.US) }
         ).take(maxFanout.coerceIn(1, MAX_FANOUT))
     }
+
+    /** Next hops for a relayed packet held by this node, as the forwarding worker selects them. */
+    fun selectForward(
+        peers: List<MeshPeer>,
+        localNodeId: String,
+        packet: MeshPacket,
+        receivedFromNodeId: String?,
+        receivedFromAddress: String?,
+        isTransportUsable: (MeshPeer) -> Boolean,
+        isRelayTransportUsable: (MeshPeer) -> Boolean
+    ): List<MeshPeer> = select(
+        peers = peers,
+        localNodeId = localNodeId,
+        destinationNodeId = packet.destinationNodeId,
+        excludeNodeId = receivedFromNodeId,
+        excludeAddress = receivedFromAddress,
+        packetId = packet.packetId,
+        isTransportUsable = isTransportUsable,
+        isRelayTransportUsable = isRelayTransportUsable
+    )
 }

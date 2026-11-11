@@ -765,13 +765,12 @@ class MeshEngine internal constructor(
             return true
         }
 
-        val peers = MeshForwardingPolicy.select(
+        val peers = MeshForwardingPolicy.selectForward(
             peers = peerDirectory.snapshot.value,
             localNodeId = localNodeId(),
-            destinationNodeId = packet.destinationNodeId,
-            excludeNodeId = activeRecord.receivedFromNodeId,
-            excludeAddress = activeRecord.receivedFromAddress,
-            packetId = activeRecord.packetId,
+            packet = packet,
+            receivedFromNodeId = activeRecord.receivedFromNodeId,
+            receivedFromAddress = activeRecord.receivedFromAddress,
             // The final destination only needs to accept this packet; relay
             // capability is required for alternate intermediate next hops.
             isTransportUsable = { peer ->
@@ -1538,44 +1537,17 @@ class MeshEngine internal constructor(
         return null
     }
 
-    /** Legacy/unknown packet peers are supported only through the BLE v1 codec. */
-    private fun hasCompatibleTransport(peer: MeshPeer): Boolean {
-        val candidates = transportSelector.candidates(peer)
-        return candidates.any { (transport, _) ->
-            peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
-                transport.kind == MeshTransportKind.BLE_GATT
-        }
-    }
+    private fun hasCompatibleTransport(peer: MeshPeer): Boolean =
+        MeshTransportCompatibility.hasCompatibleTransport(peer, transportSelector)
 
-    private fun hasCompatibleRelayTransport(peer: MeshPeer): Boolean {
-        val candidates = transportSelector.candidates(peer)
-        return candidates.any { (transport, _) ->
-            val capable = when (transport.kind) {
-                MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
-                MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
-                MeshTransportKind.LORA -> false
-            }
-            capable && (
-                peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION ||
-                    transport.kind == MeshTransportKind.BLE_GATT
-                )
-        }
-    }
+    private fun hasCompatibleRelayTransport(peer: MeshPeer): Boolean =
+        MeshTransportCompatibility.hasCompatibleRelayTransport(peer, transportSelector)
 
     private fun hasTraceCompatibleTransport(peer: MeshPeer): Boolean =
-        transportSelector.candidates(peer).any { (transport, _) ->
-            peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION
-        }
+        MeshTransportCompatibility.hasTraceCompatibleTransport(peer, transportSelector)
 
     private fun hasTraceCompatibleRelayTransport(peer: MeshPeer): Boolean =
-        transportSelector.candidates(peer).any { (transport, _) ->
-            val capable = when (transport.kind) {
-                MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
-                MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
-                MeshTransportKind.LORA -> false
-            }
-            capable && peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION
-        }
+        MeshTransportCompatibility.hasTraceCompatibleRelayTransport(peer, transportSelector)
 
     /** Bulk files use Wi-Fi Direct or BLE, subject to each bearer’s attachment size limit. */
     private suspend fun attachmentLoop() {
