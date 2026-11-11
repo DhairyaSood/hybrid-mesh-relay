@@ -16,6 +16,7 @@ import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.hybridmesh.relay.diagnostics.MeshDbg
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -199,6 +200,7 @@ class BleScanner(
             }
             override fun onScanFailed(errorCode: Int) {
                 if (generation.get() != sessionGeneration) return
+                MeshDbg.log("SCAN", "scan failed androidError=$errorCode")
                 scanning = false
                 _state.value = BleOperationState.ERROR
                 _errorCode.value = errorCode
@@ -220,17 +222,40 @@ class BleScanner(
 
     private fun handleScanResult(result: ScanResult, sessionGeneration: Long) {
         if (generation.get() != sessionGeneration || !scanning) return
-        val record = result.scanRecord ?: return
+        val address = runCatching { result.device.address }.getOrDefault("Unknown")
+        val record = result.scanRecord ?: run {
+            MeshDbg.throttled("scan-reject|$address|NO_SCAN_RECORD", SCAN_LOG_INTERVAL_MS, "SCAN", "rejected addr=$address reason=NO_SCAN_RECORD")
+            return
+        }
         val data = record.getManufacturerSpecificData(BleConstants.MANUFACTURER_ID)
         val discovery = when (val decoded = BleDiscoveryCodec.decode(data, localNodeIdProvider())) {
             is BleDiscoveryCodec.DecodeResult.Parsed -> decoded.discovery
-            is BleDiscoveryCodec.DecodeResult.Rejected -> return
+            is BleDiscoveryCodec.DecodeResult.Rejected -> {
+                val reasonKey = decoded.reason.substringBefore(' ')
+                if (reasonKey != "SELF") {
+                    MeshDbg.throttled(
+                        "scan-reject|$address|$reasonKey",
+                        SCAN_LOG_INTERVAL_MS,
+                        "SCAN",
+                        "rejected addr=$address rssi=${result.rssi} reason=${decoded.reason} " +
+                            "bytes=${data?.size ?: 0}"
+                    )
+                }
+                return
+            }
         }
 
-        val address = runCatching { result.device.address }.getOrDefault("Unknown")
         val seenAt = System.currentTimeMillis()
+        MeshDbg.throttled(
+            "scan-parsed|${discovery.nodeId}|$address",
+            SCAN_LOG_INTERVAL_MS,
+            "SCAN",
+            "parsed node=${MeshDbg.node(discovery.nodeId)} addr=$address rssi=${result.rssi} " +
+                "discoveryV=${discovery.discoveryVersion} proto=${discovery.meshProtocolVersion} " +
+                "relay=${discovery.canRelay} storeForward=${discovery.canStoreForward} name='${discovery.deviceName}'"
+        )
 
-        synchronized(discoveredPeers) {
+        val isNew = synchronized(discoveredPeers) {
             val previous = discoveredPeers[discovery.nodeId]
             discoveredPeers[discovery.nodeId] = BlePeer(
                 nodeId = discovery.nodeId,
@@ -247,6 +272,13 @@ class BleScanner(
                 // Preserve first-seen ordering. RSSI is telemetry, not the list sort key.
                 if (previous == null) fresh else fresh
             }
+            previous == null || previous.address != address
+        }
+        if (isNew) {
+            MeshDbg.log(
+                "SCAN",
+                "peer discovered node=${discovery.nodeId} addr=$address total=${discoveredPeers.size}"
+            )
         }
         _scanResultCount.value += 1L
         _lastResultAt.value = seenAt
@@ -281,5 +313,6 @@ class BleScanner(
         const val ERROR_BLUETOOTH_DISABLED = -202
         const val ERROR_SCANNER_UNAVAILABLE = -203
         const val ERROR_INVALID_CONFIGURATION = -204
+        private const val SCAN_LOG_INTERVAL_MS = 10_000L
     }
 }

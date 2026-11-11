@@ -3,6 +3,7 @@ package com.hybridmesh.relay.messaging.mesh
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import com.hybridmesh.relay.diagnostics.MeshDbg
 import com.hybridmesh.relay.messaging.ble.BleAttachmentSendResult
 import com.hybridmesh.relay.messaging.ble.BleGattClient
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferManifest
@@ -87,10 +88,22 @@ internal class BleGattMeshTransport(
                 onState = onState
             )
             return if (result is BleGattClient.GattSendResult.Delivered) {
+                MeshDbg.log(
+                    "SEND",
+                    "gatt delivered addr=$address mtu=${result.negotiatedMtu} frames=${result.framesSent} " +
+                        "bytes=${result.bytesSent}"
+                )
                 MeshTransportSendResult.Accepted(kind)
             } else {
-                val reason = (result as? BleGattClient.GattSendResult.Failed)
-                    ?.error?.name ?: "BLE_SEND_FAILED"
+                val failed = result as? BleGattClient.GattSendResult.Failed
+                val reason = failed?.error?.name ?: "BLE_SEND_FAILED"
+                MeshDbg.log(
+                    "SEND",
+                    "gatt failed addr=$address error=$reason stage=${failed?.snapshot?.state} " +
+                        "mtu=${failed?.snapshot?.mtu} frame=${failed?.snapshot?.frameIndex}/${failed?.snapshot?.frameCount} " +
+                        "discovery=${failed?.snapshot?.serviceDiscoveryOutcome} " +
+                        "missing=${failed?.snapshot?.missingGattAttributes}"
+                )
                 MeshTransportSendResult.Failed(kind, reason)
             }
         } finally {

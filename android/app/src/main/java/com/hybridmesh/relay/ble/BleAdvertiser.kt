@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
+import com.hybridmesh.relay.diagnostics.MeshDbg
 import com.hybridmesh.relay.model.LocalIdentity
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -120,6 +121,13 @@ class BleAdvertiser(context: Context) {
         _errorCode.value = null
 
         val discoveryPayload = buildDiscoveryPayload(identity)
+        MeshDbg.log(
+            "ADV",
+            "start node=${MeshDbg.node(identity.nodeId)} name='${identity.deviceName}' " +
+                "discoveryV=${BleConstants.DISCOVERY_VERSION} proto=${BleConstants.MESH_PROTOCOL_VERSION} " +
+                "payloadBytes=${discoveryPayload.size} scanResponseBytes=${discoveryPayload.size + 4}/31 " +
+                "generation=$sessionGeneration"
+        )
 
         val serviceAdvertisement = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(BleConstants.SERVICE_UUID))
@@ -253,12 +261,14 @@ class BleAdvertiser(context: Context) {
                 if (advertisingRequested && activeCallback === this) {
                     _errorCode.value = null
                     _state.value = BleOperationState.ACTIVE
+                    MeshDbg.log("ADV", "active generation=$sessionGeneration")
                 }
             }
 
             override fun onStartFailure(errorCode: Int) {
                 if (generation.get() != sessionGeneration) return
                 if (advertisingRequested && activeCallback === this) {
+                    MeshDbg.log("ADV", "start failed androidError=$errorCode generation=$sessionGeneration")
                     _state.value = BleOperationState.ERROR
                     _errorCode.value = when (errorCode) {
                         AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> ERROR_ADVERTISING_NOT_SUPPORTED
@@ -295,6 +305,7 @@ class BleAdvertiser(context: Context) {
     }.getOrDefault(false)
 
     private fun fail(code: Int) {
+        MeshDbg.log("ADV", "not advertising error=$code")
         advertisingRequested = false
         _state.value = BleOperationState.ERROR
         _errorCode.value = code
