@@ -73,7 +73,11 @@ object MeshForwardingPolicy {
         isTransportUsable: (MeshPeer) -> Boolean,
         isRelayTransportUsable: (MeshPeer) -> Boolean
     ): List<MeshPeer> = select(
-        peers = peers,
+        // The origin never needs its own packet back: it accepts a looped DATA as
+        // consumed, which would mark this relay's copy FORWARDED without progress.
+        // BLE ingress often cannot resolve the predecessor, so the origin is not
+        // reliably removed by excludeNodeId alone.
+        peers = peers.filterNot { it.nodeId.equals(packet.originNodeId.trim(), ignoreCase = true) },
         localNodeId = localNodeId,
         destinationNodeId = packet.destinationNodeId,
         excludeNodeId = receivedFromNodeId,

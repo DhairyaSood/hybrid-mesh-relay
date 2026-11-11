@@ -147,4 +147,17 @@ class MeshThreeNodeRoutingTest {
             forwardNextHops(view, local = b, receivedFromNodeId = null, receivedFromAddress = "7E:11:22:33:44:55")
         )
     }
+
+    @Test
+    fun relayNeverHandsAPacketBackToItsOrigin() {
+        // C is momentarily not visible to B and A's identity was not resolved on ingress.
+        // A accepts its own DATA as "already consumed", so choosing A would make B mark
+        // the packet FORWARDED and stop trying to reach C.
+        val view = viewOf(b, a)
+
+        assertEquals(
+            emptyList<String>(),
+            forwardNextHops(view, local = b, receivedFromNodeId = null, receivedFromAddress = "7E:11:22:33:44:55")
+        )
+    }
 }
