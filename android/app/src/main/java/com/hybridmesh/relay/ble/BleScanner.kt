@@ -16,10 +16,6 @@ import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.hybridmesh.relay.model.NodeType
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -225,95 +221,36 @@ class BleScanner(
     private fun handleScanResult(result: ScanResult, sessionGeneration: Long) {
         if (generation.get() != sessionGeneration || !scanning) return
         val record = result.scanRecord ?: return
-        val data = record.getManufacturerSpecificData(BleConstants.MANUFACTURER_ID) ?: return
-        if (data.size < BleConstants.LEGACY_DISCOVERY_BASE_BYTES) return
-
-        try {
-            val buffer = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
-            val discoveryVersion = buffer.get()
-            if (discoveryVersion != BleConstants.DISCOVERY_VERSION &&
-                discoveryVersion != 3.toByte() &&
-                discoveryVersion != BleConstants.LEGACY_DISCOVERY_VERSION
-            ) return
-            val nodeUuid = UUID(buffer.long, buffer.long)
-            val nodeId = "HMR-$nodeUuid"
-            if (nodeId.equals(localNodeIdProvider(), true)) return
-
-            val deviceType = when (buffer.get()) {
-                BleConstants.DEVICE_TYPE_PHONE -> NodeType.PHONE
-                BleConstants.DEVICE_TYPE_RELAY -> NodeType.RELAY
-                else -> return
-            }
-
-            val meshProtocolVersion: Int
-            val canRelay: Boolean
-            val canStoreForward: Boolean
-            val supportsAttachmentHopIdentity: Boolean
-            val nameLength: Int
-
-            when (discoveryVersion.toInt()) {
-                BleConstants.DISCOVERY_VERSION.toInt() -> {
-                    if (buffer.remaining() < 3) return
-                    val capabilities = buffer.get().toInt() and 0xFF
-                    meshProtocolVersion = buffer.get().toInt() and 0xFF
-                    canRelay = capabilities and BleConstants.CAPABILITY_CAN_RELAY.toInt() != 0
-                    canStoreForward =
-                        capabilities and BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() != 0
-                    supportsAttachmentHopIdentity =
-                        capabilities and BleConstants.CAPABILITY_ATTACHMENT_HOP_IDENTITY.toInt() != 0
-                    nameLength = buffer.get().toInt() and 0xFF
-                }
-                3 -> {
-                    if (buffer.remaining() < 2) return
-                    val capabilities = buffer.get().toInt() and 0xFF
-                    meshProtocolVersion = BleConstants.LEGACY_MESH_PROTOCOL_VERSION.toInt()
-                    canRelay = capabilities and BleConstants.CAPABILITY_CAN_RELAY.toInt() != 0
-                    canStoreForward =
-                        capabilities and BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() != 0
-                    supportsAttachmentHopIdentity = false
-                    nameLength = buffer.get().toInt() and 0xFF
-                }
-                else -> {
-                    meshProtocolVersion = 0
-                    canRelay = false
-                    canStoreForward = false
-                    supportsAttachmentHopIdentity = false
-                    nameLength = buffer.get().toInt() and 0xFF
-                }
-            }
-
-            if (nameLength > BleConstants.DISCOVERY_NAME_MAX_BYTES || buffer.remaining() < nameLength) return
-            if (discoveryVersion.toInt() >= 3 && meshProtocolVersion < 1) return
-            val nameBytes = ByteArray(nameLength)
-            buffer.get(nameBytes)
-            val deviceName = nameBytes.toString(Charsets.UTF_8).trim().ifBlank { "Hybrid Mesh Device" }
-            val address = runCatching { result.device.address }.getOrDefault("Unknown")
-            val seenAt = System.currentTimeMillis()
-
-            synchronized(discoveredPeers) {
-                val previous = discoveredPeers[nodeId]
-                discoveredPeers[nodeId] = BlePeer(
-                    nodeId = nodeId,
-                    deviceName = deviceName,
-                    deviceType = deviceType,
-                    address = address,
-                    rssi = result.rssi,
-                    lastSeen = seenAt,
-                    meshProtocolVersion = meshProtocolVersion,
-                    canRelay = canRelay,
-                    canStoreForward = canStoreForward,
-                    supportsAttachmentHopIdentity = supportsAttachmentHopIdentity
-                ).let { fresh ->
-                    // Preserve first-seen ordering. RSSI is telemetry, not the list sort key.
-                    if (previous == null) fresh else fresh
-                }
-            }
-            _scanResultCount.value += 1L
-            _lastResultAt.value = seenAt
-            publishPeers()
-        } catch (_: Exception) {
-            // Ignore malformed advertisements rather than destabilizing discovery.
+        val data = record.getManufacturerSpecificData(BleConstants.MANUFACTURER_ID)
+        val discovery = when (val decoded = BleDiscoveryCodec.decode(data, localNodeIdProvider())) {
+            is BleDiscoveryCodec.DecodeResult.Parsed -> decoded.discovery
+            is BleDiscoveryCodec.DecodeResult.Rejected -> return
         }
+
+        val address = runCatching { result.device.address }.getOrDefault("Unknown")
+        val seenAt = System.currentTimeMillis()
+
+        synchronized(discoveredPeers) {
+            val previous = discoveredPeers[discovery.nodeId]
+            discoveredPeers[discovery.nodeId] = BlePeer(
+                nodeId = discovery.nodeId,
+                deviceName = discovery.deviceName,
+                deviceType = discovery.deviceType,
+                address = address,
+                rssi = result.rssi,
+                lastSeen = seenAt,
+                meshProtocolVersion = discovery.meshProtocolVersion,
+                canRelay = discovery.canRelay,
+                canStoreForward = discovery.canStoreForward,
+                supportsAttachmentHopIdentity = discovery.supportsAttachmentHopIdentity
+            ).let { fresh ->
+                // Preserve first-seen ordering. RSSI is telemetry, not the list sort key.
+                if (previous == null) fresh else fresh
+            }
+        }
+        _scanResultCount.value += 1L
+        _lastResultAt.value = seenAt
+        publishPeers()
     }
 
     private fun publishPeers() {

@@ -16,10 +16,6 @@ import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.model.LocalIdentity
-import com.hybridmesh.relay.model.NodeType
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -273,58 +269,8 @@ class BleAdvertiser(context: Context) {
             }
         }
 
-    private fun buildDiscoveryPayload(identity: LocalIdentity): ByteArray {
-        val nodeUuid = runCatching {
-            UUID.fromString(
-                identity.nodeId.removePrefix("HMR-")
-            )
-        }.getOrElse {
-            UUID(0L, 0L)
-        }
-
-        val nicknameBytes = identity.deviceName
-            .trim()
-            .toByteArray(Charsets.UTF_8)
-            .truncateUtf8(BleConstants.MESH_DISCOVERY_NAME_MAX_BYTES)
-
-        return ByteBuffer
-            .allocate(BleConstants.DISCOVERY_BASE_BYTES + nicknameBytes.size)
-            .order(ByteOrder.BIG_ENDIAN)
-            .apply {
-                put(BleConstants.DISCOVERY_VERSION)
-                putLong(nodeUuid.mostSignificantBits)
-                putLong(nodeUuid.leastSignificantBits)
-                put(
-                    when (identity.deviceType) {
-                        NodeType.PHONE -> BleConstants.DEVICE_TYPE_PHONE
-                        NodeType.RELAY -> BleConstants.DEVICE_TYPE_RELAY
-                    }
-                )
-                put(
-                    (BleConstants.CAPABILITY_CAN_RELAY.toInt() or
-                        BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() or
-                        BleConstants.CAPABILITY_ATTACHMENT_HOP_IDENTITY.toInt()).toByte()
-                )
-                put(BleConstants.MESH_PROTOCOL_VERSION)
-                put(nicknameBytes.size.toByte())
-                put(nicknameBytes)
-            }
-            .array()
-    }
-
-    private fun ByteArray.truncateUtf8(
-        maxBytes: Int
-    ): ByteArray {
-        if (size <= maxBytes) return this
-        var end = maxBytes
-        while (
-            end > 0 &&
-            (this[end - 1].toInt() and 0xC0) == 0x80
-        ) {
-            end--
-        }
-        return copyOf(end)
-    }
+    private fun buildDiscoveryPayload(identity: LocalIdentity): ByteArray =
+        BleDiscoveryCodec.encode(identity)
 
     private fun hasAdvertisePermission(): Boolean {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
