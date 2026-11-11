@@ -814,7 +814,7 @@ class MeshEngine internal constructor(
             )
         }
 
-        val forwardedPacket = packet.copy(ttl = packet.ttl - 1, hopCount = packet.hopCount + 1)
+        val forwardedPacket = MeshForwardingRecordCodec.outbound(packet)
         recordRelayDiagnostic(
             packet = forwardedPacket,
             peerNodeId = peers.joinToString(",") { it.nodeId },
@@ -987,9 +987,7 @@ class MeshEngine internal constructor(
         sourceTransport: MeshTransportKind,
         now: Long
     ): Boolean {
-        val packetWithObservedHop = if (packet.packetType == MeshPacket.PacketType.DATA) {
-            packet.copy(routeTransportCodes = (packet.routeTransportCodes + sourceTransport.traceCode).take(MeshPacketCodec.INITIAL_TTL + 1))
-        } else packet
+        val packetWithObservedHop = MeshForwardingRecordCodec.withObservedIngress(packet, sourceTransport)
         repository.recordTraceEvent(
             messageId = packet.messageId,
             packetId = packet.packetId,
@@ -2207,53 +2205,15 @@ class MeshEngine internal constructor(
         predecessor: String?,
         predecessorAddress: String?
     ): MeshForwardingRecordEntity =
-        MeshForwardingRecordEntity(
-            packetId = packetId,
-            messageId = messageId,
-            originNodeId = originNodeId,
-            destinationNodeId = destinationNodeId,
-            receivedFromNodeId = predecessor,
-            receivedFromAddress = predecessorAddress,
-            createdAt = createdAt,
-            expiresAt = expiresAt,
-            ttl = ttl,
-            hopCount = hopCount,
-            packetType = packetType.code.toInt(),
-            messageType = messageType,
-            content = content,
-            deliveryHopCount = deliveryHopCount,
-            state = "PENDING",
-            attemptCount = 0,
-            nextAttemptAt = nowMillis() +
-                (150L..500L).random(),
-            lastError = null,
-            routeTrace = routeTransportCodes.joinToString(","),
-            routeTraceComplete = routeTraceComplete
+        MeshForwardingRecordCodec.toRecord(
+            packet = this,
+            predecessor = predecessor,
+            predecessorAddress = predecessorAddress,
+            nextAttemptAt = nowMillis() + (150L..500L).random()
         )
 
-    private fun MeshForwardingRecordEntity.toPacket(): MeshPacket? {
-        val type = MeshPacket.PacketType.entries.firstOrNull { it.code.toInt() == packetType }
-            ?: return null
-        val packet = runCatching {
-            MeshPacket(
-                packetId = packetId,
-                messageId = messageId,
-                originNodeId = originNodeId,
-                destinationNodeId = destinationNodeId,
-                createdAt = createdAt,
-                expiresAt = expiresAt,
-                ttl = ttl,
-                hopCount = hopCount,
-                packetType = type,
-                messageType = messageType,
-                content = content,
-                deliveryHopCount = deliveryHopCount,
-                routeTransportCodes = routeTrace.split(",").mapNotNull { it.toIntOrNull() }.take(MeshPacketCodec.INITIAL_TTL + 1),
-                routeTraceComplete = routeTraceComplete
-            )
-        }.getOrNull() ?: return null
-        return runCatching { MeshPacketCodec.encode(packet); packet }.getOrNull()
-    }
+    private fun MeshForwardingRecordEntity.toPacket(): MeshPacket? =
+        MeshForwardingRecordCodec.toPacket(this)
 
     private fun isExpired(createdAt: Long, now: Long): Boolean =
         now >= createdAt + MESSAGE_LIFETIME_MS
