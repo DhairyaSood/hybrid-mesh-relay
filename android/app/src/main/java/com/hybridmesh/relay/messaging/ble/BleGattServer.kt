@@ -17,6 +17,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import com.hybridmesh.relay.data.IdentityStore
+import com.hybridmesh.relay.diagnostics.MeshDbg
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.data.MessagingRepository
 import com.hybridmesh.relay.messaging.model.DeliveryStatus
@@ -624,6 +625,12 @@ class BleGattServer(context: Context) {
         // a true custody/acceptance signal instead of merely a byte-arrival signal.
         val isAttachmentFrame = com.hybridmesh.relay.messaging.attachment.BleAttachmentFrameCodec.isFrame(combined)
         val hasReceiver = if (isAttachmentFrame) attachmentReceiver != null else packetReceiver != null
+        MeshDbg.log(
+            "RX",
+            "gatt frame assembled addr=$address transfer=${frame.transferId} bytes=${combined.size} " +
+                "chunks=${assembly.chunkCount} attachment=$isAttachmentFrame receiver=$hasReceiver " +
+                "subscribed=${subscribedDevices.contains(address)}"
+        )
 
         assemblies.remove(key)
 
@@ -700,6 +707,10 @@ class BleGattServer(context: Context) {
                         true -> "RECEIVER_ACCEPTED"
                         false -> "RECEIVER_REJECTED"
                     }
+                    MeshDbg.log(
+                        "RX",
+                        "gatt mesh packet addr=${safeAddress(device)} transfer=${frame.transferId} outcome=$outcome"
+                    )
                     NetworkDiagnostics.getInstance().record(
                         kind = if (receiveOutcome == true) NetworkEventKind.REQUEST_SUCCEEDED else NetworkEventKind.REQUEST_FAILED,
                         operation = "ble.gatt.receive",
@@ -726,10 +737,19 @@ class BleGattServer(context: Context) {
         offset: Long? = null,
         rejection: BleAttachmentRejection? = null
     ): Boolean {
-        if (!subscribedDevices.contains(safeAddress(device))) return false
+        if (!subscribedDevices.contains(safeAddress(device))) {
+            MeshDbg.log("RX", "gatt ack not sent addr=${safeAddress(device)} transfer=$transferId reason=NOT_SUBSCRIBED")
+            return false
+        }
 
-        val characteristic = txCharacteristic ?: return false
-        val currentServer = server ?: return false
+        val characteristic = txCharacteristic ?: run {
+            MeshDbg.log("RX", "gatt ack not sent addr=${safeAddress(device)} transfer=$transferId reason=NO_TX_CHARACTERISTIC")
+            return false
+        }
+        val currentServer = server ?: run {
+            MeshDbg.log("RX", "gatt ack not sent addr=${safeAddress(device)} transfer=$transferId reason=SERVER_CLOSED")
+            return false
+        }
         val value = GattPacketCodec.encodeAck(
             transferId = transferId,
             accepted = accepted,
@@ -763,6 +783,11 @@ class BleGattServer(context: Context) {
         }
 
         lastAckDeliverySucceeded = success
+        MeshDbg.log(
+            "RX",
+            "gatt ack addr=${safeAddress(device)} transfer=$transferId accepted=$accepted " +
+                "rejection=${rejection?.name} notified=$success"
+        )
         return success
     }
 

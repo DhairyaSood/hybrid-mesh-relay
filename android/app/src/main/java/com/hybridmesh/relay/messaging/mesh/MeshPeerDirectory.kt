@@ -1,6 +1,7 @@
 package com.hybridmesh.relay.messaging.mesh
 
 import com.hybridmesh.relay.ble.BlePeer
+import com.hybridmesh.relay.diagnostics.MeshDbg
 import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -86,6 +87,7 @@ class MeshPeerDirectory {
         observed: List<BlePeer>,
         now: Long = System.currentTimeMillis()
     ) = synchronized(lock) {
+        val bleBefore = peers.mapValues { it.value.bleAddress }
         observed.forEach { ble ->
             val address = ble.address.takeUnless { it.isBlank() || it.equals("Unknown", true) }
                 ?: return@forEach
@@ -144,7 +146,29 @@ class MeshPeerDirectory {
                 wifiCanStoreForward = previous?.wifiCanStoreForward ?: false
             )
         }
+        logBleChangesLocked(bleBefore)
         publishLocked()
+    }
+
+    private fun logBleChangesLocked(bleBefore: Map<String, String?>) {
+        peers.forEach { (key, peer) ->
+            val beforeAddress = bleBefore[key]
+            when {
+                !bleBefore.containsKey(key) -> MeshDbg.log(
+                    "PEER",
+                    "added node=${peer.nodeId} ble=${peer.bleAddress} proto=${peer.bleProtocolVersion} " +
+                        "relay=${peer.bleCanRelay} storeForward=${peer.bleCanStoreForward} total=${peers.size}"
+                )
+                beforeAddress != peer.bleAddress -> MeshDbg.log(
+                    "PEER",
+                    "ble endpoint node=${MeshDbg.node(peer.nodeId)} $beforeAddress -> ${peer.bleAddress} " +
+                        "wifi=${peer.wifiAddress}"
+                )
+            }
+        }
+        bleBefore.keys.filterNot { peers.containsKey(it) }.forEach { key ->
+            MeshDbg.log("PEER", "removed node=${MeshDbg.node(key)} reason=NO_LIVE_ENDPOINT total=${peers.size}")
+        }
     }
 
     fun observeWifi(
@@ -177,6 +201,13 @@ class MeshPeerDirectory {
             wifiCanRelay = canRelay,
             wifiCanStoreForward = canStoreForward
         )
+        if (previous?.wifiAddress != "$host:$port") {
+            MeshDbg.log(
+                "PEER",
+                "wifi endpoint node=${MeshDbg.node(nodeId)} addr=$host:$port proto=$protocolVersion " +
+                    "relay=$canRelay storeForward=$canStoreForward new=${previous == null}"
+            )
+        }
         publishLocked()
     }
 
@@ -192,6 +223,7 @@ class MeshPeerDirectory {
             wifiCanStoreForward = false
         )
         if (updated.hasAnyEndpoint()) peers[key] = updated else peers.remove(key)
+        MeshDbg.log("PEER", "wifi endpoint lost node=${MeshDbg.node(nodeId)} stillReachable=${updated.hasAnyEndpoint()}")
         publishLocked()
     }
 

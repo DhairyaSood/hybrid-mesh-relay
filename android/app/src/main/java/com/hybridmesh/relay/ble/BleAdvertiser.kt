@@ -15,11 +15,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
+import com.hybridmesh.relay.diagnostics.MeshDbg
 import com.hybridmesh.relay.model.LocalIdentity
-import com.hybridmesh.relay.model.NodeType
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -124,6 +121,13 @@ class BleAdvertiser(context: Context) {
         _errorCode.value = null
 
         val discoveryPayload = buildDiscoveryPayload(identity)
+        MeshDbg.log(
+            "ADV",
+            "start node=${MeshDbg.node(identity.nodeId)} name='${identity.deviceName}' " +
+                "discoveryV=${BleConstants.DISCOVERY_VERSION} proto=${BleConstants.MESH_PROTOCOL_VERSION} " +
+                "payloadBytes=${discoveryPayload.size} scanResponseBytes=${discoveryPayload.size + 4}/31 " +
+                "generation=$sessionGeneration"
+        )
 
         val serviceAdvertisement = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(BleConstants.SERVICE_UUID))
@@ -257,12 +261,14 @@ class BleAdvertiser(context: Context) {
                 if (advertisingRequested && activeCallback === this) {
                     _errorCode.value = null
                     _state.value = BleOperationState.ACTIVE
+                    MeshDbg.log("ADV", "active generation=$sessionGeneration")
                 }
             }
 
             override fun onStartFailure(errorCode: Int) {
                 if (generation.get() != sessionGeneration) return
                 if (advertisingRequested && activeCallback === this) {
+                    MeshDbg.log("ADV", "start failed androidError=$errorCode generation=$sessionGeneration")
                     _state.value = BleOperationState.ERROR
                     _errorCode.value = when (errorCode) {
                         AdvertiseCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> ERROR_ADVERTISING_NOT_SUPPORTED
@@ -273,58 +279,8 @@ class BleAdvertiser(context: Context) {
             }
         }
 
-    private fun buildDiscoveryPayload(identity: LocalIdentity): ByteArray {
-        val nodeUuid = runCatching {
-            UUID.fromString(
-                identity.nodeId.removePrefix("HMR-")
-            )
-        }.getOrElse {
-            UUID(0L, 0L)
-        }
-
-        val nicknameBytes = identity.deviceName
-            .trim()
-            .toByteArray(Charsets.UTF_8)
-            .truncateUtf8(BleConstants.MESH_DISCOVERY_NAME_MAX_BYTES)
-
-        return ByteBuffer
-            .allocate(BleConstants.DISCOVERY_BASE_BYTES + nicknameBytes.size)
-            .order(ByteOrder.BIG_ENDIAN)
-            .apply {
-                put(BleConstants.DISCOVERY_VERSION)
-                putLong(nodeUuid.mostSignificantBits)
-                putLong(nodeUuid.leastSignificantBits)
-                put(
-                    when (identity.deviceType) {
-                        NodeType.PHONE -> BleConstants.DEVICE_TYPE_PHONE
-                        NodeType.RELAY -> BleConstants.DEVICE_TYPE_RELAY
-                    }
-                )
-                put(
-                    (BleConstants.CAPABILITY_CAN_RELAY.toInt() or
-                        BleConstants.CAPABILITY_CAN_STORE_FORWARD.toInt() or
-                        BleConstants.CAPABILITY_ATTACHMENT_HOP_IDENTITY.toInt()).toByte()
-                )
-                put(BleConstants.MESH_PROTOCOL_VERSION)
-                put(nicknameBytes.size.toByte())
-                put(nicknameBytes)
-            }
-            .array()
-    }
-
-    private fun ByteArray.truncateUtf8(
-        maxBytes: Int
-    ): ByteArray {
-        if (size <= maxBytes) return this
-        var end = maxBytes
-        while (
-            end > 0 &&
-            (this[end - 1].toInt() and 0xC0) == 0x80
-        ) {
-            end--
-        }
-        return copyOf(end)
-    }
+    private fun buildDiscoveryPayload(identity: LocalIdentity): ByteArray =
+        BleDiscoveryCodec.encode(identity)
 
     private fun hasAdvertisePermission(): Boolean {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -349,6 +305,7 @@ class BleAdvertiser(context: Context) {
     }.getOrDefault(false)
 
     private fun fail(code: Int) {
+        MeshDbg.log("ADV", "not advertising error=$code")
         advertisingRequested = false
         _state.value = BleOperationState.ERROR
         _errorCode.value = code

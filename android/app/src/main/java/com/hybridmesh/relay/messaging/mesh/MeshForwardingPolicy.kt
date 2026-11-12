@@ -62,4 +62,28 @@ object MeshForwardingPolicy {
             }.thenBy { it.nodeId.lowercase(Locale.US) }
         ).take(maxFanout.coerceIn(1, MAX_FANOUT))
     }
+
+    /** Next hops for a relayed packet held by this node, as the forwarding worker selects them. */
+    fun selectForward(
+        peers: List<MeshPeer>,
+        localNodeId: String,
+        packet: MeshPacket,
+        receivedFromNodeId: String?,
+        receivedFromAddress: String?,
+        isTransportUsable: (MeshPeer) -> Boolean,
+        isRelayTransportUsable: (MeshPeer) -> Boolean
+    ): List<MeshPeer> = select(
+        // The origin never needs its own packet back: it accepts a looped DATA as
+        // consumed, which would mark this relay's copy FORWARDED without progress.
+        // BLE ingress often cannot resolve the predecessor, so the origin is not
+        // reliably removed by excludeNodeId alone.
+        peers = peers.filterNot { it.nodeId.equals(packet.originNodeId.trim(), ignoreCase = true) },
+        localNodeId = localNodeId,
+        destinationNodeId = packet.destinationNodeId,
+        excludeNodeId = receivedFromNodeId,
+        excludeAddress = receivedFromAddress,
+        packetId = packet.packetId,
+        isTransportUsable = isTransportUsable,
+        isRelayTransportUsable = isRelayTransportUsable
+    )
 }
