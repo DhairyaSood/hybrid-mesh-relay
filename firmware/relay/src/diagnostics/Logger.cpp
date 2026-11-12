@@ -1,9 +1,15 @@
 #include "Logger.h"
 
 void loradbgHex(const char* stage, const char* label, const uint8_t* data, size_t length) {
-	Serial.printf("LORADBG %s %s bytes=%u hex=", stage, label, static_cast<unsigned>(length));
-	for (size_t i = 0; i < length; i++) {
-		Serial.printf("%02X", data[i]);
+	// Built into one buffer and written once so lines from different tasks do not interleave.
+	static constexpr char HEX_DIGITS[] = "0123456789ABCDEF";
+	char line[96 + 2 * 256];
+	int used = snprintf(line, sizeof(line), "LORADBG %s %s bytes=%u hex=", stage, label,
+						static_cast<unsigned>(length));
+	for (size_t i = 0; i < length && used + 3 < static_cast<int>(sizeof(line)); i++) {
+		line[used++] = HEX_DIGITS[data[i] >> 4];
+		line[used++] = HEX_DIGITS[data[i] & 0x0F];
 	}
-	Serial.println();
+	line[used++] = '\n';
+	Serial.write(reinterpret_cast<const uint8_t*>(line), used);
 }

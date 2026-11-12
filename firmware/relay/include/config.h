@@ -61,3 +61,17 @@ static_assert(LORA_FREQUENCY_MHZ >= LORA_MODULE_MIN_MHZ && LORA_FREQUENCY_MHZ <=
 // Largest whole mesh packet the bridge carries: the SX127x LoRa payload limit.
 // Larger packets are rejected with a LORADBG log line, never truncated.
 #define BRIDGE_MAX_PACKET_BYTES 255
+
+// Mesh packet fields the bridge reads. Everything else stays opaque.
+// packetId is bytes 4-19 (after magic "NM", version, type); see protocol/packet-format.md.
+#define MESH_PACKET_ID_OFFSET 4
+#define MESH_PACKET_ID_BYTES 16
+#define BRIDGE_MIN_PACKET_BYTES (MESH_PACKET_ID_OFFSET + MESH_PACKET_ID_BYTES)  // 20
+
+// Dedup: a packetId seen in either direction is not forwarded again within this
+// window. Shorter than the phone's 30 s delivery-ACK timeout, so a phone's retry
+// of the same packet still goes out over LoRa.
+#define BRIDGE_DEDUP_WINDOW_MS 20000
+#define BRIDGE_DEDUP_CAPACITY 32
+
+#define BRIDGE_TO_PHONE_QUEUE_DEPTH 8

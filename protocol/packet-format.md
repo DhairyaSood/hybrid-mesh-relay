@@ -48,4 +48,25 @@ Receiver rules (as implemented on the bridge; each drop logs `LORADBG DROP reaso
 | disconnect mid-transfer | `DISCONNECTED_MID_TRANSFER` |
 
 Example: the 5-byte packet `48 45 4C 4C 4F` ("HELLO") in one chunk is written as
-`00 01 48 45 4C 4C 4F`.
+`00 01 48 45 4C 4C 4F`. (Framing example only: at 5 bytes it is below the
+20-byte forwarding minimum below.)
+
+### LoRa frame and forwarding rules
+
+One LoRa packet carries exactly one whole mesh packet, byte for byte, with no
+chunk header and no extra framing. The bridge forwards in both directions:
+
+- phone write (reassembled) -> LoRa transmit
+- LoRa receive -> notify to the subscribed phone (re-chunked by the phone's MTU)
+
+| Rule | Value | Drop reason |
+|---|---|---|
+| Minimum packet | 20 bytes, so packetId (bytes 4-19) exists | `TOO_SHORT_FOR_PACKET_ID` |
+| Maximum packet | 255 bytes | `PACKET_TOO_LARGE` |
+| Dedup | a packetId seen in either direction is not forwarded again for 20 s | `DUPLICATE` |
+| LoRa CRC | bad CRC is dropped | `LORA_CRC_MISMATCH` |
+| No phone connected / not subscribed | LoRa packet is dropped, not stored | `NO_PHONE_CONNECTED` / `PHONE_NOT_SUBSCRIBED` |
+
+The dedup window is shorter than the phone's 30 s delivery-ACK timeout, so a
+phone's retry of the same packet is transmitted again. The bridge reads only
+bytes 4-19 of the packet and never modifies it.

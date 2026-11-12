@@ -36,6 +36,36 @@ int16_t LoRaManager::receive(String& message) {
 	return receiveState;
 }
 
+int16_t LoRaManager::transmit(const uint8_t* data, size_t length) {
+	const int16_t state = radio.transmit(data, length);
+	const int16_t receiveState = radio.startReceive();
+	return state == RADIOLIB_ERR_NONE ? receiveState : state;
+}
+
+int16_t LoRaManager::receive(uint8_t* data, size_t capacity, size_t& length) {
+	length = 0;
+	if (digitalRead(LORA_DIO0_PIN) == LOW) {
+		return RADIOLIB_ERR_RX_TIMEOUT;
+	}
+
+	const size_t received = radio.getPacketLength();
+	int16_t state = RADIOLIB_ERR_PACKET_TOO_LONG;
+	if (received > 0 && received <= capacity) {
+		state = radio.readData(data, received);
+	}
+	// startReceive() also clears the IRQ flags, including after a rejected packet.
+	const int16_t receiveState = radio.startReceive();
+	if (state != RADIOLIB_ERR_NONE) {
+		return state;
+	}
+	length = received;
+	return receiveState;
+}
+
+uint32_t LoRaManager::timeOnAirMs(size_t length) {
+	return static_cast<uint32_t>(radio.getTimeOnAir(length) / 1000);
+}
+
 float LoRaManager::lastPacketRssi() {
 	return radio.getRSSI();
 }

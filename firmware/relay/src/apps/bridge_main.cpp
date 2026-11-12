@@ -1,19 +1,24 @@
-// NEYRA-LORA BLE bridge, BLE side only. LoRa forwarding is wired in separately.
+// NEYRA-LORA bridge: phone <-> BLE <-> this ESP32 <-> LoRa. Packets written to
+// 7f6d2002 are transmitted over LoRa; LoRa packets are notified on 7f6d2003.
 //
 // Serial commands (115200 baud):
 //   notify <hex>   send bytes to the subscribed phone, e.g. "notify 48 45 4C 4C 4F"
-//   status         connection and subscription state
+//   status         connection, subscription and packet counters
 //   help
 #include <Arduino.h>
 
 #include "ble/BleBridge.h"
+#include "bridge/BridgeRouter.h"
 #include "config.h"
 #include "diagnostics/Logger.h"
 #include "identity/NodeId.h"
+#include "lora/LoRaManager.h"
 
 namespace {
 
 BleBridge bridge;
+LoRaManager lora;
+BridgeRouter router;
 String nodeId;
 
 int hexValue(char c) {
@@ -57,8 +62,11 @@ void handleSerialCommand() {
 	if (command == "help") {
 		printHelp();
 	} else if (command == "status") {
-		LORADBG("BOOT", "node=%s connected=%d subscribed=%d", nodeId.c_str(),
-				bridge.isConnected(), bridge.isSubscribed());
+		const BridgeRouter::Stats stats = router.stats();
+		LORADBG("BOOT", "node=%s connected=%d subscribed=%d loraTx=%lu loraRx=%lu notified=%lu dropped=%lu",
+				nodeId.c_str(), bridge.isConnected(), bridge.isSubscribed(),
+				static_cast<unsigned long>(stats.loraTx), static_cast<unsigned long>(stats.loraRx),
+				static_cast<unsigned long>(stats.notified), static_cast<unsigned long>(stats.dropped));
 	} else if (command.startsWith("notify ")) {
 		uint8_t bytes[BRIDGE_MAX_PACKET_BYTES + 1];
 		size_t length = 0;
@@ -69,6 +77,13 @@ void handleSerialCommand() {
 		bridge.sendToPhone(bytes, length);
 	} else if (command.length() > 0) {
 		Serial.println("Unknown command. Type help.");
+	}
+}
+
+void halt(const char* what) {
+	LORADBG("BOOT", "%s, halting", what);
+	while (true) {
+		delay(1000);
 	}
 }
 
@@ -83,19 +98,23 @@ void setup() {
 	LORADBG("BOOT", "NEYRA-LORA bridge node=%s", nodeId.c_str());
 	printHelp();
 
+	LORADBG("BOOT", "lora freq=%.1fMHz bw=%.1fkHz sf=%d cr=4/%d sync=0x%02X power=%ddBm preamble=%d",
+			LORA_FREQUENCY_MHZ, LORA_BANDWIDTH_KHZ, LORA_SPREADING_FACTOR, LORA_CODING_RATE,
+			LORA_SYNC_WORD, LORA_TX_POWER_DBM, LORA_PREAMBLE_LENGTH);
+	const int16_t loraState = lora.begin();
+	if (loraState != RADIOLIB_ERR_NONE) {
+		LORADBG("BOOT", "lora init failed code=%d", loraState);
+		halt("LoRa init failed");
+	}
 	if (!bridge.begin(nodeId)) {
-		LORADBG("BOOT", "BLE bridge init failed, halting");
-		while (true) {
-			delay(1000);
-		}
+		halt("BLE bridge init failed");
+	}
+	if (!router.begin(bridge, lora)) {
+		halt("router start failed");
 	}
 }
 
 void loop() {
-	BridgePacket packet;
-	while (bridge.receiveFromPhone(packet)) {
-		loradbgHex("BLE", "packet from phone", packet.data, packet.length);
-	}
 	handleSerialCommand();
-	delay(5);
+	delay(20);
 }
