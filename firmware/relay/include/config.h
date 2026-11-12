@@ -42,3 +42,22 @@ static_assert(LORA_FREQUENCY_MHZ >= LORA_MODULE_MIN_MHZ && LORA_FREQUENCY_MHZ <=
 #define LORA_CS_PIN 5
 #define LORA_RESET_PIN 14
 #define LORA_DIO0_PIN 26
+
+// ---------------------------------------------------------------------------
+// BLE bridge (phone <-> ESP32). Deliberately separate from the discovery UUID
+// 7f6d0001 and the phone-to-phone mesh service 7f6d1001, so existing phones
+// never treat the bridge as a mesh peer. Android copies these into
+// BleBridgeConstants.
+// ---------------------------------------------------------------------------
+#define BLE_BRIDGE_DEVICE_NAME "NEYRA-LORA"
+#define BLE_BRIDGE_SERVICE_UUID "7f6d2001-7b8e-4b5a-9d11-4c2a8e6f1001"
+#define BLE_BRIDGE_WRITE_CHAR_UUID "7f6d2002-7b8e-4b5a-9d11-4c2a8e6f1001"   // phone -> bridge
+#define BLE_BRIDGE_NOTIFY_CHAR_UUID "7f6d2003-7b8e-4b5a-9d11-4c2a8e6f1001"  // bridge -> phone
+#define BLE_BRIDGE_TARGET_MTU 247
+#define BLE_BRIDGE_CHUNK_HEADER_BYTES 2       // chunkIndex(1) + chunkCount(1)
+#define BLE_BRIDGE_REASSEMBLY_TIMEOUT_MS 2000
+#define BLE_BRIDGE_FROM_PHONE_QUEUE_DEPTH 8
+
+// Largest whole mesh packet the bridge carries: the SX127x LoRa payload limit.
+// Larger packets are rejected with a LORADBG log line, never truncated.
+#define BRIDGE_MAX_PACKET_BYTES 255
