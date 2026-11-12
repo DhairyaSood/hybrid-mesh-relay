@@ -11,7 +11,9 @@ int16_t LoRaManager::begin() {
 	SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN);
 	pinMode(LORA_DIO0_PIN, INPUT);
 
-	const int16_t state = radio.begin(LORA_FREQUENCY_MHZ);
+	const int16_t state = radio.begin(LORA_FREQUENCY_MHZ, LORA_BANDWIDTH_KHZ, LORA_SPREADING_FACTOR,
+									  LORA_CODING_RATE, LORA_SYNC_WORD, LORA_TX_POWER_DBM,
+									  LORA_PREAMBLE_LENGTH);
 	return state == RADIOLIB_ERR_NONE ? radio.startReceive() : state;
 }
 
