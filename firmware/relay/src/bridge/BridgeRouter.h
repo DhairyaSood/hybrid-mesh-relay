@@ -25,8 +25,11 @@ public:
 		uint32_t dropped;
 	};
 
-	bool begin(BleBridge& bridge, LoRaManager& lora);
+	// radioAvailable=false runs BLE-only: the radio is never touched and phone
+	// packets are dropped with reason=LORA_UNAVAILABLE.
+	bool begin(BleBridge& bridge, LoRaManager& lora, bool radioAvailable);
 	Stats stats() const;
+	bool isLoRaAvailable() const { return loraAvailable; }
 
 private:
 	static void loraTaskEntry(void* self);
@@ -34,12 +37,14 @@ private:
 	void loraTask();
 	void notifyTask();
 	void transmitFromPhone(const BridgePacket& packet);
+	void dropWithoutLoRa(const BridgePacket& packet);
 	void receiveFromLoRa();
 
 	BleBridge* bridge = nullptr;
 	LoRaManager* lora = nullptr;
 	QueueHandle_t toPhone = nullptr;
 	DedupCache dedup;
+	bool loraAvailable = false;
 
 	// Updated by the LoRa and notify tasks, read by loop().
 	std::atomic<uint32_t> loraTxCount{0};

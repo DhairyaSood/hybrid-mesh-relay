@@ -63,8 +63,8 @@ void handleSerialCommand() {
 		printHelp();
 	} else if (command == "status") {
 		const BridgeRouter::Stats stats = router.stats();
-		LORADBG("BOOT", "node=%s connected=%d subscribed=%d loraTx=%lu loraRx=%lu notified=%lu dropped=%lu",
-				nodeId.c_str(), bridge.isConnected(), bridge.isSubscribed(),
+		LORADBG("BOOT", "node=%s loraAvailable=%d connected=%d subscribed=%d loraTx=%lu loraRx=%lu notified=%lu dropped=%lu",
+				nodeId.c_str(), router.isLoRaAvailable(), bridge.isConnected(), bridge.isSubscribed(),
 				static_cast<unsigned long>(stats.loraTx), static_cast<unsigned long>(stats.loraRx),
 				static_cast<unsigned long>(stats.notified), static_cast<unsigned long>(stats.dropped));
 	} else if (command.startsWith("notify ")) {
@@ -102,14 +102,15 @@ void setup() {
 			LORA_FREQUENCY_MHZ, LORA_BANDWIDTH_KHZ, LORA_SPREADING_FACTOR, LORA_CODING_RATE,
 			LORA_SYNC_WORD, LORA_TX_POWER_DBM, LORA_PREAMBLE_LENGTH);
 	const int16_t loraState = lora.begin();
-	if (loraState != RADIOLIB_ERR_NONE) {
-		LORADBG("BOOT", "lora init failed code=%d", loraState);
-		halt("LoRa init failed");
+	const bool loraAvailable = loraState == RADIOLIB_ERR_NONE;
+	if (!loraAvailable) {
+		// Keep BLE up so the phone side (and "notify <hex>") can be tested without a radio.
+		LORADBG("BOOT", "LoRa unavailable code=%d, running BLE-only", loraState);
 	}
 	if (!bridge.begin(nodeId)) {
 		halt("BLE bridge init failed");
 	}
-	if (!router.begin(bridge, lora)) {
+	if (!router.begin(bridge, lora, loraAvailable)) {
 		halt("router start failed");
 	}
 }

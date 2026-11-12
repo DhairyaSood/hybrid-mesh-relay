@@ -12,9 +12,10 @@ constexpr TickType_t RX_POLL_TICKS = pdMS_TO_TICKS(5);
 
 }
 
-bool BridgeRouter::begin(BleBridge& bleBridge, LoRaManager& loraManager) {
+bool BridgeRouter::begin(BleBridge& bleBridge, LoRaManager& loraManager, bool radioAvailable) {
 	bridge = &bleBridge;
 	lora = &loraManager;
+	loraAvailable = radioAvailable;
 
 	toPhone = xQueueCreate(BRIDGE_TO_PHONE_QUEUE_DEPTH, sizeof(BridgePacket));
 	if (toPhone == nullptr) {
@@ -26,8 +27,8 @@ bool BridgeRouter::begin(BleBridge& bleBridge, LoRaManager& loraManager) {
 		LORADBG("DROP", "reason=TASK_CREATE_FAILED");
 		return false;
 	}
-	LORADBG("BOOT", "router started dedupWindowMs=%d minPacket=%d maxPacket=%d",
-			BRIDGE_DEDUP_WINDOW_MS, BRIDGE_MIN_PACKET_BYTES, BRIDGE_MAX_PACKET_BYTES);
+	LORADBG("BOOT", "router started loraAvailable=%d dedupWindowMs=%d minPacket=%d maxPacket=%d",
+			loraAvailable, BRIDGE_DEDUP_WINDOW_MS, BRIDGE_MIN_PACKET_BYTES, BRIDGE_MAX_PACKET_BYTES);
 	return true;
 }
 
@@ -45,11 +46,32 @@ void BridgeRouter::notifyTaskEntry(void* self) {
 
 void BridgeRouter::loraTask() {
 	BridgePacket packet;
+	if (!loraAvailable) {
+		// BLE-only mode: never touch the radio; drain phone packets so the queue
+		// cannot fill, and say why each one goes nowhere.
+		while (true) {
+			if (bridge->receiveFromPhone(packet, portMAX_DELAY)) {
+				dropWithoutLoRa(packet);
+			}
+		}
+	}
 	while (true) {
 		receiveFromLoRa();
 		if (bridge->receiveFromPhone(packet, RX_POLL_TICKS)) {
 			transmitFromPhone(packet);
 		}
+	}
+}
+
+void BridgeRouter::dropWithoutLoRa(const BridgePacket& packet) {
+	droppedCount++;
+	loradbgHex("BLE", "packet from phone", packet.data, packet.length);
+	if (packet.length >= BRIDGE_MIN_PACKET_BYTES) {
+		char packetId[41];
+		formatPacketId(packet.data, packetId);
+		LORADBG("DROP", "reason=LORA_UNAVAILABLE direction=toLoRa bytes=%u packetId=%s", packet.length, packetId);
+	} else {
+		LORADBG("DROP", "reason=LORA_UNAVAILABLE direction=toLoRa bytes=%u", packet.length);
 	}
 }
 

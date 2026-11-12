@@ -70,3 +70,13 @@ chunk header and no extra framing. The bridge forwards in both directions:
 The dedup window is shorter than the phone's 30 s delivery-ACK timeout, so a
 phone's retry of the same packet is transmitted again. The bridge reads only
 bytes 4-19 of the packet and never modifies it.
+
+### BLE-only mode (no radio)
+
+If the LoRa radio fails to initialise (for example RadioLib code -2, no RA-02
+attached), the bridge logs `LORADBG BOOT LoRa unavailable code=<n>, running BLE-only`
+and keeps running instead of halting. Advertising, the GATT service and the
+framing above are unchanged. Packets written by the phone are reassembled, logged
+and dropped with `LORADBG DROP reason=LORA_UNAVAILABLE`; the serial command
+`notify <hex>` still sends notifications to the phone. `status` reports
+`loraAvailable=0`.
