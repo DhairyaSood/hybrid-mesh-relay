@@ -8,6 +8,9 @@ import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.data.NodeIdGenerator
 import com.hybridmesh.relay.location.LocationPayload
 import com.hybridmesh.relay.messaging.MessagingManager
+import com.hybridmesh.relay.ml.AdvisoryPresentation
+import com.hybridmesh.relay.ml.MessageClassification
+import com.hybridmesh.relay.ml.MessageClassifierProvider
 import com.hybridmesh.relay.messaging.mesh.MeshPeer
 import com.hybridmesh.relay.messaging.mesh.MeshRuntimeSnapshot
 import com.hybridmesh.relay.messaging.mesh.MeshPacketCodec
@@ -46,6 +49,7 @@ class MessagesViewModel(
     private val repository = MessagingRepository.getInstance(application)
     private val networkManager = NetworkManager.getInstance(application)
     private val messagingManager = MessagingManager.getInstance(application)
+    private val messageClassifier = MessageClassifierProvider.get(application)
     val identity = identityStore.identity
     val networkState: StateFlow<NetworkState> = networkManager.state
     val networkDiagnostics: StateFlow<NetworkDiagnosticsSnapshot> =
@@ -126,6 +130,14 @@ class MessagesViewModel(
 
     val localNodeId: String
         get() = identityStore.getIdentity().nodeId
+
+    /** Local advisory for display only; never throws and never affects delivery. */
+    suspend fun classify(message: MessageRecordEntity): MessageClassification =
+        if (AdvisoryPresentation.isClassifiable(message.messageType)) {
+            messageClassifier.classify(message.messageId, message.content)
+        } else {
+            MessageClassification.Unavailable("NOT_TEXT")
+        }
 
     fun observeTraceEvents(messageId: String): Flow<List<MessageTraceEventEntity>> =
         repository.observeTraceEvents(messageId)

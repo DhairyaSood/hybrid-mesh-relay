@@ -79,6 +79,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hybridmesh.relay.ml.AdvisoryPresentation
+import com.hybridmesh.relay.ml.MessageClassification
 import com.hybridmesh.relay.messaging.data.AttachmentRecordEntity
 import com.hybridmesh.relay.location.LocationManager
 import com.hybridmesh.relay.location.LocationActions
@@ -381,10 +383,14 @@ fun ConversationScreen(peerNodeId: String) {
                         }
                         item(key = message.messageId) {
                             val incoming = !message.senderNodeId.equals(identity.nodeId, true)
+                            val advisory = if (incoming && AdvisoryPresentation.isClassifiable(message.messageType)) {
+                                rememberMessageAdvisory(message, viewModel::classify).value
+                            } else null
                             MessageBubble(
                                 message = message,
                                 attachment = attachments.firstOrNull { it.messageId == message.messageId },
                                 incoming = incoming,
+                                advisory = advisory,
                                 onClick = { deleteMessageId = message.messageId },
                                 onLongPress = {
                                     val location = LocationPayload.decode(message.content)
@@ -492,11 +498,13 @@ fun ConversationScreen(peerNodeId: String) {
         val selectedMessage = messages.firstOrNull { it.messageId == messageId }
         val traceEvents by viewModel.observeTraceEvents(messageId).collectAsStateWithLifecycle(initialValue = emptyList())
         if (selectedMessage != null) {
+            val advisory by rememberMessageAdvisory(selectedMessage, viewModel::classify)
             MessageDiagnosticsDialog(
                 message = selectedMessage,
                 attachment = attachments.firstOrNull { it.messageId == messageId },
                 events = traceEvents,
                 localNodeId = identity.nodeId,
+                advisory = advisory,
                 onDismiss = { diagnosticsMessageId = null }
             )
         }
@@ -796,6 +804,7 @@ private fun MessageBubble(
     message: MessageRecordEntity,
     attachment: AttachmentRecordEntity?,
     incoming: Boolean,
+    advisory: MessageClassification?,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
     onOpenVideo: (AttachmentExportSource) -> Unit,
@@ -869,6 +878,7 @@ private fun MessageBubble(
                 payload.accuracyMeters?.let { Text("Accuracy ±${it.toInt()} m", style = MaterialTheme.typography.bodySmall, color = RelayTextMuted) }
             } else {
                 Text(message.content, color = MaterialTheme.colorScheme.onSurface)
+                MessageAdvisoryChip(advisory)
             }
             Row(Modifier.padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.createdAt)), style = MaterialTheme.typography.labelSmall, color = RelayTextMuted)
