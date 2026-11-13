@@ -1,3 +1,47 @@
 <resources>
     <string name="app_name">Neyra</string>
+
+    <!-- SOS button and overlay -->
+    <string name="sos_button_label">SOS</string>
+    <string name="sos_button_hint">Hold for 2 seconds to send an SOS</string>
+    <string name="sos_button_description">SOS. Press and hold for two seconds to send an emergency alert.</string>
+    <string name="sos_privacy_title">Before you use SOS</string>
+    <string name="sos_privacy_body">Your location will be sent to every nearby phone in the mesh and your contacts.</string>
+    <string name="sos_privacy_continue">I UNDERSTAND</string>
+    <string name="sos_privacy_dismiss">NOT NOW</string>
+    <string name="sos_countdown_title">SENDING SOS</string>
+    <string name="sos_countdown_seconds">%1$d</string>
+    <string name="sos_countdown_caption">An emergency alert with your location will be sent unless you cancel.</string>
+    <string name="sos_cancel">CANCEL</string>
+    <string name="sos_active_title">SOS ACTIVE</string>
+    <string name="sos_stopped_title">SOS STOPPED</string>
+    <string name="sos_status_line">Sent to %1$d · delivered %2$d · pending %3$d · failed %4$d</string>
+    <string name="sos_location_approx_age">Location sent (last known fix, %1$d s old)</string>
+    <string name="sos_location_fresh">Your current location was included.</string>
+    <string name="sos_no_location">No location sent (%1$s)</string>
+    <string name="sos_no_peers">No one is in range yet. The alert will be sent to anyone who comes into range or is in your contacts.</string>
+    <string name="sos_clock_skew_warning">Your phone clock differs from GPS time by about %1$d s. Check the date and time settings.</string>
+    <string name="sos_unconfirmed">%1$d not confirmed after 60 s. Delivery can still complete. If this keeps happening, check that device clocks are correct.</string>
+    <string name="sos_stop">STOP SOS</string>
+    <string name="sos_close">CLOSE</string>
+
+    <!-- SOS bubble -->
+    <string name="sos_bubble_title">SOS</string>
+    <string name="sos_bubble_cancelled">SOS CANCELLED</string>
+    <string name="sos_bubble_cancelled_body">The sender says they no longer need help.</string>
+    <string name="sos_bubble_coordinates">%1$s, %2$s</string>
+    <string name="sos_bubble_accuracy">Accuracy ±%1$d m</string>
+    <string name="sos_bubble_fix_age">Fix %1$d s old</string>
+    <string name="sos_bubble_time">%1$s · %2$s</string>
+    <string name="sos_bubble_no_location">No location (%1$s)</string>
+    <string name="sos_bubble_open_maps">Tap to open in maps</string>
+
+    <!-- SOS notifications -->
+    <string name="sos_channel_name">SOS alerts</string>
+    <string name="sos_channel_description">Emergency alerts from nearby Neyra nodes</string>
+    <string name="sos_notification_title">SOS from %1$s</string>
+    <string name="sos_notification_cancelled_title">SOS cancelled by %1$s</string>
+    <string name="sos_notification_body_location">Needs help. Location %1$s, %2$s</string>
+    <string name="sos_notification_body_no_location">Needs help. Location unavailable.</string>
+    <string name="sos_notification_body_cancelled">No longer needs help.</string>
 </resources>
