@@ -45,7 +45,7 @@ object AdvisoryPresentation {
     fun unavailableText(reason: String): String? = when (reason) {
         "NOT_TEXT", "EMPTY_TEXT" -> null
         "TIMEOUT" -> "Local advisory timed out on this device."
-        else -> "Local advisory unavailable on this device."
+        else -> "Local advisory unavailable on this device ($reason)."
     }
 
     private fun humanize(label: String): String = label.replace('_', ' ').replaceFirstChar { it.uppercase() }
