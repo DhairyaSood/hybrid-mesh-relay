@@ -75,6 +75,10 @@ Keep a running results table (step, PASS/FAIL, proof line) for step 10.
 
 ### 3. Radio test (lora-ping)
 
+LoRa ↔ LoRa already works on the team's boards (verified with the `divanshi` branch, same code and pins).
+This step only re-confirms that *this* board and wiring are fine before the bridge test. If it fails here
+but worked before, suspect a loose wire or a different board, not the code.
+
 - Flash: Node 1 normally. **Node 2** with a label so the other side can tell who sent:
   - Mac/Linux: `PLATFORMIO_BUILD_FLAGS='-DLORA_NODE_ID=\"node-2\"' <PIO> run -d firmware/relay -e lora-ping -t upload --upload-port <PORT>`
   - Windows PowerShell: `$env:PLATFORMIO_BUILD_FLAGS='-DLORA_NODE_ID=\"node-2\"'; <PIO> run ...; Remove-Item Env:PLATFORMIO_BUILD_FLAGS`
@@ -207,7 +211,7 @@ Who to send logs to: post your **RESULT block** plus the raw `LORADBG` / `RADIOD
 |---|---|
 | Phone ↔ ESP32 over BLE (connect, subscribe, write, notify) | **Verified on hardware** |
 | Firmware builds (bridge, lora-ping, radiodiag), host unit tests, Android unit tests (incl. LoRa chunk framing) | Verified (builds/tests) |
-| RA-02 detection and LoRa ↔ LoRa (lora-ping) | **Not verified** |
+| RA-02 detection and LoRa ↔ LoRa (lora-ping) | **Verified on hardware** by the team using the `divanshi` branch; its radio code is byte-identical to `lora-ping`, same pins. Steps 3-6 are a quick re-check of *this* setup, not a first test. |
 | BLE → LoRa → BLE between two bridges | **Not verified** |
 | Android LoRa client on real phones (scan, connect, MTU, subscribe, send/receive) | **Not verified** |
 | Reconnect after the bridge disconnects | **Not verified** |

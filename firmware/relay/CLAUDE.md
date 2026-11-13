@@ -90,7 +90,7 @@ Hardware test procedure: `docs/HARDWARE_TEST.md` (Phase A lora-ping, Phase B nRF
 |---|---|
 | Phone ↔ ESP32 over BLE (connect, MTU, subscribe, write, `notify <hex>`) | **Verified on hardware** |
 | Firmware builds for all envs; dedup unit tests | Verified (CI/host) |
-| RA-02 radio detection + LoRa ↔ LoRa (`lora-ping`) | **Not yet verified** |
+| RA-02 radio detection + LoRa ↔ LoRa (`lora-ping`) | **Verified on hardware** (with the `divanshi` branch's `main.cpp`, which is byte-identical to `src/apps/lora_ping.cpp`, same pins) |
 | BLE → LoRa → BLE between two bridge boards (Phase B) | **Not yet verified** |
 | Android app using the bridge as a mesh transport | **Not yet verified on phones** |
 | `radiodiag` | Builds; not yet run on hardware |
