@@ -4,7 +4,7 @@ package com.hybridmesh.relay.messaging.mesh
 enum class MeshTransportKind(val persistedName: String, val traceCode: Int) {
     BLE_GATT("BLE_MESH", 1),
     WIFI_DIRECT("WIFI_DIRECT", 2),
-    /** Reserved stable code for the future LoRa transport; not implemented yet. */
+    /** LoRa through a NEYRA-LORA ESP32 bridge (LoRaBridgeTransport). Off by default. */
     LORA("LORA", 3);
 
     companion object {
@@ -17,7 +17,9 @@ data class MeshTransportPeer(
     val nodeId: String,
     val bleAddress: String? = null,
     val wifiAddress: String? = null,
-    val bleSupportsAttachmentHopIdentity: Boolean = false
+    val bleSupportsAttachmentHopIdentity: Boolean = false,
+    /** Set only on the LoRa gateway peer: the BLE address of the connected NEYRA-LORA bridge. */
+    val loraBridgeAddress: String? = null
 )
 
 sealed interface MeshTransportSendResult {

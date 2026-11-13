@@ -15,7 +15,7 @@ internal object MeshTransportCompatibility {
     fun canRelayOver(peer: MeshPeer, kind: MeshTransportKind): Boolean = when (kind) {
         MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
         MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
-        MeshTransportKind.LORA -> false
+        MeshTransportKind.LORA -> peer.loraCanRelay && peer.loraCanStoreForward
     }
 
     fun hasCompatibleTransport(peer: MeshPeer, selector: TransportSelector): Boolean =

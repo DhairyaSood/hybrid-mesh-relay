@@ -23,12 +23,20 @@ data class MeshPeer(
     val bleCanRelay: Boolean = false,
     val bleCanStoreForward: Boolean = false,
     val wifiCanRelay: Boolean = false,
-    val wifiCanStoreForward: Boolean = false
+    val wifiCanStoreForward: Boolean = false,
+    /** LoRa fields are set only on the LoRa gateway peer (see [MeshPeerDirectory.setLoRaGateway]). */
+    val loraBridgeAddress: String? = null,
+    val loraProtocolVersion: Int = 0,
+    val loraCanRelay: Boolean = false,
+    val loraCanStoreForward: Boolean = false
 ) {
+    private val hasLoRaEndpoint: Boolean get() = !loraBridgeAddress.isNullOrBlank()
+
     val meshProtocolVersion: Int
         get() = maxOf(
             if (!bleAddress.isNullOrBlank()) bleProtocolVersion else 0,
-            if (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0) wifiProtocolVersion else 0
+            if (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0) wifiProtocolVersion else 0,
+            if (hasLoRaEndpoint) loraProtocolVersion else 0
         )
 
     fun protocolVersionFor(transport: MeshTransportKind): Int = when (transport) {
@@ -36,25 +44,28 @@ data class MeshPeer(
         MeshTransportKind.WIFI_DIRECT -> wifiProtocolVersion.takeIf {
             !wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0
         } ?: 0
-        MeshTransportKind.LORA -> 0
+        MeshTransportKind.LORA -> loraProtocolVersion.takeIf { hasLoRaEndpoint } ?: 0
     }
 
     val canRelay: Boolean
         get() = (!bleAddress.isNullOrBlank() && bleCanRelay) ||
-            (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0 && wifiCanRelay)
+            (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0 && wifiCanRelay) ||
+            (hasLoRaEndpoint && loraCanRelay)
     val canStoreForward: Boolean
         get() = (!bleAddress.isNullOrBlank() && bleCanStoreForward) ||
-            (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0 && wifiCanStoreForward)
+            (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0 && wifiCanStoreForward) ||
+            (hasLoRaEndpoint && loraCanStoreForward)
 
     fun toTransportPeer(): MeshTransportPeer = MeshTransportPeer(
         nodeId = nodeId,
         bleAddress = bleAddress,
         wifiAddress = wifiAddress ?: wifiHost?.let { "$it:${wifiPort ?: 0}" },
-        bleSupportsAttachmentHopIdentity = bleSupportsAttachmentHopIdentity
+        bleSupportsAttachmentHopIdentity = bleSupportsAttachmentHopIdentity,
+        loraBridgeAddress = loraBridgeAddress
     )
 
     fun hasAnyEndpoint(): Boolean =
-        !bleAddress.isNullOrBlank() || (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0)
+        !bleAddress.isNullOrBlank() || (!wifiHost.isNullOrBlank() && (wifiPort ?: 0) > 0) || hasLoRaEndpoint
 }
 
 /**
@@ -276,7 +287,41 @@ class MeshPeerDirectory {
     }
 
     fun findByNodeId(nodeId: String): MeshPeer? = synchronized(lock) {
-        peers[nodeId.normalized()]
+        peers[nodeId.normalized()] ?: loraGateway?.takeIf { it.nodeId.equals(nodeId.trim(), true) }
+    }
+
+    /**
+     * LoRa has no per-node discovery: everything heard through the connected NEYRA-LORA bridge is
+     * represented by one relay-capable gateway peer. It is routing-only: it is never published in
+     * [snapshot] (UI, contacts, SOS targets), only returned by [routePeers].
+     */
+    @Volatile
+    private var loraGateway: MeshPeer? = null
+
+    fun setLoRaGateway(bridgeAddress: String, now: Long = System.currentTimeMillis()) = synchronized(lock) {
+        val gateway = MeshPeer(
+            nodeId = loraGatewayNodeId(bridgeAddress),
+            deviceName = "NEYRA-LORA",
+            lastSeen = now,
+            loraBridgeAddress = bridgeAddress,
+            loraProtocolVersion = MeshPacketCodec.PROTOCOL_VERSION,
+            loraCanRelay = true,
+            loraCanStoreForward = true
+        )
+        if (loraGateway?.nodeId != gateway.nodeId) {
+            MeshDbg.log("PEER", "lora gateway up node=${gateway.nodeId} bridge=$bridgeAddress")
+        }
+        loraGateway = gateway
+    }
+
+    fun clearLoRaGateway() = synchronized(lock) {
+        loraGateway?.let { MeshDbg.log("PEER", "lora gateway down node=${it.nodeId}") }
+        loraGateway = null
+    }
+
+    /** Next-hop candidates: the published peers plus the LoRa gateway when a bridge is connected. */
+    fun routePeers(): List<MeshPeer> = synchronized(lock) {
+        snapshot.value + listOfNotNull(loraGateway)
     }
 
     private fun publishLocked() {
@@ -305,9 +350,15 @@ class MeshPeerDirectory {
     private fun String.normalized(): String = trim().lowercase(Locale.US)
     private fun String.normalizedAddress(): String = trim().uppercase(Locale.US)
 
-    private companion object {
-        const val BLE_INGRESS_IDENTITY_RETENTION_MS = 2 * 60 * 1_000L
-        const val MAX_REMEMBERED_BLE_ADDRESSES = 256
-        const val MAX_ACTIVE_BLE_CONNECTIONS = 128
+    companion object {
+        /**
+         * Gateway identity, also used as the ingress address of LoRa packets so
+         * MeshForwardingPolicy's excludeAddress never echoes a LoRa packet back to LoRa.
+         */
+        fun loraGatewayNodeId(bridgeAddress: String): String = "lora:${bridgeAddress.trim().uppercase(Locale.US)}"
+
+        private const val BLE_INGRESS_IDENTITY_RETENTION_MS = 2 * 60 * 1_000L
+        private const val MAX_REMEMBERED_BLE_ADDRESSES = 256
+        private const val MAX_ACTIVE_BLE_CONNECTIONS = 128
     }
 }
