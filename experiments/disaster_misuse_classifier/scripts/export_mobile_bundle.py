@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export MU TF-IDF+LR to neyra_tfidf_logreg_v1 JSON for Kotlin."""
+"""Export MU TF-IDF+LR to neyra_tfidf_logreg_v2 JSON for Kotlin."""
 
 from __future__ import annotations
 
@@ -35,11 +35,19 @@ def export_bundle(joblib_path: Path, out_path: Path, min_abs_weight: float = 1e-
         per_class[label] = weights
 
     bundle = {
-        "format": "neyra_tfidf_logreg_v1",
+        "format": "neyra_tfidf_logreg_v2",
         "task": blob.get("task", "misuse_advisory"),
         "class_order": classes,
         "intercepts": {label: float(intercept[i]) for i, label in enumerate(classes)},
         "token_weights_by_class": per_class,
+        # v2: idf for every vocabulary term (including ones whose weights were
+        # pruned above) so the client can apply TfidfVectorizer's L2 normalisation.
+        "idf_by_token": {tok: float(idf[j]) for tok, j in vocab.items()},
+        "vectorizer": {
+            "token_pattern": tfidf.token_pattern,
+            "norm": tfidf.norm,
+            "sublinear_tf": bool(tfidf.sublinear_tf),
+        },
         "ngram_range": list(tfidf.ngram_range),
         "preprocess": {
             "profile": "misuse_synthetic",
