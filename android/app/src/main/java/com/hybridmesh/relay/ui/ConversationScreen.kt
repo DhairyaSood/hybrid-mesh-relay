@@ -83,6 +83,8 @@ import com.hybridmesh.relay.messaging.data.AttachmentRecordEntity
 import com.hybridmesh.relay.location.LocationManager
 import com.hybridmesh.relay.location.LocationActions
 import com.hybridmesh.relay.location.LocationPayload
+import com.hybridmesh.relay.sos.SosPayload
+import com.hybridmesh.relay.ui.components.SosBubble
 import com.hybridmesh.relay.messaging.data.MessageRecordEntity
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferStatus
 import com.hybridmesh.relay.messaging.attachment.AttachmentTransferError
@@ -801,6 +803,8 @@ private fun MessageBubble(
     onOpenVideo: (AttachmentExportSource) -> Unit,
     onOpenImage: (AttachmentExportSource) -> Unit
 ) {
+    // SOS messages are excluded from ML classification / advisory chips (see SosPayload.isSos).
+    SosPayload.parse(message.content)?.let { SosBubble(it, incoming, onLongPress); return }
     val shape = RoundedCornerShape(16.dp)
     val payload = if (message.messageType == MessageType.LOCATION.name) LocationPayload.decode(message.content) else null
     val descriptor = if (message.messageType == MessageType.ATTACHMENT.name) {
