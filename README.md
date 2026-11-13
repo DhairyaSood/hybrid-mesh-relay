@@ -1,5 +1,7 @@
 # Neyra / Hybrid Mesh Relay
 
+> **Testing the LoRa bridge?** Start with [TEAM_HANDOFF.md](TEAM_HANDOFF.md).
+
 Neyra is an Android-first resilient mesh messaging prototype built around a long-lived background service and a transport-agnostic mesh runtime. The actual implementation in this repository is centered on the Android app under `android/`: it discovers peers over Bluetooth LE and Wi‑Fi Direct, maintains a queued message store, and routes packets through a mesh engine that can retry, store-and-forward, and observe runtime diagnostics.
 
 This repo is still under active development. The code makes it clear that the current shipping logic is the Android app, while the firmware and hardware directories are still scaffolding rather than a finished relay implementation.
