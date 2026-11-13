@@ -24,7 +24,12 @@ fun rememberMessageAdvisory(
     classify: suspend (MessageRecordEntity) -> MessageClassification,
 ): State<MessageClassification?> =
     produceState<MessageClassification?>(initialValue = null, message.messageId, message.content) {
-        value = classify(message)
+        // Defense in depth: SOS alerts are never classified (see AdvisoryPresentation.shouldClassify).
+        value = if (AdvisoryPresentation.shouldClassify(message.messageType, message.content)) {
+            classify(message)
+        } else {
+            null
+        }
     }
 
 /** Small line under an incoming bubble; renders nothing for ordinary messages or fallbacks. */

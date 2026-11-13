@@ -1,6 +1,7 @@
 package com.hybridmesh.relay.ml
 
 import com.hybridmesh.relay.model.MessageType
+import com.hybridmesh.relay.sos.SosPayload
 
 /** What the UI shows for an advisory. Pure, so the wording rules are unit-tested. */
 object AdvisoryPresentation {
@@ -19,6 +20,16 @@ object AdvisoryPresentation {
     )
 
     fun isClassifiable(messageType: String): Boolean = messageType in CLASSIFIABLE_TYPES
+
+    /**
+     * Single gate for every classify/display decision: classifiable type AND not an SOS alert.
+     *
+     * SOS alerts are safety-critical emergency messages. An ML advisory on one (e.g. a misuse or
+     * "possible spam" label) could make a recipient doubt or ignore a real emergency, and the fixed
+     * machine format is outside the model's training distribution anyway.
+     */
+    fun shouldClassify(messageType: String, content: String): Boolean =
+        isClassifiable(messageType) && !SosPayload.isSos(content)
 
     /**
      * Chip under an incoming bubble: MU-v1 misuse (after civic refinement) and DC-T2

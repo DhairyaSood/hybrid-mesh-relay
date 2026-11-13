@@ -95,7 +95,8 @@ private fun ActualMessageDetail(
     }
     LaunchedEffect(message.messageId, message.content) {
         // Suspends while the shared classifier scores off the main thread; any failure yields no card.
-        if (AdvisoryPresentation.isClassifiable(message.messageType)) {
+        // SOS alerts never get an advisory (see AdvisoryPresentation.shouldClassify).
+        if (AdvisoryPresentation.shouldClassify(message.messageType, message.content)) {
             advisory = (MessageClassifierProvider.get(context)
                 .classify(message.messageId, message.content) as? MessageClassification.Advisory)?.result
         }

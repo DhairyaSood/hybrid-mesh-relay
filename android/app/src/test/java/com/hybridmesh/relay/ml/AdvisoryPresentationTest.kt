@@ -58,4 +58,28 @@ class AdvisoryPresentationTest {
         assertFalse(AdvisoryPresentation.isClassifiable("LOCATION"))
         assertFalse(AdvisoryPresentation.isClassifiable("ATTACHMENT"))
     }
+
+    @Test
+    fun sosAlertsAreNeverClassified() {
+        val sos = com.hybridmesh.relay.sos.SosPayload.format(12.97, 77.59, 8f, 1000L, null, 1_700_000_000_000L)
+        val noLoc = com.hybridmesh.relay.sos.SosPayload.format(null, null, null, null, "permission denied", 1_700_000_000_000L)
+        for (type in listOf("NORMAL", "PRIORITY", "EMERGENCY")) {
+            assertFalse(AdvisoryPresentation.shouldClassify(type, sos))
+            assertFalse(AdvisoryPresentation.shouldClassify(type, noLoc))
+            assertFalse(AdvisoryPresentation.shouldClassify(type, "SOS v1 CANCELLED | 2026-11-13T09:16:40Z | 14:46 IST"))
+        }
+    }
+
+    @Test
+    fun normalTextStillClassified() {
+        assertTrue(AdvisoryPresentation.shouldClassify("NORMAL", "We need water at the shelter"))
+        assertTrue(AdvisoryPresentation.shouldClassify("EMERGENCY", "flood rising"))
+        assertFalse(AdvisoryPresentation.shouldClassify("LOCATION", "hello"))
+    }
+
+    @Test
+    fun sosMentionedMidTextIsStillClassified() {
+        assertTrue(AdvisoryPresentation.shouldClassify("NORMAL", "send SOS supplies"))
+        assertTrue(AdvisoryPresentation.shouldClassify("NORMAL", "Please read SOS v1 docs"))
+    }
 }

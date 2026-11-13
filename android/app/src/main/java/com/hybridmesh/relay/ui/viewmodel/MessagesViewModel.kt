@@ -133,7 +133,8 @@ class MessagesViewModel(
 
     /** Local advisory for display only; never throws and never affects delivery. */
     suspend fun classify(message: MessageRecordEntity): MessageClassification =
-        if (AdvisoryPresentation.isClassifiable(message.messageType)) {
+        // SOS alerts are never classified (see AdvisoryPresentation.shouldClassify).
+        if (AdvisoryPresentation.shouldClassify(message.messageType, message.content)) {
             messageClassifier.classify(message.messageId, message.content)
         } else {
             MessageClassification.Unavailable("NOT_TEXT")

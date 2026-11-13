@@ -385,7 +385,8 @@ fun ConversationScreen(peerNodeId: String) {
                         }
                         item(key = message.messageId) {
                             val incoming = !message.senderNodeId.equals(identity.nodeId, true)
-                            val advisory = if (incoming && AdvisoryPresentation.isClassifiable(message.messageType)) {
+                            // No advisory for SOS alerts: see AdvisoryPresentation.shouldClassify.
+                            val advisory = if (incoming && AdvisoryPresentation.shouldClassify(message.messageType, message.content)) {
                                 rememberMessageAdvisory(message, viewModel::classify).value
                             } else null
                             MessageBubble(
