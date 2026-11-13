@@ -154,6 +154,25 @@ fun ProfileScreen(onLocationModeRequired: () -> Unit) {
                         }
                     }
                 )
+                ProfileTransportSwitch(
+                    label = "LoRa bridge",
+                    status = "Use a connected ESP32 LoRa bridge · " + when {
+                        !selection.loraEnabled -> "Off"
+                        mesh.availableTransports.contains("LORA") -> "Connected"
+                        else -> "Searching for NEYRA-LORA"
+                    },
+                    checked = selection.loraEnabled,
+                    onCheckedChange = { enabled ->
+                        transportPreferences.setLoRaEnabled(enabled)
+                        // The bridge link needs the same Bluetooth scan/connect permissions as BLE.
+                        if (enabled) {
+                            val missing = PermissionManager.missingEnabledMeshPermissions(
+                                context, selection.copy(bleEnabled = true)
+                            )
+                            if (missing.isNotEmpty()) permissionLauncher.launch(missing)
+                        }
+                    }
+                )
             }
         }
         item {
