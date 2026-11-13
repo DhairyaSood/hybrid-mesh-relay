@@ -8,7 +8,9 @@ import kotlinx.coroutines.flow.asStateFlow
 
 data class MeshTransportSelection(
     val bleEnabled: Boolean = true,
-    val wifiDirectEnabled: Boolean = true
+    val wifiDirectEnabled: Boolean = true,
+    /** Experimental LoRa bridge transport; off unless explicitly enabled. */
+    val loraEnabled: Boolean = false
 ) {
     val anyEnabled: Boolean get() = bleEnabled || wifiDirectEnabled
 }
@@ -37,15 +39,22 @@ class MeshTransportPreferences private constructor(context: Context) {
         _selection.value = readSelection()
     }
 
+    fun setLoRaEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean(KEY_LORA_ENABLED, enabled).apply()
+        _selection.value = readSelection()
+    }
+
     private fun readSelection() = MeshTransportSelection(
         bleEnabled = preferences.getBoolean(KEY_BLE_ENABLED, true),
-        wifiDirectEnabled = preferences.getBoolean(KEY_WIFI_DIRECT_ENABLED, true)
+        wifiDirectEnabled = preferences.getBoolean(KEY_WIFI_DIRECT_ENABLED, true),
+        loraEnabled = preferences.getBoolean(KEY_LORA_ENABLED, false)
     )
 
     companion object {
         private const val PREFERENCES_NAME = "neyra_mesh_transport_preferences"
         private const val KEY_BLE_ENABLED = "ble_enabled"
         private const val KEY_WIFI_DIRECT_ENABLED = "wifi_direct_enabled"
+        private const val KEY_LORA_ENABLED = "lora_enabled"
 
         @Volatile private var instance: MeshTransportPreferences? = null
 

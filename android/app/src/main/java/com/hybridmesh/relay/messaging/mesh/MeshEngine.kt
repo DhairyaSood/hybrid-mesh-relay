@@ -11,6 +11,8 @@ import kotlinx.coroutines.isActive
 import com.hybridmesh.relay.data.IdentityStore
 import com.hybridmesh.relay.diagnostics.MeshDbg
 import com.hybridmesh.relay.messaging.ble.BleGattClient
+import com.hybridmesh.relay.messaging.lora.LoRaBridgeClient
+import com.hybridmesh.relay.messaging.lora.LoRaBridgeState
 import com.hybridmesh.relay.messaging.ble.BleGattConstants
 import com.hybridmesh.relay.messaging.ble.BleAttachmentReceiveResult
 import com.hybridmesh.relay.messaging.ble.BleAttachmentRejection
@@ -95,7 +97,11 @@ class MeshEngine internal constructor(
         onAttachmentFinish = { source, manifest -> onAttachmentFinish(source, manifest) }
     )
     private val wifiTransport = WifiDirectMeshTransport(wifiDirectManager)
-    private val meshTransports = testOverrides?.transports ?: listOf<MeshTransport>(bleTransport, wifiTransport)
+    // Off by default: unavailable unless the LoRa preference is on and a NEYRA-LORA bridge is connected.
+    private val loraClient = LoRaBridgeClient(appContext, onPacket = ::onLoRaTransportPacket)
+    private val loraTransport = LoRaBridgeTransport(loraClient) { currentTransportSelection().loraEnabled }
+    private val meshTransports = testOverrides?.transports
+        ?: listOf<MeshTransport>(bleTransport, wifiTransport, loraTransport)
     private val transportSelector = TransportSelector { meshTransports }
 
     private fun localNodeId(): String =
@@ -186,6 +192,7 @@ class MeshEngine internal constructor(
         jobs += scope.launch {
             transportPreferences.selection.collect { selection ->
                 if (selection.wifiDirectEnabled) wifiDirectManager.start() else wifiDirectManager.stop()
+                if (selection.loraEnabled) loraClient.start() else loraClient.stop()
                 val wifiState = wifiDirectManager.runtimeState.value
                 _snapshot.value = _snapshot.value.copy(
                     bleEnabled = selection.bleEnabled,
@@ -230,6 +237,19 @@ class MeshEngine internal constructor(
             }
         }
 
+        jobs += scope.launch {
+            loraClient.state.collect { state ->
+                if (state is LoRaBridgeState.Ready) {
+                    peerDirectory.setLoRaGateway(state.address, nowMillis())
+                    repository.makeAllQueuedEligible()
+                    repository.makePendingForwardingEligible()
+                } else {
+                    peerDirectory.clearLoRaGateway()
+                }
+                wakeChannel.trySend(Unit)
+            }
+        }
+
         jobs += scope.launch { originLoop() }
         jobs += scope.launch { forwardingLoop() }
         jobs += scope.launch { attachmentLoop() }
@@ -246,6 +266,8 @@ class MeshEngine internal constructor(
         activeFanoutJobs.toList().forEach(Job::cancel)
         activeFanoutJobs.clear()
         if (testOverrides == null) wifiDirectManager.stop()
+        if (testOverrides == null) loraClient.stop()
+        peerDirectory.clearLoRaGateway()
         receivedAtByPacket.clear()
         attachmentRateWindows.clear()
         val wifiState = wifiDirectManager.runtimeState.value
@@ -460,7 +482,8 @@ class MeshEngine internal constructor(
         }
         val selection = currentTransportSelection()
         if (sourceTransport == MeshTransportKind.BLE_GATT && !selection.bleEnabled ||
-            sourceTransport == MeshTransportKind.WIFI_DIRECT && !selection.wifiDirectEnabled
+            sourceTransport == MeshTransportKind.WIFI_DIRECT && !selection.wifiDirectEnabled ||
+            sourceTransport == MeshTransportKind.LORA && !selection.loraEnabled
         ) {
             MeshDbg.log("RX", "dropped from=$sourceAddress via=${sourceTransport.name} reason=TRANSPORT_DISABLED")
             return false
@@ -479,6 +502,18 @@ class MeshEngine internal constructor(
             sourceNodeId = sourceNodeId.takeIf { it.isNotBlank() },
             sourceAddress = "wifi:$sourceNodeId",
             sourceTransport = MeshTransportKind.WIFI_DIRECT,
+            payload = payload
+        )
+
+    /**
+     * Whole packet reassembled from a NEYRA-LORA bridge. The sender is unknown at this layer, so the
+     * ingress address is the gateway identity: relays then never echo the packet back over LoRa.
+     */
+    internal suspend fun onLoRaTransportPacket(bridgeAddress: String, payload: ByteArray): Boolean =
+        onTransportPacket(
+            sourceNodeId = null,
+            sourceAddress = MeshPeerDirectory.loraGatewayNodeId(bridgeAddress),
+            sourceTransport = MeshTransportKind.LORA,
             payload = payload
         )
 
@@ -584,7 +619,7 @@ class MeshEngine internal constructor(
             resultCode = "OUTGOING_ATTEMPT",
             detail = "Message selected from durable queue"
         )
-        val routePeers = peerDirectory.snapshot.value
+        val routePeers = peerDirectory.routePeers()
         val peers = MeshForwardingPolicy.select(
             peers = routePeers,
             localNodeId = localNodeId(),
@@ -826,7 +861,7 @@ class MeshEngine internal constructor(
                 hasCompatibleRelayTransport(peer)
             }
         }
-        val routePeers = peerDirectory.snapshot.value
+        val routePeers = peerDirectory.routePeers()
         val peers = MeshForwardingPolicy.selectForward(
             peers = routePeers,
             localNodeId = localNodeId(),
@@ -1538,7 +1573,7 @@ class MeshEngine internal constructor(
             (!requireRelayCapability || when (transport.kind) {
                 MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
                 MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
-                MeshTransportKind.LORA -> false
+                MeshTransportKind.LORA -> peer.loraCanRelay && peer.loraCanStoreForward
             }) &&
             (packet.packetType != MeshPacket.PacketType.ATTACHMENT_ACK ||
                 peer.protocolVersionFor(transport.kind) >= MeshPacketCodec.PROTOCOL_VERSION) &&
@@ -1792,6 +1827,7 @@ class MeshEngine internal constructor(
                             when (transport) {
                                 MeshTransportKind.WIFI_DIRECT -> peer.wifiCanRelay && peer.wifiCanStoreForward
                                 MeshTransportKind.BLE_GATT -> peer.bleCanRelay && peer.bleCanStoreForward
+                                // Attachments never use LoRa: one LoRa packet is at most 255 bytes.
                                 MeshTransportKind.LORA -> false
                             }
                         } &&
@@ -1944,6 +1980,7 @@ class MeshEngine internal constructor(
                             result.succeeded
                         }
                         MeshTransportKind.LORA -> {
+                            // Not reachable: attachment candidates never include LoRa (255-byte limit).
                             allAttemptedFailuresPermanent = false
                             false
                         }
