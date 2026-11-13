@@ -48,6 +48,7 @@ fun MessageDiagnosticsDialog(
     attachment: AttachmentRecordEntity? = null,
     events: List<MessageTraceEventEntity>,
     localNodeId: String,
+    advisory: com.hybridmesh.relay.ml.MessageClassification? = null,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -204,6 +205,7 @@ fun MessageDiagnosticsDialog(
                         }
                     }
                 }
+                MessageAdvisorySection(advisory)
                 Divider()
                 Text("TECHNICAL DETAILS", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 DiagnosticRow("Message ID", message.messageId)
