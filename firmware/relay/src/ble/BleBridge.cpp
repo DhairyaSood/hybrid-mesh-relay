@@ -104,17 +104,18 @@ bool BleBridge::receiveFromPhone(BridgePacket& out, TickType_t waitTicks) {
 void BleBridge::onConnect(uint16_t handle, const char* address, uint16_t mtu) {
 	connHandle = handle;
 	subscribed = false;
-	resetReassembly();
+	assembler.reset();
 	LORADBG("BLE", "connected addr=%s handle=%u mtu=%u", address, handle, mtu);
 }
 
 void BleBridge::onDisconnect(uint16_t handle, int reason) {
-	if (rxChunkCount != 0) {
-		LORADBG("DROP", "reason=DISCONNECTED_MID_TRANSFER got=%u/%u", rxNextIndex, rxChunkCount);
+	if (assembler.inProgress()) {
+		LORADBG("DROP", "reason=DISCONNECTED_MID_TRANSFER got=%u/%u", assembler.chunksReceived(),
+				assembler.chunksExpected());
 	}
 	connHandle = NO_CONNECTION;
 	subscribed = false;
-	resetReassembly();
+	assembler.reset();
 	LORADBG("BLE", "disconnected handle=%u reason=0x%X (advertising again)", handle, reason);
 }
 
@@ -128,85 +129,11 @@ void BleBridge::onSubscribe(uint16_t subValue) {
 	LORADBG("BLE", "notify %s", subscribed ? "subscribed" : "unsubscribed");
 }
 
-void BleBridge::resetReassembly() {
-	rxLength = 0;
-	rxDiscardedBytes = 0;
-	rxChunkCount = 0;
-	rxNextIndex = 0;
-	rxTooLarge = false;
-}
-
 void BleBridge::onWrite(const uint8_t* data, size_t length) {
-	if (length < BLE_BRIDGE_CHUNK_HEADER_BYTES + 1) {
-		LORADBG("DROP", "reason=CHUNK_TOO_SHORT bytes=%u (need index, count and data)",
-				static_cast<unsigned>(length));
-		return;
-	}
-
-	const uint8_t index = data[0];
-	const uint8_t count = data[1];
-	const uint8_t* payload = data + BLE_BRIDGE_CHUNK_HEADER_BYTES;
-	const uint16_t payloadLength = length - BLE_BRIDGE_CHUNK_HEADER_BYTES;
-	const uint32_t now = millis();
-
-	if (count == 0 || index >= count) {
-		LORADBG("DROP", "reason=BAD_CHUNK_HEADER index=%u count=%u", index, count);
-		resetReassembly();
-		return;
-	}
-
-	if (rxChunkCount != 0 && now - rxLastChunkMs > BLE_BRIDGE_REASSEMBLY_TIMEOUT_MS) {
-		LORADBG("DROP", "reason=REASSEMBLY_TIMEOUT got=%u/%u", rxNextIndex, rxChunkCount);
-		resetReassembly();
-	}
-
-	if (index == 0) {
-		if (rxChunkCount != 0) {
-			LORADBG("DROP", "reason=TRANSFER_RESTARTED got=%u/%u", rxNextIndex, rxChunkCount);
-		}
-		resetReassembly();
-		rxChunkCount = count;
-	} else if (rxChunkCount == 0) {
-		LORADBG("DROP", "reason=MISSING_FIRST_CHUNK index=%u count=%u", index, count);
-		return;
-	} else if (count != rxChunkCount || index != rxNextIndex) {
-		LORADBG("DROP", "reason=OUT_OF_ORDER expected=%u/%u got=%u/%u",
-				rxNextIndex, rxChunkCount, index, count);
-		resetReassembly();
-		return;
-	}
-
-	rxLastChunkMs = now;
-	rxNextIndex = index + 1;
-	const bool last = rxNextIndex == rxChunkCount;
-
-	if (!rxTooLarge && rxLength + payloadLength > BRIDGE_MAX_PACKET_BYTES) {
-		rxTooLarge = true;
-		rxDiscardedBytes = rxLength;
-	}
-	if (rxTooLarge) {
-		rxDiscardedBytes += payloadLength;
-		if (last) {
-			LORADBG("DROP", "reason=PACKET_TOO_LARGE bytes=%u max=%u (not truncated, whole packet dropped)",
-					rxDiscardedBytes, BRIDGE_MAX_PACKET_BYTES);
-			resetReassembly();
-		}
-		return;
-	}
-
-	memcpy(rxBuffer + rxLength, payload, payloadLength);
-	rxLength += payloadLength;
-	LORADBG("BLE", "write chunk=%u/%u bytes=%u total=%u", rxNextIndex, rxChunkCount, payloadLength, rxLength);
-
-	if (!last) {
-		return;
-	}
-
 	BridgePacket packet;
-	packet.length = rxLength;
-	memcpy(packet.data, rxBuffer, rxLength);
-	resetReassembly();
-
+	if (assembler.onChunk(data, length, millis(), packet) != ChunkAssembler::Result::Complete) {
+		return;  // more chunks to come, or already logged as a DROP
+	}
 	if (xQueueSend(fromPhone, &packet, 0) != pdTRUE) {
 		LORADBG("DROP", "reason=QUEUE_FULL queue=fromPhone bytes=%u", packet.length);
 		return;
@@ -235,19 +162,15 @@ bool BleBridge::sendToPhone(const uint8_t* data, size_t length) {
 		mtu = MIN_ATT_MTU;
 	}
 	const size_t chunkData = mtu - ATT_NOTIFY_HEADER_BYTES - BLE_BRIDGE_CHUNK_HEADER_BYTES;
-	const size_t count = (length + chunkData - 1) / chunkData;  // <= 15 even at MTU 23
+	const size_t count = bridgeChunkCount(length, chunkData);  // <= 15 even at MTU 23
 
 	uint8_t frame[BLE_BRIDGE_TARGET_MTU];
 	for (size_t i = 0; i < count; i++) {
-		const size_t offset = i * chunkData;
-		const size_t n = min(chunkData, length - offset);
-		frame[0] = static_cast<uint8_t>(i);
-		frame[1] = static_cast<uint8_t>(count);
-		memcpy(frame + BLE_BRIDGE_CHUNK_HEADER_BYTES, data + offset, n);
+		const size_t frameLength = bridgeBuildChunk(data, length, chunkData, i, frame);
 
 		bool sent = false;
 		for (int attempt = 0; attempt < NOTIFY_ATTEMPTS && !sent; attempt++) {
-			sent = notifyCharacteristic->notify(frame, n + BLE_BRIDGE_CHUNK_HEADER_BYTES, handle);
+			sent = notifyCharacteristic->notify(frame, frameLength, handle);
 			if (!sent) {
 				vTaskDelay(pdMS_TO_TICKS(NOTIFY_RETRY_MS));
 			}

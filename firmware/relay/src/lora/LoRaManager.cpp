@@ -4,9 +4,17 @@
 
 #include "config.h"
 
+static_assert(RADIO_OK == RADIOLIB_ERR_NONE, "RadioPort codes must equal RadioLib's");
+static_assert(RADIO_NO_PACKET == RADIOLIB_ERR_RX_TIMEOUT, "RadioPort codes must equal RadioLib's");
+static_assert(RADIO_CRC_MISMATCH == RADIOLIB_ERR_CRC_MISMATCH, "RadioPort codes must equal RadioLib's");
+
 LoRaManager::LoRaManager()
 	: radio(new Module(LORA_CS_PIN, LORA_DIO0_PIN, LORA_RESET_PIN, RADIOLIB_NC)) {}
 
+// Same sequence as the divanshi branch: SPI on the VSPI pins with NSS, DIO0 as
+// input, radio.begin(), then continuous receive. The explicit values equal
+// RadioLib's SX1278::begin() defaults that divanshi relies on, so the chip gets
+// the same register writes; see include/config.h.
 int16_t LoRaManager::begin() {
 	SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN);
 	pinMode(LORA_DIO0_PIN, INPUT);
