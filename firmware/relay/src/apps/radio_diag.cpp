@@ -23,6 +23,7 @@ const PinSet CANDIDATES[] = {
 	{LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN, LORA_RESET_PIN, LORA_DIO0_PIN, "config.h default"},
 	{18, 19, 23, 5, 14, 2, "dio0 on 2"},
 	{18, 19, 23, 5, 27, 26, "rst on 27"},
+	{18, 19, 23, 27, 14, 26, "nss on 27 (divanshi's first pinout, before 9c4ce35)"},
 	{18, 19, 23, 15, 14, 26, "nss on 15"},
 	{18, 19, 23, 4, 14, 26, "nss on 4"},
 	{5, 19, 27, 18, 14, 26, "TTGO-style sck 5, mosi 27, nss 18"},

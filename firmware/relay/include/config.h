@@ -23,8 +23,12 @@
 #define LORA_MODULE_MIN_MHZ 410.0
 #define LORA_MODULE_MAX_MHZ 525.0
 
-// These equal RadioLib's SX1278::begin() defaults, which the ping test used
-// implicitly before they were written out here.
+// Proven settings: identical to the divanshi branch, which ran LoRa <-> LoRa on
+// the team's boards. divanshi calls radio.begin(LORA_FREQUENCY_MHZ) and takes
+// RadioLib's SX1278::begin() defaults for the rest; these are exactly those
+// defaults (RadioLib 7.8.1, resolved from ^7.1.2 in both branches), written out
+// so all radio settings live in this one file. lora-ping and bridge both use
+// LoRaManager, so they are interchangeable on the same pair of boards.
 #define LORA_BANDWIDTH_KHZ 125.0
 #define LORA_SPREADING_FACTOR 9
 #define LORA_CODING_RATE 7          // 4/7
@@ -35,7 +39,9 @@
 static_assert(LORA_FREQUENCY_MHZ >= LORA_MODULE_MIN_MHZ && LORA_FREQUENCY_MHZ <= LORA_MODULE_MAX_MHZ,
 			  "LORA_FREQUENCY_MHZ is outside the RA-02 (SX1278) range; see the note above");
 
-// RA-02 wiring to the ESP32 DevKit (VSPI).
+// RA-02 wiring to the ESP32 DevKit (VSPI). Same as divanshi since its commit
+// 9c4ce35 "fixed pins config" (NSS moved 27 -> 5). A board wired to the older
+// pinout (NSS on 27) fails with code -2; radiodiag tests that pin set too.
 #define LORA_SCK_PIN 18
 #define LORA_MISO_PIN 19
 #define LORA_MOSI_PIN 23
