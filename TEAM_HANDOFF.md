@@ -18,7 +18,7 @@ Humans: open your agent in this repo and say **"Read TEAM_HANDOFF.md and do it. 
 - **Rules:**
   - Never `git push --force` (or `-f`, `--force-with-lease`), never `git reset --hard`, never `git clean`.
   - Don't edit existing code files. The **only** exception: the pin constants in `firmware/relay/include/config.h` in step 4.
-  - Don't commit to `main`. Work on `feature/android-lora-transport`.
+  - Don't commit to `main`. Work on `feature/integrated-lora-bridge`.
   - Report honestly: show the log line that proves each PASS. Never mark something PASS without it.
 
 ### Commands you will use (define these once)
@@ -56,7 +56,7 @@ Keep a running results table (step, PASS/FAIL, proof line) for step 10.
 ### 1. Sync the code and find PlatformIO
 
 - `git fetch origin`: download the latest branches.
-- `git checkout feature/android-lora-transport`: switch to the test branch.
+- `git checkout feature/integrated-lora-bridge`: switch to the test branch.
 - `git pull`: update it.
 - Check that `firmware/relay/platformio.ini` exists. If not, stop and report.
 - Find PlatformIO, in this order:
@@ -75,9 +75,12 @@ Keep a running results table (step, PASS/FAIL, proof line) for step 10.
 
 ### 3. Radio test (lora-ping)
 
-LoRa ↔ LoRa already works on the team's boards (verified with the `divanshi` branch, same code and pins).
-This step only re-confirms that *this* board and wiring are fine before the bridge test. If it fails here
-but worked before, suspect a loose wire or a different board, not the code.
+The radio settings on this branch are the `divanshi` branch's proven ones, which already ran LoRa ↔ LoRa on the
+team's boards: same RadioLib, same pins (SCK 18, MISO 19, MOSI 23, NSS 5, RST 14, DIO0 26), same init sequence,
+433.0 MHz / SF9 / BW 125 kHz / CR 4/7 / sync 0x12 / 10 dBm / preamble 8. `lora-ping` is divanshi's test program
+byte for byte, and `bridge` uses the same radio code, so the two are interchangeable on the same boards.
+This step only re-confirms that *this* board and wiring are fine before the bridge test. If it fails here,
+suspect wiring, power or the module, not the code; step 4 (radiodiag) finds out which.
 
 - Flash: Node 1 normally. **Node 2** with a label so the other side can tell who sent:
   - Mac/Linux: `PLATFORMIO_BUILD_FLAGS='-DLORA_NODE_ID=\"node-2\"' <PIO> run -d firmware/relay -e lora-ping -t upload --upload-port <PORT>`
@@ -94,6 +97,7 @@ but worked before, suspect a loose wire or a different board, not the code.
   `RADIODIAG sck=18 miso=19 mosi=23 nss=5 rst=14 dio0=26 version=0x12 FOUND rst=ok dio0=ok (config.h default)`
   and end with `RADIODIAG RESULT ...`.
 - **`RESULT pins=` the config.h default** (18,19,23,5,14,26): wiring is fine; the radio answered here. Reflash lora-ping and recheck; if still failing, report it (possibly a bad module).
+- **`RESULT pins=` the set marked `nss on 27`:** this board is wired to divanshi's *first* pinout (NSS on GPIO 27, changed to 5 in commit 9c4ce35). Prefer telling the human: `ACTION NEEDED: unplug the board and move the RA-02 NSS wire from GPIO 27 to GPIO 5, plug back in and tell me "done"`, then rerun radiodiag. Only if they can't rewire, use the next bullet.
 - **`RESULT pins=` a different set:** change **only** the six pin constants `LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN, LORA_RESET_PIN, LORA_DIO0_PIN` in `firmware/relay/include/config.h` to that set (nss → `LORA_CS_PIN`). Show the human the diff. Reflash lora-ping (step 3) and recheck. Record the change: the other board may need the same.
 - **`RESULT no chip answered`:** `ACTION NEEDED: unplug the board. With a multimeter in continuity (beep) mode, check 3.3V and GND, then each signal wire from the ESP32 pin to the RA-02 pad: SCK-18, MISO-19, MOSI-23, NSS-5, RST-14, DIO0-26. Also check 3V3 and GND do NOT beep together. Fix any wire that doesn't beep, plug back in and tell me "done".` Then rerun radiodiag.
 - `... (chip answers, but rst or dio0 did not check out ...)`: same ACTION NEEDED, focused on the RST and DIO0 wires.
@@ -162,7 +166,7 @@ Then run the round. Round 1: **A sends, B receives**; round 2: swap.
 - `git commit -m "Add Node <N> hardware test results"`: save them.
   (If git asks for a name/email: `git config user.name "<name>"`, `git config user.email "<email>"`; ask the human for both.)
 - `git pull --rebase`: put your commit after the other person's. Separate files mean no conflicts.
-- `git push origin feature/android-lora-transport`: upload. If rejected, `git pull --rebase` again and push. **Never force-push.**
+- `git push origin feature/integrated-lora-bridge`: upload. If rejected, `git pull --rebase` again and push. **Never force-push.**
 
 ### 11. RESULT block
 
@@ -190,7 +194,7 @@ results file:           firmware/relay/docs/results/node<N>-<date>.md (pushed)
 | **Port busy / access denied / `could not open port`** | Another program has the port. Stop other `serial_log.py` or monitors; replug (HUMAN). |
 | **Garbled serial** (`⸮⸮⸮`) | A little after reset is normal (boot ROM speed). Constant garbage: baud isn't 115200; use `serial_log.py` (115200). |
 | **Reset loop** / `Brownout detector was triggered` | Not enough USB power: another USB port (not a hub), shorter cable (HUMAN). Check the RA-02 is on **3.3 V**, never 5 V. |
-| **`LoRa init failed, RadioLib code -2`** | Radio not detected over SPI: wiring/power. Step 4 (radiodiag). |
+| **`LoRa init failed, RadioLib code -2`** | Radio not detected over SPI: wiring/power (the code and settings are the proven divanshi ones). Step 4 (radiodiag); a common cause is NSS wired to GPIO 27 (old pinout) instead of 5. |
 | **`loraAvailable=0`** / **`DROP reason=LORA_UNAVAILABLE`** | Same as code -2: the bridge runs BLE-only. Step 4. |
 | **Nothing arrives** (`TX ok` but no `RX from`, or `tx ok` but no `LORA rx`) | Both boards must be flashed from the same commit (both print `433.0 MHz`, sf=9, sync=0x12). Antennas on both. 1-3 m apart, not touching. If step 4 changed `config.h` on one node only, check the other. `LORA_CRC_MISMATCH`: move them apart a bit. |
 | `DROP reason=NO_PHONE_CONNECTED` / `PHONE_NOT_SUBSCRIBED` | Receiver's phone isn't connected / didn't tap subscribe on 7f6d2003 (HUMAN). |
@@ -211,7 +215,8 @@ Who to send logs to: post your **RESULT block** plus the raw `LORADBG` / `RADIOD
 |---|---|
 | Phone ↔ ESP32 over BLE (connect, subscribe, write, notify) | **Verified on hardware** |
 | Firmware builds (bridge, lora-ping, radiodiag), host unit tests, Android unit tests (incl. LoRa chunk framing) | Verified (builds/tests) |
-| RA-02 detection and LoRa ↔ LoRa (lora-ping) | **Verified on hardware** by the team using the `divanshi` branch; its radio code is byte-identical to `lora-ping`, same pins. Steps 3-6 are a quick re-check of *this* setup, not a first test. |
+| Whole chain in software: phone chunks → bridge → radio bytes → bridge → phone chunks, across two bridges, plus dedup/drop rules (`pio test -e native`, mock radio) | Verified (host test). Proves the firmware logic, not the radio or BLE hardware. |
+| RA-02 detection and LoRa ↔ LoRa (lora-ping) | **Verified on hardware** by the team using the `divanshi` branch; this branch uses its exact radio settings and `lora-ping` is its `main.cpp` byte for byte. Steps 3-6 are a quick re-check of *this* setup, not a first test. |
 | BLE → LoRa → BLE between two bridges | **Not verified** |
 | Android LoRa client on real phones (scan, connect, MTU, subscribe, send/receive) | **Not verified** |
 | Reconnect after the bridge disconnects | **Not verified** |
@@ -225,4 +230,4 @@ Known limits: one LoRa packet is at most 255 bytes, so only short text messages 
 
 ## f. When everything passes
 
-Tell both humans: **open a pull request from `feature/android-lora-transport` into `main`** on GitHub for the repo owner to review and merge. Don't open it before steps 3-8 pass on both nodes, and don't merge it yourselves.
+Tell both humans: **open a pull request from `feature/integrated-lora-bridge` into `main`** on GitHub for the repo owner to review and merge. Don't open it before steps 3-8 pass on both nodes, and don't merge it yourselves.

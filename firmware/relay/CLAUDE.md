@@ -22,15 +22,18 @@ Packet format: `protocol/packet-format.md` at the repo root.
 |---|---|---|
 | `bridge` | `src/apps/bridge_main.cpp` + all modules | The real BLE ↔ LoRa bridge, advertises as **NEYRA-LORA**. Runs BLE-only if the radio isn't detected. |
 | `lora-ping` | `src/apps/lora_ping.cpp` + `src/lora/` | Radio-only test: serial `send <text>` on one board, the other prints `RX from ...`. |
-| `radiodiag` | `src/apps/radio_diag.cpp` only | Wiring diagnostic: reads SX1278 version reg 0x42 (expect 0x12) on 7 candidate pin sets, checks RST and DIO0, prints `RADIODIAG RESULT ...`. Never transmits. |
-| `native` | `src/routing/DedupCache.cpp` + `test/` | Host unit tests, no board: `pio test -e native`. |
+| `radiodiag` | `src/apps/radio_diag.cpp` only | Fallback when a radio isn't detected (code -2): reads SX1278 version reg 0x42 (expect 0x12) on 8 candidate pin sets (incl. NSS on 27, divanshi's old pinout), checks RST and DIO0, prints `RADIODIAG RESULT ...`. Never transmits. |
+| `native` | `DedupCache`, `BridgeCore`, `ChunkFraming`, `Logger` + `test/` | Host unit tests, no board: `pio test -e native`. `test_bridge_chain` runs phone → bridge → mock radio → bridge → phone. |
 
 ## Layout
 
 - `include/config.h`: **all** settings: pins, LoRa parameters, BLE UUIDs, limits.
-- `src/ble/BleBridge.*`: NimBLE GATT server, chunk reassembly (phone → bridge), chunked notify (bridge → phone).
-- `src/bridge/BridgeRouter.*`: FreeRTOS tasks + queues between BLE and LoRa, dedup, counters.
-- `src/lora/LoRaManager.*`: RadioLib SX1278 wrapper (non-blocking receive via DIO0).
+- `src/ble/BleBridge.*`: NimBLE GATT server; uses `ChunkFraming` for reassembly (phone → bridge) and chunked notify (bridge → phone).
+- `src/ble/ChunkFraming.*`: plain C++ chunk split/reassembly (host-tested).
+- `src/bridge/BridgeCore.*`: plain C++ routing decisions: length checks, dedup, counters, radio TX/RX (host-tested).
+- `src/bridge/BridgeRouter.*`: FreeRTOS tasks + queues around `BridgeCore`.
+- `src/lora/RadioPort.h`: the radio interface `BridgeCore` uses; `LoRaManager` implements it, tests use a mock.
+- `src/lora/LoRaManager.*`: RadioLib SX1278 wrapper (non-blocking receive via DIO0). Init is the divanshi branch's, unchanged.
 - `src/routing/DedupCache.*`: packetId dedup (20 s window, 32 entries); `formatPacketId` prints `HMR-xxxxxxxx-...` like Android.
 - `src/diagnostics/Logger.*`: the `LORADBG` macro.
 - `scripts/flash.sh|ps1`, `scripts/monitor.sh|ps1`: one-command flash + monitor with port auto-detection.
@@ -54,7 +57,12 @@ Whole packet max **255 bytes** (SX127x LoRa payload limit), min 20 bytes (must c
 
 ## LoRa settings (`include/config.h`; BOTH boards must match)
 
-433.0 MHz, SF9, BW 125 kHz, CR 4/7, sync word 0x12, 10 dBm, preamble 8.
+433.0 MHz, SF9, BW 125 kHz, CR 4/7, sync word 0x12, 10 dBm, preamble 8. Pins SCK 18, MISO 19, MOSI 23, NSS 5, RST 14, DIO0 26.
+These are the **`divanshi` branch's proven settings** (LoRa ↔ LoRa worked on the team's boards): divanshi calls
+`radio.begin(433.0)` and takes RadioLib's defaults, which are exactly the values above (RadioLib 7.8.1), so the chip
+gets the same register writes. Same `SPI.begin(18, 19, 23, 5)` → DIO0 input → `begin()` → `startReceive()` sequence.
+`lora-ping` (= divanshi's `main.cpp`) and `bridge` share this code and are interchangeable on the same boards.
+If a radio still isn't detected (code -2), it's wiring/power, not settings: run `radiodiag`.
 Note: 433 MHz is not licence-free in India (865-867 MHz is); the RA-02 can't tune there. Bench testing only.
 
 ## Logs
@@ -90,7 +98,8 @@ Hardware test procedure: `docs/HARDWARE_TEST.md` (Phase A lora-ping, Phase B nRF
 |---|---|
 | Phone ↔ ESP32 over BLE (connect, MTU, subscribe, write, `notify <hex>`) | **Verified on hardware** |
 | Firmware builds for all envs; dedup unit tests | Verified (CI/host) |
-| RA-02 radio detection + LoRa ↔ LoRa (`lora-ping`) | **Verified on hardware** (with the `divanshi` branch's `main.cpp`, which is byte-identical to `src/apps/lora_ping.cpp`, same pins) |
+| Full chain in software (phone chunks → bridge → mock radio → bridge → phone chunks, dedup, drops) | Verified (host test `test_bridge_chain`) |
+| RA-02 radio detection + LoRa ↔ LoRa (`lora-ping`) | **Verified on hardware** (with the `divanshi` branch's `main.cpp`, which is byte-identical to `src/apps/lora_ping.cpp`; same pins and radio settings) |
 | BLE → LoRa → BLE between two bridge boards (Phase B) | **Not yet verified** |
 | Android app using the bridge as a mesh transport | **Not yet verified on phones** |
 | `radiodiag` | Builds; not yet run on hardware |
@@ -100,7 +109,7 @@ Hardware test procedure: `docs/HARDWARE_TEST.md` (Phase A lora-ping, Phase B nRF
 1. **Never `git push --force`** (or `-f`, `--force-with-lease`) and **never `git reset --hard`**. If push is rejected: `git pull`, resolve, push.
 2. **Never edit pin numbers in `include/config.h` without asking the user first.** Run `radiodiag` and show the user the `RESULT` line. Changing pins affects everyone's boards.
 3. Don't change LoRa parameters on one board only; both must match. Ask before changing any of them.
-4. **Explain every git command in one line before running it.** Don't commit to `main`; work on the feature branch.
+4. **Explain every git command in one line before running it.** Don't commit to `main`; work on `feature/integrated-lora-bridge`.
 5. Don't change the BLE UUIDs or chunk framing without changing Android's `BleBridgeConstants` and `protocol/packet-format.md` in the same change.
 6. Before saying something works, show the log lines that prove it. Say clearly when something is untested on hardware.
 7. Never transmit (lora-ping `send`, bridge with LoRa) without an antenna attached; remind the user.
