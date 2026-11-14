@@ -13,15 +13,16 @@ notify (bridge→phone) `7f6d2003-…`. Every write/notify is `[chunkIndex][chun
 **Radio (`include/config.h`, both boards identical):** 433.0 MHz, SF9, BW 125 kHz, CR 4/7, sync 0x12, 10 dBm, preamble 8;
 pins SCK 18, MISO 19, MOSI 23, NSS 5, RST 14, DIO0 26. RadioLib 7.x. Never change pins/settings on one board only; ask first.
 
-**Bridge boot log to expect** (every line starts `LORADBG <BOOT|BLE|LORA|DROP>`):
+**Bridge boot log to expect** (every line starts `LORADBG <BOOT|RADIO|BLE|LORA|DROP|STATUS>`):
 ```
-LORADBG BOOT lora freq=433.0MHz bw=125.0kHz sf=9 cr=4/7 sync=0x12 power=10dBm preamble=8
+LORADBG BOOT NEYRA-LORA bridge commit=<hash> built=<date time> node=HMR-...
 LORADBG BOOT lora spi sck=18 miso=19 mosi=23 nss=5 rst=14 dio0=26
-LORADBG BOOT lora init code=0 (ok)                  <- code=-2 = CHIP_NOT_FOUND: wiring/power
-LORADBG BOOT lora chip version=0x12 (SX1278 answered)  <- 0x00/0xFF = no answer: flash radiodiag
-LORADBG BOOT router started loraAvailable=1 ...
+LORADBG RADIO attempt=1 version=0x12 code=0     <- raw 0x42 read after RST pulse, then RadioLib begin()
+LORADBG RADIO OK version=0x12 attempts=1        <- or: RADIO FAILED ... (0x00/0xFF = no SPI answer: wiring/power, radiodiag)
 LORADBG BLE advertising name=NEYRA-LORA ...
 ```
+Radio failure never halts: BLE-only, retry every 30 s. Serial commands: `loracheck` (re-run bring-up), `status`,
+`send <text>` (raw `bridge-xxxxxx:<seq>:<text>` over LoRa like lora-ping, no dedup), `notify <hex>` (bytes to the phone).
 Packet path: `BLE write chunk` → `BLE packet from phone complete` → `LORA tx ok` ... `LORA rx bytes=` → `LORA queued for phone` → `BLE notify sent`.
 Anything discarded: `LORADBG DROP reason=<CODE>` (meanings in `docs/HARDWARE_TEST.md` §6).
 
@@ -33,6 +34,6 @@ or `pio run -e <env> -t upload --upload-port <port>`. Read logs non-interactivel
 |---|---|
 | Phone ↔ ESP32 over BLE (hardware) | BLE → LoRa → BLE between two bridge boards |
 | LoRa ↔ LoRa on hardware (divanshi branch = `lora-ping`) | Android app over the bridge on real phones |
-| Builds; host tests incl. full chain with a mock radio | `radiodiag` and the new boot diagnostics on hardware |
+| Builds; host tests incl. full chain with a mock radio | `radiodiag`, boot bring-up/retry, `loracheck`/`send` on hardware |
 
 Rules: explain each git command in one line; never force-push or `reset --hard`; work on `feature/integrated-lora-bridge`, not `main`.
