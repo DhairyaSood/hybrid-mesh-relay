@@ -25,12 +25,20 @@ int16_t LoRaManager::begin() {
 	return state == RADIOLIB_ERR_NONE ? radio.startReceive() : state;
 }
 
-uint8_t LoRaManager::readVersionRegister() {
+uint8_t LoRaManager::probeVersion() {
 	constexpr uint8_t REG_VERSION = 0x42;
-	// begin() may have released SPI on failure; SPI.begin() is a no-op if it is already running.
+	// A failed begin() ends SPI (RadioLib term()); start it again on our pins.
 	SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN);
 	pinMode(LORA_CS_PIN, OUTPUT);
 	digitalWrite(LORA_CS_PIN, HIGH);
+
+	pinMode(LORA_RESET_PIN, OUTPUT);
+	digitalWrite(LORA_RESET_PIN, LOW);
+	delay(10);
+	digitalWrite(LORA_RESET_PIN, HIGH);
+	delay(10);
+	delay(100);
+
 	SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
 	digitalWrite(LORA_CS_PIN, LOW);
 	SPI.transfer(REG_VERSION & 0x7F);

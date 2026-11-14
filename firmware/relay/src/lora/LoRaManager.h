@@ -12,9 +12,10 @@ public:
 	LoRaManager();
 
 	int16_t begin();
-	// Reads SX1278 register 0x42 over raw SPI (expect 0x12). Works whether or not
-	// begin() succeeded; boot diagnostics only, not used while the radio runs.
-	uint8_t readVersionRegister();
+	// Diagnostic probe, run BEFORE begin(): pulses RST (LOW 10 ms, HIGH 10 ms),
+	// waits 100 ms, then reads SX1278 register 0x42 over raw SPI (expect 0x12).
+	// Resets the chip, so never call it while the radio is in use.
+	uint8_t probeVersion();
 	int16_t transmit(const String& message);
 	int16_t receive(String& message);
 

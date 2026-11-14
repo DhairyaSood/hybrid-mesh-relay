@@ -2,6 +2,17 @@
 
 #include "diagnostics/Logger.h"
 
+namespace {
+
+bool isPrintableText(const uint8_t* data, size_t length) {
+	for (size_t i = 0; i < length; i++) {
+		if (data[i] < 0x20 || data[i] > 0x7E) return false;
+	}
+	return length > 0;
+}
+
+}
+
 BridgeCore::Stats BridgeCore::stats() const {
 	return Stats{loraTxCount.load(), loraRxCount.load(), notifiedCount.load(), droppedCount.load()};
 }
@@ -68,6 +79,10 @@ bool BridgeCore::receiveForPhone(BridgePacket& out) {
 	loraRxCount++;
 	LORADBG("LORA", "rx bytes=%u rssi=%.1f snr=%.1f", out.length, rssi, snr);
 	loradbgHex("LORA", "rx data", out.data, out.length);
+	if (isPrintableText(out.data, out.length)) {
+		// e.g. a "send" from another bridge or a lora-ping board
+		LORADBG("LORA", "rx text=%.*s", static_cast<int>(out.length), reinterpret_cast<const char*>(out.data));
+	}
 
 	if (out.length < BRIDGE_MIN_PACKET_BYTES) {
 		droppedCount++;

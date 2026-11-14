@@ -2,9 +2,14 @@
 // 7f6d2002 are transmitted over LoRa; LoRa packets are notified on 7f6d2003.
 //
 // Serial commands (115200 baud):
+//   loracheck      re-run radio bring-up now (RST pulse, version read, RadioLib begin)
+//   status         radio state, connection, subscription and packet counters
+//   send <text>    raw LoRa text "<label>:<seq>:<text>" like lora-ping (no dedup, not a mesh packet)
 //   notify <hex>   send bytes to the subscribed phone, e.g. "notify 48 45 4C 4C 4F"
-//   status         connection, subscription and packet counters
 //   help
+//
+// The radio never halts the bridge: if bring-up fails it runs BLE-only and
+// retries every BRIDGE_RADIO_RETRY_MS.
 #include <Arduino.h>
 
 #include "ble/BleBridge.h"
@@ -13,6 +18,11 @@
 #include "diagnostics/Logger.h"
 #include "identity/NodeId.h"
 #include "lora/LoRaManager.h"
+
+// Set by scripts/git_version.py at build time.
+#ifndef BRIDGE_GIT_COMMIT
+#define BRIDGE_GIT_COMMIT "unknown"
+#endif
 
 namespace {
 
@@ -49,7 +59,7 @@ bool parseHex(const String& text, uint8_t* out, size_t capacity, size_t& length)
 }
 
 void printHelp() {
-	Serial.println("Commands: notify <hex>, status, help");
+	Serial.println("Commands: loracheck, status, send <text>, notify <hex>, help");
 }
 
 void handleSerialCommand() {
@@ -63,10 +73,23 @@ void handleSerialCommand() {
 		printHelp();
 	} else if (command == "status") {
 		const BridgeRouter::Stats stats = router.stats();
-		LORADBG("BOOT", "node=%s loraAvailable=%d connected=%d subscribed=%d loraTx=%lu loraRx=%lu notified=%lu dropped=%lu",
-				nodeId.c_str(), router.isLoRaAvailable(), bridge.isConnected(), bridge.isSubscribed(),
+		const BridgeRouter::RadioState radio = router.radioState();
+		LORADBG("STATUS", "commit=%s node=%s radio=%s version=0x%02X code=%d nextRetryS=%lu",
+				BRIDGE_GIT_COMMIT, nodeId.c_str(), radio.available ? "OK" : "FAILED", radio.version, radio.code,
+				static_cast<unsigned long>(radio.nextRetryInMs / 1000));
+		LORADBG("STATUS", "connected=%d subscribed=%d loraTx=%lu loraRx=%lu notified=%lu dropped=%lu",
+				bridge.isConnected(), bridge.isSubscribed(),
 				static_cast<unsigned long>(stats.loraTx), static_cast<unsigned long>(stats.loraRx),
 				static_cast<unsigned long>(stats.notified), static_cast<unsigned long>(stats.dropped));
+	} else if (command == "loracheck") {
+		if (!router.requestLoraCheck()) {
+			Serial.println("loracheck: busy, try again");
+		}
+	} else if (command.startsWith("send ")) {
+		if (!router.requestSend(command.substring(5))) {
+			Serial.printf("send: need 1-%u characters (or busy, try again)\n",
+						  static_cast<unsigned>(BridgeRouter::MAX_SEND_TEXT));
+		}
 	} else if (command.startsWith("notify ")) {
 		uint8_t bytes[BRIDGE_MAX_PACKET_BYTES + 1];
 		size_t length = 0;
@@ -95,7 +118,8 @@ void setup() {
 	delay(500);
 
 	nodeId = bridgeNodeId();
-	LORADBG("BOOT", "NEYRA-LORA bridge node=%s", nodeId.c_str());
+	LORADBG("BOOT", "NEYRA-LORA bridge commit=%s built=%s %s node=%s", BRIDGE_GIT_COMMIT, __DATE__, __TIME__,
+			nodeId.c_str());
 	printHelp();
 
 	LORADBG("BOOT", "lora freq=%.1fMHz bw=%.1fkHz sf=%d cr=4/%d sync=0x%02X power=%ddBm preamble=%d",
@@ -103,25 +127,16 @@ void setup() {
 			LORA_SYNC_WORD, LORA_TX_POWER_DBM, LORA_PREAMBLE_LENGTH);
 	LORADBG("BOOT", "lora spi sck=%d miso=%d mosi=%d nss=%d rst=%d dio0=%d",
 			LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN, LORA_RESET_PIN, LORA_DIO0_PIN);
-	const int16_t loraState = lora.begin();
-	const bool loraAvailable = loraState == RADIOLIB_ERR_NONE;
-	LORADBG("BOOT", "lora init code=%d (%s)", loraState,
-			loraAvailable ? "ok"
-			: loraState == RADIOLIB_ERR_CHIP_NOT_FOUND ? "CHIP_NOT_FOUND: no SPI answer, check wiring/power"
-													   : "failed, see RadioLib TypeDef.h");
-	const uint8_t version = lora.readVersionRegister();
-	LORADBG("BOOT", "lora chip version=0x%02X (%s)", version,
-			version == 0x12 ? "SX1278 answered"
-			: version == 0x00 || version == 0xFF ? "no answer: wiring/power, flash radiodiag"
-												 : "unexpected value: wrong chip or noisy SPI");
-	if (!loraAvailable) {
-		// Keep BLE up so the phone side (and "notify <hex>") can be tested without a radio.
-		LORADBG("BOOT", "LoRa unavailable code=%d, running BLE-only", loraState);
-	}
+	// Radio first, before BLE, exactly like lora-ping. A failure never stops the
+	// bridge: BLE still comes up and the LoRa task retries in the background.
+	const RadioBringUpResult radio = radioBringUp(lora);
+
 	if (!bridge.begin(nodeId)) {
 		halt("BLE bridge init failed");
 	}
-	if (!router.begin(bridge, lora, loraAvailable)) {
+	// Label for "send": last 6 hex digits of the BT MAC, so two boards differ.
+	const String sendLabel = "bridge-" + nodeId.substring(nodeId.length() - 6);
+	if (!router.begin(bridge, lora, radio, sendLabel)) {
 		halt("router start failed");
 	}
 }

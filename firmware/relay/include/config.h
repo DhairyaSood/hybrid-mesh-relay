@@ -81,3 +81,9 @@ static_assert(LORA_FREQUENCY_MHZ >= LORA_MODULE_MIN_MHZ && LORA_FREQUENCY_MHZ <=
 #define BRIDGE_DEDUP_CAPACITY 32
 
 #define BRIDGE_TO_PHONE_QUEUE_DEPTH 8
+
+// Radio bring-up in the bridge: each attempt pulses RST, reads the version
+// register over raw SPI, then calls RadioLib begin(). If every attempt fails the
+// bridge keeps running BLE-only and retries in the background.
+#define BRIDGE_RADIO_INIT_ATTEMPTS 3
+#define BRIDGE_RADIO_RETRY_MS 30000
