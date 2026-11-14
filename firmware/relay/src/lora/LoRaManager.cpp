@@ -25,6 +25,21 @@ int16_t LoRaManager::begin() {
 	return state == RADIOLIB_ERR_NONE ? radio.startReceive() : state;
 }
 
+uint8_t LoRaManager::readVersionRegister() {
+	constexpr uint8_t REG_VERSION = 0x42;
+	// begin() may have released SPI on failure; SPI.begin() is a no-op if it is already running.
+	SPI.begin(LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN);
+	pinMode(LORA_CS_PIN, OUTPUT);
+	digitalWrite(LORA_CS_PIN, HIGH);
+	SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+	digitalWrite(LORA_CS_PIN, LOW);
+	SPI.transfer(REG_VERSION & 0x7F);
+	const uint8_t version = SPI.transfer(0x00);
+	digitalWrite(LORA_CS_PIN, HIGH);
+	SPI.endTransaction();
+	return version;
+}
+
 int16_t LoRaManager::transmit(const String& message) {
 	const int16_t state = radio.transmit(message.c_str());
 	const int16_t receiveState = radio.startReceive();

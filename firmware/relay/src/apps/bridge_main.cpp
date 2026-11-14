@@ -101,8 +101,19 @@ void setup() {
 	LORADBG("BOOT", "lora freq=%.1fMHz bw=%.1fkHz sf=%d cr=4/%d sync=0x%02X power=%ddBm preamble=%d",
 			LORA_FREQUENCY_MHZ, LORA_BANDWIDTH_KHZ, LORA_SPREADING_FACTOR, LORA_CODING_RATE,
 			LORA_SYNC_WORD, LORA_TX_POWER_DBM, LORA_PREAMBLE_LENGTH);
+	LORADBG("BOOT", "lora spi sck=%d miso=%d mosi=%d nss=%d rst=%d dio0=%d",
+			LORA_SCK_PIN, LORA_MISO_PIN, LORA_MOSI_PIN, LORA_CS_PIN, LORA_RESET_PIN, LORA_DIO0_PIN);
 	const int16_t loraState = lora.begin();
 	const bool loraAvailable = loraState == RADIOLIB_ERR_NONE;
+	LORADBG("BOOT", "lora init code=%d (%s)", loraState,
+			loraAvailable ? "ok"
+			: loraState == RADIOLIB_ERR_CHIP_NOT_FOUND ? "CHIP_NOT_FOUND: no SPI answer, check wiring/power"
+													   : "failed, see RadioLib TypeDef.h");
+	const uint8_t version = lora.readVersionRegister();
+	LORADBG("BOOT", "lora chip version=0x%02X (%s)", version,
+			version == 0x12 ? "SX1278 answered"
+			: version == 0x00 || version == 0xFF ? "no answer: wiring/power, flash radiodiag"
+												 : "unexpected value: wrong chip or noisy SPI");
 	if (!loraAvailable) {
 		// Keep BLE up so the phone side (and "notify <hex>") can be tested without a radio.
 		LORADBG("BOOT", "LoRa unavailable code=%d, running BLE-only", loraState);
