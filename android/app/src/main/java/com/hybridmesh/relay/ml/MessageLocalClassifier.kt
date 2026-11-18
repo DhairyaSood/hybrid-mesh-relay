@@ -3,23 +3,19 @@ package com.hybridmesh.relay.ml
 import android.content.Context
 
 /**
- * Offline advisory classification for message detail UI. Does not affect delivery.
+ * Offline advisory classification. Does not affect delivery.
+ * Construction parses ~3.6 MB of JSON: never build this on the main thread;
+ * use [MessageClassifier] via [MessageClassifierProvider].
  */
-class MessageLocalClassifier(context: Context) {
-    private val disasterType = TfidfLogRegModel.fromAsset(
-        context,
-        "ml/dc_t2_disaster_type.json",
-        NeyraTextPreprocessor::cleanDisaster,
-    )
-    private val humanitarian = TfidfLogRegModel.fromAsset(
-        context,
-        "ml/dc_t3_humanitarian_help.json",
-        NeyraTextPreprocessor::cleanDisaster,
-    )
-    private val misuseRaw = TfidfLogRegModel.fromAsset(
-        context,
-        "ml/mu_v1_misuse.json",
-        NeyraTextPreprocessor::cleanMisuse,
+class MessageLocalClassifier internal constructor(
+    private val disasterType: TfidfLogRegModel,
+    private val humanitarian: TfidfLogRegModel,
+    private val misuseRaw: TfidfLogRegModel,
+) {
+    constructor(context: Context) : this(
+        TfidfLogRegModel.fromAsset(context, DISASTER_TYPE_ASSET, NeyraTextPreprocessor::cleanDisaster),
+        TfidfLogRegModel.fromAsset(context, HUMANITARIAN_ASSET, NeyraTextPreprocessor::cleanDisaster),
+        TfidfLogRegModel.fromAsset(context, MISUSE_ASSET, NeyraTextPreprocessor::cleanMisuse),
     )
 
     data class AdvisoryResult(
@@ -43,7 +39,21 @@ class MessageLocalClassifier(context: Context) {
             humanitarianTopic = ht,
             misuseLabel = mu,
             misuseRawLabel = rawMu,
-            disclaimer = "Advisory only — not proof of crime or verified disasters.",
+            disclaimer = DISCLAIMER,
+        )
+    }
+
+    companion object {
+        const val DISASTER_TYPE_ASSET = "ml/dc_t2_disaster_type.json"
+        const val HUMANITARIAN_ASSET = "ml/dc_t3_humanitarian_help.json"
+        const val MISUSE_ASSET = "ml/mu_v1_misuse.json"
+        const val DISCLAIMER = "Advisory only — not proof of crime or verified disasters."
+
+        /** Builds the classifier from asset JSON supplied by [readAsset] (used by JVM tests). */
+        fun fromJson(readAsset: (String) -> String): MessageLocalClassifier = MessageLocalClassifier(
+            TfidfLogRegModel.fromJson(readAsset(DISASTER_TYPE_ASSET), NeyraTextPreprocessor::cleanDisaster),
+            TfidfLogRegModel.fromJson(readAsset(HUMANITARIAN_ASSET), NeyraTextPreprocessor::cleanDisaster),
+            TfidfLogRegModel.fromJson(readAsset(MISUSE_ASSET), NeyraTextPreprocessor::cleanMisuse),
         )
     }
 }

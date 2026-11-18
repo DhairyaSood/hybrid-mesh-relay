@@ -29,6 +29,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -63,7 +64,10 @@ import com.hybridmesh.relay.ui.theme.RelaySurface
 import com.hybridmesh.relay.ui.theme.RelayTextMuted
 import com.hybridmesh.relay.ui.theme.TechnicalTextStyle
 import com.hybridmesh.relay.ui.components.NodeIdText
+import com.hybridmesh.relay.ui.components.SosButton
+import com.hybridmesh.relay.ui.components.SosOverlay
 import com.hybridmesh.relay.ui.viewmodel.MessagesViewModel
+import com.hybridmesh.relay.ui.viewmodel.SosViewModel
 
 @Composable
 fun MessagesScreen(
@@ -83,6 +87,8 @@ fun MessagesScreen(
     var showAddDialog by rememberSaveable { mutableStateOf(false) }
     var nodeIdInput by rememberSaveable { mutableStateOf("") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
+    val sosViewModel: SosViewModel = viewModel()
+    var sosRequested by remember { mutableStateOf(false) }
 
     fun copyNodeId(nodeId: String) {
         clipboard.setText(AnnotatedString(nodeId))
@@ -106,6 +112,7 @@ fun MessagesScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                SosButton(onTriggered = { sosRequested = true }, modifier = Modifier.padding(start = 12.dp))
             }
 
             PrimaryTabRow(selectedTabIndex = selectedTab) {
@@ -140,6 +147,8 @@ fun MessagesScreen(
             }
         }
     }
+
+    SosOverlay(sosViewModel, sosRequested) { sosRequested = false }
 
     if (showAddDialog) {
         AlertDialog(

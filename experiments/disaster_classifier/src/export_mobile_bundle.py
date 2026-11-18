@@ -61,7 +61,7 @@ def export_bundle(joblib_path: Path, out_path: Path) -> dict:
         per_class_weights[name] = weights
 
     bundle = {
-        "format": "neyra_tfidf_logreg_v1",
+        "format": "neyra_tfidf_logreg_v2",
         "task": blob.get("task"),
         "label_names": {str(k): v for k, v in sorted(label_names.items())},
         "class_order": [label_names[c] for c in classes],
@@ -70,6 +70,14 @@ def export_bundle(joblib_path: Path, out_path: Path) -> dict:
         },
         "token_weights_by_class": per_class_weights,
         "n_features": len(vocab),
+        # v2: idf for every vocabulary term, so the client can apply the same
+        # L2 normalisation as TfidfVectorizer (weights above already include idf).
+        "idf_by_token": {tok: float(idf_vec[j]) for tok, j in vocab.items()},
+        "vectorizer": {
+            "token_pattern": tfidf_step.token_pattern,
+            "norm": tfidf_step.norm,
+            "sublinear_tf": bool(tfidf_step.sublinear_tf),
+        },
         "ngram_range": list(tfidf_step.ngram_range),
         "preprocess": {
             "lowercase": True,
@@ -79,8 +87,10 @@ def export_bundle(joblib_path: Path, out_path: Path) -> dict:
         },
         "inference_note": (
             "Apply the same clean_text rules as experiments/disaster_classifier/src/preprocess.py, "
-            "build word n-grams, accumulate sublinear TF * idf * coef per class, add intercept, "
-            "argmax. This is humanitarian Help/disaster-type classification only — not misuse."
+            "tokenize with vectorizer.token_pattern, build word n-grams, keep terms in idf_by_token, "
+            "x_j = sublinear TF * idf_j, divide by the L2 norm of x, score = intercept + "
+            "sum_j (sublinear TF_j * token_weight_j) / norm, argmax. "
+            "This is humanitarian Help/disaster-type classification only — not misuse."
         ),
     }
 

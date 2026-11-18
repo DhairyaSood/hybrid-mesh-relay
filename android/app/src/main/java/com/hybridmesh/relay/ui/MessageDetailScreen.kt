@@ -20,6 +20,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.hybridmesh.relay.ml.AdvisoryPresentation
+import com.hybridmesh.relay.ml.MessageClassification
+import com.hybridmesh.relay.ml.MessageClassifierProvider
 import com.hybridmesh.relay.ml.MessageLocalClassifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,8 +94,11 @@ private fun ActualMessageDetail(
         mutableStateOf<MessageLocalClassifier.AdvisoryResult?>(null)
     }
     LaunchedEffect(message.messageId, message.content) {
-        if (message.messageType != MessageType.ATTACHMENT.name) {
-            advisory = MessageLocalClassifier(context.applicationContext).classify(message.content)
+        // Suspends while the shared classifier scores off the main thread; any failure yields no card.
+        // SOS alerts never get an advisory (see AdvisoryPresentation.shouldClassify).
+        if (AdvisoryPresentation.shouldClassify(message.messageType, message.content)) {
+            advisory = (MessageClassifierProvider.get(context)
+                .classify(message.messageId, message.content) as? MessageClassification.Advisory)?.result
         }
     }
 

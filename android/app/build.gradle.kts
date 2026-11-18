@@ -86,6 +86,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.mockk)
+    // Real org.json for JVM tests; android.jar only ships stubs.
+    testImplementation("org.json:json:20240303")
 
     // Instrumentation tests
     androidTestImplementation(platform(libs.androidx.compose.bom))
